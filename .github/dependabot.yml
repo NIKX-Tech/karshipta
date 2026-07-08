@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: dev
+  - package-ecosystem: npm
+    directory: /console
+    schedule:
+      interval: weekly
+    target-branch: dev
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch

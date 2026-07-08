@@ -1,0 +1,39 @@
+# Karshipta demo environment.
+# v0: SITL vehicles only. Gateway and console services are enabled as their
+# Dockerfiles land (gateway M6, console demo milestone).
+#
+# Note for M4: multi-instance PX4 SITL port layout is finalized in that
+# milestone; the px4io/px4-sitl image maps MAVLink SDK ports per instance.
+
+services:
+  sitl-1:
+    image: px4io/px4-sitl:latest
+    ports:
+      - "14540:14540/udp"
+      - "14550:14550/udp"
+
+  sitl-2:
+    image: px4io/px4-sitl:latest
+    ports:
+      - "14541:14540/udp"
+      - "14551:14550/udp"
+
+  sitl-3:
+    image: px4io/px4-sitl:latest
+    ports:
+      - "14542:14540/udp"
+      - "14552:14550/udp"
+
+  # gateway:
+  #   build: ../gateway
+  #   volumes:
+  #     - ./gateway-config.yaml:/etc/karshipta/config.yaml:ro
+  #   ports:
+  #     - "8765:8765"
+  #   depends_on: [sitl-1, sitl-2, sitl-3]
+
+  # console:
+  #   build: ../console
+  #   ports:
+  #     - "5173:5173"
+  #   depends_on: [gateway]

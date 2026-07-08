@@ -1,0 +1,16 @@
+# Generates TypeScript types from the repo protobuf contract.
+# Run with: npm run proto:gen
+# Output in src/lib/gen/ is generated code: never hand-edit, always regenerate.
+version: v2
+inputs:
+  - directory: ../proto
+plugins:
+  - local: protoc-gen-ts_proto
+    out: src/lib/gen
+    opt:
+      # unix epoch ms fits comfortably in a JS number
+      - forceLong=number
+      # discriminated union so message handling can switch on Envelope.payload.$case
+      - oneof=unions
+      - esModuleInterop=true
+      - env=browser

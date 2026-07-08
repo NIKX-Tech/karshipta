@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package karshipta.v1;
+
+// Geographic position. WGS84.
+message GeoPoint {
+  double latitude_deg = 1;
+  double longitude_deg = 2;
+  float altitude_msl_m = 3;   // above mean sea level
+  float altitude_rel_m = 4;   // relative to home/takeoff
+}
+
+// Velocity in NED frame (north-east-down), m/s.
+message VelocityNed {
+  float north_m_s = 1;
+  float east_m_s = 2;
+  float down_m_s = 3;
+}
+
+enum VehicleType {
+  VEHICLE_TYPE_UNSPECIFIED = 0;
+  VEHICLE_TYPE_MULTIROTOR = 1;
+  VEHICLE_TYPE_FIXED_WING = 2;
+  VEHICLE_TYPE_VTOL = 3;
+  VEHICLE_TYPE_HELICOPTER = 4;
+  VEHICLE_TYPE_GROUND = 5;
+}
+
+enum FlightMode {
+  FLIGHT_MODE_UNSPECIFIED = 0;
+  FLIGHT_MODE_MANUAL = 1;
+  FLIGHT_MODE_HOLD = 2;
+  FLIGHT_MODE_MISSION = 3;
+  FLIGHT_MODE_RETURN = 4;
+  FLIGHT_MODE_TAKEOFF = 5;
+  FLIGHT_MODE_LAND = 6;
+  FLIGHT_MODE_OFFBOARD = 7;
+  FLIGHT_MODE_POSITION = 8;
+  FLIGHT_MODE_UNKNOWN = 9;
+}
+
+enum GpsFixType {
+  GPS_FIX_TYPE_UNSPECIFIED = 0;
+  GPS_FIX_TYPE_NO_FIX = 1;
+  GPS_FIX_TYPE_FIX_2D = 2;
+  GPS_FIX_TYPE_FIX_3D = 3;
+  GPS_FIX_TYPE_RTK = 4;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARNING = 2;
+  SEVERITY_CRITICAL = 3;
+  SEVERITY_EMERGENCY = 4;
+}

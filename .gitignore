@@ -1,0 +1,15 @@
+# builds
+build/
+gateway/gen/
+console/node_modules/
+console/.svelte-kit/
+console/build/
+console/src/lib/gen/
+
+# tooling
+.DS_Store
+*.log
+.env
+.env.*
+compile_commands.json
+.cache/

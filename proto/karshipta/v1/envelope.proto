@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package karshipta.v1;
+
+import "karshipta/v1/telemetry.proto";
+import "karshipta/v1/command.proto";
+
+// Every WebSocket frame is exactly one binary-encoded Envelope.
+// Gateway -> console: vehicle_info, vehicle_state, event, command_ack, mission_progress.
+// Console -> gateway: command, mission_upload.
+message Envelope {
+  oneof payload {
+    // downstream (gateway to console)
+    VehicleInfo vehicle_info = 1;
+    VehicleState vehicle_state = 2;
+    Event event = 3;
+    CommandAck command_ack = 4;
+    MissionProgress mission_progress = 5;
+
+    // upstream (console to gateway)
+    Command command = 10;
+    Mission mission_upload = 11;
+  }
+}

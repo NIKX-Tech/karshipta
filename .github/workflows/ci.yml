@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Validate schema
+        run: protoc -I proto --descriptor_set_out=/dev/null proto/karshipta/v1/*.proto
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate protobuf types
+        run: npm run proto:gen
+      - name: Lint
+        run: npm run lint
+      - name: Type check
+        run: npm run check
+      - name: Build
+        run: npm run build
+
+  # gateway job lands with M1 (CMake build, gcc + clang, -Wall -Wextra -Werror)

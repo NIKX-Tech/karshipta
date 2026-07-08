@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package karshipta.v1;
+
+import "karshipta/v1/common.proto";
+
+// Static identity of a vehicle, sent on connect and on change.
+message VehicleInfo {
+  string vehicle_id = 1;       // stable ID assigned by the gateway, e.g. "sitl-1"
+  VehicleType type = 2;
+  string autopilot = 3;        // "PX4", "ArduPilot"
+  string firmware_version = 4;
+  uint32 mavlink_system_id = 5;
+}
+
+message Battery {
+  float voltage_v = 1;
+  float remaining_pct = 2;     // 0.0 to 100.0, -1 if unknown
+}
+
+message Gps {
+  GpsFixType fix_type = 1;
+  uint32 num_satellites = 2;
+  float hdop = 3;
+}
+
+// Live state of one vehicle. Published at 2 to 10 Hz per vehicle.
+message VehicleState {
+  string vehicle_id = 1;
+  uint64 timestamp_ms = 2;     // unix epoch milliseconds, gateway clock
+  GeoPoint position = 3;
+  VelocityNed velocity = 4;
+  float heading_deg = 5;       // 0 to 360, true north
+  Battery battery = 6;
+  Gps gps = 7;
+  FlightMode flight_mode = 8;
+  bool armed = 9;
+  bool in_air = 10;
+  bool health_ok = 11;         // aggregate of MAVSDK health checks
+  bool connected = 12;         // false when gateway lost the MAVLink link
+}
+
+// Human-relevant event from a vehicle or the gateway itself.
+message Event {
+  string vehicle_id = 1;       // empty = gateway-level event
+  uint64 timestamp_ms = 2;
+  Severity severity = 3;
+  string code = 4;             // machine-readable, e.g. "LOW_BATTERY", "LINK_LOST"
+  string message = 5;          // human-readable text
+}
