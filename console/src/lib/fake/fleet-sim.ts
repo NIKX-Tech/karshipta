@@ -1,5 +1,10 @@
 import { FlightMode, GpsFixType, Severity, VehicleType } from '$lib/gen/karshipta/v1/common';
-import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
+import {
+	CommandStatus,
+	MissionAction,
+	type Command,
+	type Mission
+} from '$lib/gen/karshipta/v1/command';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 
@@ -45,7 +50,7 @@ const FLEET_SPECS: VehicleSpec[] = [
 ];
 
 /** what the vehicle does when it reaches its current target */
-type Arrival = 'hold' | 'land';
+type Arrival = 'hold' | 'land' | 'mission-item';
 
 interface Target {
 	northM: number;
@@ -74,6 +79,18 @@ interface SimVehicle {
 	thetaRad: number;
 	patrolling: boolean;
 	target: Target | undefined;
+	missionRun: MissionRun | undefined;
+}
+
+interface MissionRun {
+	mission: Mission;
+	itemIndex: number;
+	/** extra passes still owed after the current one */
+	passesLeft: number;
+	/** command_id of the start_mission command, acked SUCCESS at the very end */
+	startCommandId: string;
+	holdUntilMs: number;
+	paused: boolean;
 }
 
 function initialVehicle(spec: VehicleSpec): SimVehicle {
@@ -93,12 +110,14 @@ function initialVehicle(spec: VehicleSpec): SimVehicle {
 		lowBatteryReported: false,
 		thetaRad: spec.phaseRad,
 		patrolling: true,
-		target: undefined
+		target: undefined,
+		missionRun: undefined
 	};
 }
 
 export class FakeGateway implements FleetTransport {
 	private vehicles = new Map<string, SimVehicle>();
+	private missions = new Map<string, Mission>();
 	private timer: ReturnType<typeof setInterval> | undefined;
 
 	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {}
@@ -129,14 +148,39 @@ export class FakeGateway implements FleetTransport {
 			this.timer = undefined;
 		}
 		this.vehicles.clear();
+		this.missions.clear();
 	}
 
 	send(envelope: Envelope): void {
-		if (envelope.payload?.$case !== 'command') {
-			console.warn('fake gateway: ignoring unsupported upstream payload', envelope.payload?.$case);
+		switch (envelope.payload?.$case) {
+			case 'command':
+				this.handleCommand(envelope.payload.command);
+				break;
+			case 'missionUpload':
+				this.handleMissionUpload(envelope.payload.missionUpload);
+				break;
+			default:
+				console.warn(
+					'fake gateway: ignoring unsupported upstream payload',
+					envelope.payload?.$case
+				);
+		}
+	}
+
+	private handleMissionUpload(mission: Mission): void {
+		const vehicle = this.vehicles.get(mission.vehicleId);
+		if (!vehicle) {
+			console.warn(`fake gateway: mission upload for unknown vehicle ${mission.vehicleId}`);
 			return;
 		}
-		this.handleCommand(envelope.payload.command);
+		this.missions.set(mission.vehicleId, mission);
+		vehicle.missionRun = undefined;
+		this.event(
+			vehicle,
+			Severity.SEVERITY_INFO,
+			'MISSION_UPLOADED',
+			`mission "${mission.name}" uploaded: ${mission.items.length} items, ${mission.repeatCount} repeats`
+		);
 	}
 
 	private handleCommand(command: Command): void {
@@ -168,6 +212,7 @@ export class FakeGateway implements FleetTransport {
 				} else if (vehicle.inAir && !action.disarm.force) {
 					this.reject(command, vehicle, 'vehicle is in air; use force to override');
 				} else {
+					this.interruptMission(vehicle, 'disarm command');
 					if (vehicle.inAir) {
 						this.event(
 							vehicle,
@@ -205,6 +250,7 @@ export class FakeGateway implements FleetTransport {
 				if (!vehicle.inAir) {
 					this.reject(command, vehicle, 'not in air');
 				} else {
+					this.interruptMission(vehicle, 'land command');
 					vehicle.mode = FlightMode.FLIGHT_MODE_LAND;
 					this.setTarget(vehicle, command, vehicle.northM, vehicle.eastM, 0, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'landing');
@@ -214,6 +260,7 @@ export class FakeGateway implements FleetTransport {
 				if (!vehicle.inAir) {
 					this.reject(command, vehicle, 'not in air');
 				} else {
+					this.interruptMission(vehicle, 'RTL command');
 					vehicle.mode = FlightMode.FLIGHT_MODE_RETURN;
 					this.setTarget(vehicle, command, 0, 0, vehicle.altM, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'returning to launch');
@@ -229,6 +276,7 @@ export class FakeGateway implements FleetTransport {
 					this.reject(command, vehicle, 'goto has no target');
 					break;
 				}
+				this.interruptMission(vehicle, 'goto command');
 				const northM = (target.latitudeDeg - HOME_LAT_DEG) * METERS_PER_DEG_LAT;
 				const eastM = (target.longitudeDeg - HOME_LON_DEG) * metersPerDegLon();
 				const altM = target.altitudeRelM > 0 ? target.altitudeRelM : vehicle.altM;
@@ -237,9 +285,49 @@ export class FakeGateway implements FleetTransport {
 				this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'flying to target');
 				break;
 			}
-			case 'startMission':
+			case 'startMission': {
+				const mission = this.missions.get(command.vehicleId);
+				if (!mission) {
+					this.reject(command, vehicle, 'no mission uploaded');
+					break;
+				}
+				if (!vehicle.armed) {
+					this.reject(command, vehicle, 'not armed');
+					break;
+				}
+				if (vehicle.missionRun && vehicle.missionRun.paused) {
+					vehicle.missionRun.paused = false;
+					vehicle.missionRun.startCommandId = command.commandId;
+					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'mission resumed');
+					this.flyToCurrentItem(vehicle);
+					break;
+				}
+				vehicle.missionRun = {
+					mission,
+					itemIndex: 0,
+					passesLeft: mission.repeatCount,
+					startCommandId: command.commandId,
+					holdUntilMs: 0,
+					paused: false
+				};
+				vehicle.inAir = true;
+				this.ack(
+					command,
+					CommandStatus.COMMAND_STATUS_EXECUTING,
+					`mission "${mission.name}" started`
+				);
+				this.flyToCurrentItem(vehicle);
+				break;
+			}
 			case 'pauseMission':
-				this.reject(command, vehicle, 'missions land in a later milestone');
+				if (!vehicle.missionRun || vehicle.missionRun.paused) {
+					this.reject(command, vehicle, 'no mission running');
+				} else {
+					vehicle.missionRun.paused = true;
+					this.stopMotion(vehicle);
+					vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'mission paused');
+				}
 				break;
 			default: {
 				const unhandled: never = action;
@@ -293,9 +381,135 @@ export class FakeGateway implements FleetTransport {
 		vehicle.velocityDown = 0;
 	}
 
+	private interruptMission(vehicle: SimVehicle, reason: string): void {
+		const run = vehicle.missionRun;
+		if (!run) return;
+		vehicle.missionRun = undefined;
+		this.stopMotion(vehicle);
+		this.onEnvelope({
+			payload: {
+				$case: 'commandAck',
+				commandAck: {
+					commandId: run.startCommandId,
+					vehicleId: vehicle.spec.vehicleId,
+					status: CommandStatus.COMMAND_STATUS_REJECTED,
+					message: `mission interrupted: ${reason}`
+				}
+			}
+		});
+		this.event(vehicle, Severity.SEVERITY_WARNING, 'MISSION_INTERRUPTED', reason);
+	}
+
+	private flyToCurrentItem(vehicle: SimVehicle): void {
+		const run = vehicle.missionRun;
+		if (!run || run.paused) return;
+		const item = run.mission.items[run.itemIndex];
+		if (!item || item.action !== MissionAction.MISSION_ACTION_WAYPOINT || !item.position) {
+			// the editor only produces waypoints; skip anything else observably
+			if (item) {
+				this.event(
+					vehicle,
+					Severity.SEVERITY_WARNING,
+					'MISSION_ITEM_SKIPPED',
+					`item ${item.seq} not supported by the simulator`
+				);
+			}
+			this.advanceMission(vehicle);
+			return;
+		}
+		const northM = (item.position.latitudeDeg - HOME_LAT_DEG) * METERS_PER_DEG_LAT;
+		const eastM = (item.position.longitudeDeg - HOME_LON_DEG) * metersPerDegLon();
+		const altM = item.position.altitudeRelM > 0 ? item.position.altitudeRelM : vehicle.altM;
+		vehicle.mode = FlightMode.FLIGHT_MODE_MISSION;
+		this.setTarget(
+			vehicle,
+			{
+				commandId: run.startCommandId,
+				vehicleId: vehicle.spec.vehicleId,
+				timestampMs: Date.now(),
+				action: undefined
+			},
+			northM,
+			eastM,
+			altM,
+			item.speedMS,
+			'mission-item'
+		);
+		// current_seq means the item being executed right now
+		this.emitProgress(vehicle, run, item.seq, false);
+	}
+
+	/** step past the current item: next item, next pass, or finish */
+	private advanceMission(vehicle: SimVehicle): void {
+		const run = vehicle.missionRun;
+		if (!run) return;
+		run.itemIndex += 1;
+		if (run.itemIndex < run.mission.items.length) {
+			this.flyToCurrentItem(vehicle);
+			return;
+		}
+		if (run.passesLeft > 0) {
+			run.passesLeft -= 1;
+			run.itemIndex = 0;
+			this.flyToCurrentItem(vehicle);
+			return;
+		}
+		vehicle.missionRun = undefined;
+		vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+		this.emitProgress(vehicle, run, run.mission.items.length - 1, true);
+		this.event(
+			vehicle,
+			Severity.SEVERITY_INFO,
+			'MISSION_FINISHED',
+			`mission "${run.mission.name}" finished`
+		);
+		this.onEnvelope({
+			payload: {
+				$case: 'commandAck',
+				commandAck: {
+					commandId: run.startCommandId,
+					vehicleId: vehicle.spec.vehicleId,
+					status: CommandStatus.COMMAND_STATUS_SUCCESS,
+					message: 'mission finished'
+				}
+			}
+		});
+	}
+
+	private emitProgress(
+		vehicle: SimVehicle,
+		run: MissionRun,
+		currentSeq: number,
+		finished: boolean
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'missionProgress',
+				missionProgress: {
+					vehicleId: vehicle.spec.vehicleId,
+					missionId: run.mission.missionId,
+					currentSeq,
+					totalItems: run.mission.items.length,
+					finished
+				}
+			}
+		});
+	}
+
 	private tick(): void {
 		const nowMs = Date.now();
 		for (const vehicle of this.vehicles.values()) {
+			const run = vehicle.missionRun;
+			if (
+				run &&
+				!run.paused &&
+				!vehicle.target &&
+				run.holdUntilMs > 0 &&
+				nowMs >= run.holdUntilMs
+			) {
+				run.holdUntilMs = 0;
+				this.advanceMission(vehicle);
+			}
 			this.advance(vehicle);
 			this.drainBattery(vehicle);
 			this.onEnvelope(stateEnvelope(vehicle, nowMs));
@@ -355,6 +569,18 @@ export class FakeGateway implements FleetTransport {
 			action: undefined
 		};
 		switch (target.onArrival) {
+			case 'mission-item': {
+				const run = vehicle.missionRun;
+				if (!run) break;
+				const item = run.mission.items[run.itemIndex];
+				if (item && item.holdTimeS > 0) {
+					// stay here; the tick loop advances when the hold elapses
+					run.holdUntilMs = Date.now() + item.holdTimeS * 1000;
+				} else {
+					this.advanceMission(vehicle);
+				}
+				break;
+			}
 			case 'hold':
 				vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
 				this.ack(pseudoCommand, CommandStatus.COMMAND_STATUS_SUCCESS, 'holding position');

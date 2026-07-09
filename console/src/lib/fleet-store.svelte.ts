@@ -1,11 +1,32 @@
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { Event, VehicleInfo, VehicleState } from '$lib/gen/karshipta/v1/telemetry';
-import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
+import {
+	CommandStatus,
+	MissionAction,
+	type Command,
+	type Mission,
+	type MissionProgress
+} from '$lib/gen/karshipta/v1/command';
 
 export interface Vehicle {
 	info: VehicleInfo | undefined;
 	state: VehicleState | undefined;
 }
+
+export interface DraftWaypoint {
+	latitudeDeg: number;
+	longitudeDeg: number;
+	altitudeRelM: number;
+}
+
+export interface MissionDraft {
+	vehicleId: string;
+	waypoints: DraftWaypoint[];
+	repeatCount: number;
+}
+
+const DEFAULT_WAYPOINT_ALT_M = 30;
+const WAYPOINT_ACCEPTANCE_RADIUS_M = 2;
 
 export interface CommandTracker {
 	commandId: string;
@@ -46,6 +67,11 @@ class FleetStore {
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
 	/** gateway link as the operator should read it; set by the page wiring */
 	link = $state<'live' | 'sim' | 'connecting' | 'down'>('down');
+	/** mission being planned; while set, map clicks add waypoints for its vehicle */
+	missionDraft = $state<MissionDraft | undefined>(undefined);
+	/** last uploaded mission per vehicle, so Start knows what it refers to */
+	uploadedMissions = $state<Record<string, Mission>>({});
+	missionProgress = $state<Record<string, MissionProgress>>({});
 
 	readonly vehicleIds = $derived(Object.keys(this.vehicles).sort());
 	readonly selectedVehicle = $derived(
@@ -63,6 +89,9 @@ class FleetStore {
 	select(vehicleId: string | undefined): void {
 		this.selectedVehicleId = vehicleId;
 		this.cancelGoto();
+		if (this.missionDraft && this.missionDraft.vehicleId !== vehicleId) {
+			this.cancelPlanning();
+		}
 	}
 
 	armGoto(): void {
@@ -79,6 +108,64 @@ class FleetStore {
 		if (!this.gotoArming) return;
 		this.gotoArming = false;
 		this.pendingGoto = { latitudeDeg, longitudeDeg };
+	}
+
+	startPlanning(vehicleId: string): void {
+		this.cancelGoto();
+		this.missionDraft = { vehicleId, waypoints: [], repeatCount: 0 };
+	}
+
+	cancelPlanning(): void {
+		this.missionDraft = undefined;
+	}
+
+	/** called by the map on click while a mission is being planned */
+	addWaypoint(latitudeDeg: number, longitudeDeg: number): void {
+		const draft = this.missionDraft;
+		if (!draft) return;
+		const previous = draft.waypoints.at(-1);
+		draft.waypoints.push({
+			latitudeDeg,
+			longitudeDeg,
+			altitudeRelM: previous?.altitudeRelM ?? DEFAULT_WAYPOINT_ALT_M
+		});
+	}
+
+	removeWaypoint(index: number): void {
+		this.missionDraft?.waypoints.splice(index, 1);
+	}
+
+	/** sends the draft as a Mission envelope and remembers it for Start */
+	uploadMission(): Mission | undefined {
+		const draft = this.missionDraft;
+		if (!draft || draft.waypoints.length === 0) return undefined;
+		const mission: Mission = {
+			missionId: crypto.randomUUID(),
+			vehicleId: draft.vehicleId,
+			name: `mission-${new Date().toISOString().slice(11, 19)}`,
+			repeatCount: draft.repeatCount,
+			items: draft.waypoints.map((waypoint, index) => ({
+				seq: index,
+				action: MissionAction.MISSION_ACTION_WAYPOINT,
+				position: {
+					latitudeDeg: waypoint.latitudeDeg,
+					longitudeDeg: waypoint.longitudeDeg,
+					altitudeMslM: 0,
+					altitudeRelM: waypoint.altitudeRelM
+				},
+				speedMS: 0,
+				holdTimeS: 0,
+				acceptanceRadiusM: WAYPOINT_ACCEPTANCE_RADIUS_M
+			}))
+		};
+		if (!this.sender) {
+			console.error('fleet: cannot upload mission, no transport bound');
+			return undefined;
+		}
+		this.sender({ payload: { $case: 'missionUpload', missionUpload: mission } });
+		this.uploadedMissions[draft.vehicleId] = mission;
+		delete this.missionProgress[draft.vehicleId];
+		return mission;
 	}
 
 	sendCommand(vehicleId: string, action: NonNullable<Command['action']>): string {
@@ -153,8 +240,7 @@ class FleetStore {
 				break;
 			}
 			case 'missionProgress':
-				// handled from the missions milestone onward
-				console.warn('fleet: ignoring not yet supported payload kind missionProgress');
+				this.missionProgress[payload.missionProgress.vehicleId] = payload.missionProgress;
 				break;
 			case 'command':
 			case 'missionUpload':
@@ -174,6 +260,9 @@ class FleetStore {
 		this.events = [];
 		this.commands = {};
 		this.selectedVehicleId = undefined;
+		this.missionDraft = undefined;
+		this.uploadedMissions = {};
+		this.missionProgress = {};
 		this.cancelGoto();
 	}
 

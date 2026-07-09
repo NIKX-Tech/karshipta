@@ -22,8 +22,12 @@
 	let container: HTMLDivElement;
 	let map = $state<maplibregl.Map | undefined>(undefined);
 	let mapError = $state<string | undefined>(undefined);
+	const ROUTE_SOURCE = 'mission-route';
+
 	// imperative per-vehicle marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
+	let waypointMarkers: maplibregl.Marker[] = [];
+	let mapLoaded = $state(false);
 
 	function markerElement(vehicleId: string): {
 		element: HTMLElement;
@@ -92,20 +96,78 @@
 			return;
 		}
 		created.on('click', (event) => {
-			fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+			if (fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId) {
+				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
+			} else {
+				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+			}
+		});
+		created.on('load', () => {
+			created.addSource(ROUTE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
+			});
+			created.addLayer({
+				id: ROUTE_SOURCE,
+				type: 'line',
+				source: ROUTE_SOURCE,
+				paint: { 'line-color': '#3b9eff', 'line-width': 2, 'line-dasharray': [2, 1.5] }
+			});
+			mapLoaded = true;
 		});
 		map = created;
 		return () => {
 			markers = {};
+			waypointMarkers = [];
+			mapLoaded = false;
 			created.remove();
 			map = undefined;
 		};
 	});
 
-	// crosshair cursor while goto targeting is armed
+	// crosshair cursor while goto targeting or waypoint planning is active
 	$effect(() => {
 		if (!map) return;
-		map.getCanvas().style.cursor = fleet.gotoArming ? 'crosshair' : '';
+		const planning =
+			fleet.missionDraft?.vehicleId === fleet.selectedVehicleId && fleet.missionDraft;
+		map.getCanvas().style.cursor = fleet.gotoArming || planning ? 'crosshair' : '';
+	});
+
+	// draw the mission draft of the selected vehicle: dashed blue route + numbered points
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const draft =
+			fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId
+				? fleet.missionDraft
+				: undefined;
+		const coordinates = (draft?.waypoints ?? []).map((waypoint) => [
+			waypoint.longitudeDeg,
+			waypoint.latitudeDeg
+		]);
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ROUTE_SOURCE);
+		source?.setData({
+			type: 'Feature',
+			properties: {},
+			geometry: { type: 'LineString', coordinates }
+		});
+
+		while (waypointMarkers.length > coordinates.length) {
+			waypointMarkers.pop()?.remove();
+		}
+		coordinates.forEach(([lon, lat], index) => {
+			let marker = waypointMarkers[index];
+			if (!marker) {
+				const element = document.createElement('div');
+				element.className =
+					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('aria-label', `Waypoint ${index + 1}`);
+				element.textContent = String(index + 1);
+				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
+				waypointMarkers[index] = marker;
+			}
+			marker.setLngLat([lon, lat]);
+		});
 	});
 
 	// sync one marker per vehicle from the store
