@@ -75,6 +75,7 @@ message Mission {
   string vehicle_id = 2;
   string name = 3;
   repeated MissionItem items = 4;
+  uint32 repeat_count = 5;     // extra passes after the first: 0 = fly once, N = fly N+1 times total
 }
 
 message MissionProgress {
