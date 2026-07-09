@@ -28,32 +28,9 @@ endif()
 find_package(MAVSDK REQUIRED)
 find_package(spdlog REQUIRED)
 
-add_executable(karshipta_gateway
-  src/main.cpp
-  src/vehicle/vehicle.cpp
-  src/vehicle/vehicle_manager.cpp
-  src/transport/websocket_transport.cpp
-)
-
-target_include_directories(karshipta_gateway PRIVATE
-  src
-)
-
-target_link_libraries(karshipta_gateway PRIVATE
-  MAVSDK::mavsdk
-  spdlog::spdlog
-)
-
-# On Windows, MAVSDK ships as a DLL; copy runtime dependencies next to the
-# executable so it can find them without adding to PATH manually.
-if(WIN32)
-  add_custom_command(TARGET karshipta_gateway POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      $<TARGET_RUNTIME_DLLS:karshipta_gateway>
-      $<TARGET_FILE_DIR:karshipta_gateway>
-    COMMAND_EXPAND_LISTS
-  )
-endif()
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/vehicle)
+add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
 
@@ -66,14 +43,12 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/transport/websocket_transport_test.cpp
   )
 
-  target_include_directories(karshipta_gateway_tests PRIVATE
-    src
-  )
-
   target_link_libraries(karshipta_gateway_tests PRIVATE
     GTest::gtest_main
     MAVSDK::mavsdk
     spdlog::spdlog
+    vehicle
+    transport
   )
 
   include(GoogleTest)
