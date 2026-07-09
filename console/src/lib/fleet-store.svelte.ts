@@ -44,6 +44,8 @@ class FleetStore {
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
+	/** gateway link as the operator should read it; set by the page wiring */
+	link = $state<'live' | 'sim' | 'connecting' | 'down'>('down');
 
 	readonly vehicleIds = $derived(Object.keys(this.vehicles).sort());
 	readonly selectedVehicle = $derived(

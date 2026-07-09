@@ -35,14 +35,14 @@
 			toggleSelect();
 		}
 	}}
-	class="cursor-pointer rounded border p-3 {selected
+	class="cursor-pointer rounded border px-3 py-2 {selected
 		? 'border-selected bg-panel'
 		: 'border-edge bg-panel/90 hover:border-fg-muted'}"
 >
-	<header class="flex items-center gap-2">
+	<div class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
 		{#if state?.armed}
-			<span class="text-armed text-[10px] font-medium tracking-widest">ARMED</span>
+			<span class="text-armed text-[9px] font-medium tracking-widest">ARMED</span>
 		{/if}
 		<span
 			class="ml-auto inline-block h-2 w-2 rounded-full {connected
@@ -52,21 +52,16 @@
 			aria-label={connected ? 'Link live' : 'Link lost'}
 			title={connected ? 'Link live' : 'Link lost'}
 		></span>
-	</header>
+	</div>
 	{#if state}
-		<dl class="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs">
-			<dt class="text-fg-muted">Mode</dt>
-			<dd class="col-span-2 font-medium">{modeLabel}</dd>
-			<dt class="text-fg-muted">Alt rel</dt>
-			<dd class="col-span-2 font-mono tabular-nums">
-				{state.position?.altitudeRelM.toFixed(1) ?? '?'} m
-			</dd>
-			<dt class="text-fg-muted">Battery</dt>
-			<dd class="col-span-2 font-mono tabular-nums">
-				{batteryPct === undefined || batteryPct < 0 ? 'unknown' : `${batteryPct.toFixed(0)}%`}
-			</dd>
-		</dl>
+		<p class="text-fg-muted mt-1 truncate font-mono text-[10px] tabular-nums">
+			{modeLabel}
+			&middot; {state.position?.altitudeRelM.toFixed(0) ?? '?'} m &middot; {batteryPct ===
+				undefined || batteryPct < 0
+				? '?'
+				: `${batteryPct.toFixed(0)}%`}
+		</p>
 	{:else}
-		<p class="text-fg-muted mt-2 text-xs">Waiting for telemetry</p>
+		<p class="text-fg-muted mt-1 text-[10px]">Waiting for telemetry</p>
 	{/if}
 </div>
