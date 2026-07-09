@@ -32,8 +32,11 @@ For console logs, pageerrors, and timed multi-shot captures, use playwright-core
 
 - Three vehicle cards (sitl-1/2/3) with live mode, altitude, battery; amber pulse dot when connected.
 - Three amber markers orbiting near map center over the dark Carto basemap; positions and arrow rotations change between two screenshots ~6 s apart.
+- Selection: clicking a card or marker selects (blue border/ring) and shows the COMMANDS panel.
+- Commands (fake fleet answers all of them): Land/RTL/force-disarm require a confirm dialog (Escape cancels without sending); trackers show EXECUTING (amber pulse) then SUCCESS (green) or REJECTED (red, with reason); Arm/Takeoff are disabled while armed/airborne; land then arm then takeoff works; Goto arms crosshair targeting, map click opens a confirm with coordinates; RTL during goto preempts it and the goto tracker settles REJECTED "superseded".
+- Events feed (bottom right): landing/rejection events with severity dots and mono timestamps.
 - Without WebGL the map shows an inline "Map unavailable" alert but cards keep updating.
-- With `PUBLIC_GATEWAY_WS_URL` set and no gateway: no fake vehicles, `transport: websocket error` retries with growing backoff, no crash.
+- With `PUBLIC_GATEWAY_WS_URL` set and no gateway: no fake vehicles, `transport: websocket error` retries with growing backoff, no crash; sent commands settle TIMEOUT after 10 s.
 
 ## Gotchas
 

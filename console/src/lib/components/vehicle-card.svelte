@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { flightModeToJSON } from '$lib/gen/karshipta/v1/common';
-	import type { Vehicle } from '$lib/fleet-store.svelte';
+	import { fleet, type Vehicle } from '$lib/fleet-store.svelte';
 
 	interface Props {
 		vehicleId: string;
@@ -17,13 +17,32 @@
 	);
 	const batteryPct = $derived(state?.battery?.remainingPct);
 	const connected = $derived(state?.connected ?? false);
+	const selected = $derived(fleet.selectedVehicleId === vehicleId);
+
+	function toggleSelect() {
+		fleet.select(selected ? undefined : vehicleId);
+	}
 </script>
 
-<article class="border-edge bg-panel/90 rounded border p-3">
-	<header class="flex items-center gap-2">
+<div
+	role="button"
+	tabindex="0"
+	aria-pressed={selected}
+	onclick={toggleSelect}
+	onkeydown={(event) => {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			toggleSelect();
+		}
+	}}
+	class="cursor-pointer rounded border px-3 py-2 {selected
+		? 'border-selected bg-panel'
+		: 'border-edge bg-panel/90 hover:border-fg-muted'}"
+>
+	<div class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
 		{#if state?.armed}
-			<span class="text-armed text-[10px] font-medium tracking-widest">ARMED</span>
+			<span class="text-armed text-[9px] font-medium tracking-widest">ARMED</span>
 		{/if}
 		<span
 			class="ml-auto inline-block h-2 w-2 rounded-full {connected
@@ -33,21 +52,16 @@
 			aria-label={connected ? 'Link live' : 'Link lost'}
 			title={connected ? 'Link live' : 'Link lost'}
 		></span>
-	</header>
+	</div>
 	{#if state}
-		<dl class="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs">
-			<dt class="text-fg-muted">Mode</dt>
-			<dd class="col-span-2 font-medium">{modeLabel}</dd>
-			<dt class="text-fg-muted">Alt rel</dt>
-			<dd class="col-span-2 font-mono tabular-nums">
-				{state.position?.altitudeRelM.toFixed(1) ?? '?'} m
-			</dd>
-			<dt class="text-fg-muted">Battery</dt>
-			<dd class="col-span-2 font-mono tabular-nums">
-				{batteryPct === undefined || batteryPct < 0 ? 'unknown' : `${batteryPct.toFixed(0)}%`}
-			</dd>
-		</dl>
+		<p class="text-fg-muted mt-1 truncate font-mono text-[10px] tabular-nums">
+			{modeLabel}
+			&middot; {state.position?.altitudeRelM.toFixed(0) ?? '?'} m &middot; {batteryPct ===
+				undefined || batteryPct < 0
+				? '?'
+				: `${batteryPct.toFixed(0)}%`}
+		</p>
 	{:else}
-		<p class="text-fg-muted mt-2 text-xs">Waiting for telemetry</p>
+		<p class="text-fg-muted mt-1 text-[10px]">Waiting for telemetry</p>
 	{/if}
-</article>
+</div>

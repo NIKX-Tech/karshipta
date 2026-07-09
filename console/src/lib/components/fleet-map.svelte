@@ -15,6 +15,8 @@
 	interface MarkerHandle {
 		marker: maplibregl.Marker;
 		arrow: SVGSVGElement;
+		arrowPath: SVGPathElement;
+		label: HTMLElement;
 	}
 
 	let container: HTMLDivElement;
@@ -23,11 +25,17 @@
 	// imperative per-vehicle marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
 
-	function markerElement(vehicleId: string): { element: HTMLElement; arrow: SVGSVGElement } {
+	function markerElement(vehicleId: string): {
+		element: HTMLElement;
+		arrow: SVGSVGElement;
+		arrowPath: SVGPathElement;
+		label: HTMLElement;
+	} {
 		const element = document.createElement('div');
-		element.setAttribute('role', 'img');
+		element.setAttribute('role', 'button');
+		element.setAttribute('tabindex', '0');
 		element.setAttribute('aria-label', `Vehicle ${vehicleId}`);
-		element.className = 'relative';
+		element.className = 'relative cursor-pointer';
 		// arrow rotates with heading; the label span below stays upright
 		element.innerHTML = `
 			<svg width="30" height="30" viewBox="0 0 34 34">
@@ -35,10 +43,24 @@
 			</svg>
 			<span class="border-edge bg-panel/90 text-fg absolute top-full left-1/2 -translate-x-1/2 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap">${vehicleId}</span>`;
 		const arrow = element.querySelector('svg');
-		if (!(arrow instanceof SVGSVGElement)) {
-			throw new Error('fleet-map: marker template is missing its arrow svg');
+		const arrowPath = element.querySelector('path');
+		const label = element.querySelector('span');
+		if (!(arrow instanceof SVGSVGElement) || !(arrowPath instanceof SVGPathElement) || !label) {
+			throw new Error('fleet-map: marker template is missing its parts');
 		}
-		return { element, arrow };
+		const toggleSelect = (event: Event) => {
+			// keep marker clicks from also registering as map clicks (goto targeting)
+			event.stopPropagation();
+			fleet.select(fleet.selectedVehicleId === vehicleId ? undefined : vehicleId);
+		};
+		element.addEventListener('click', toggleSelect);
+		element.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault();
+				toggleSelect(event);
+			}
+		});
+		return { element, arrow, arrowPath, label };
 	}
 
 	$effect(() => {
@@ -69,12 +91,21 @@
 			mapError = error instanceof Error ? error.message : String(error);
 			return;
 		}
+		created.on('click', (event) => {
+			fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+		});
 		map = created;
 		return () => {
 			markers = {};
 			created.remove();
 			map = undefined;
 		};
+	});
+
+	// crosshair cursor while goto targeting is armed
+	$effect(() => {
+		if (!map) return;
+		map.getCanvas().style.cursor = fleet.gotoArming ? 'crosshair' : '';
 	});
 
 	// sync one marker per vehicle from the store
@@ -85,17 +116,22 @@
 			if (!state?.position) continue;
 			let handle = markers[vehicleId];
 			if (!handle) {
-				const { element, arrow } = markerElement(vehicleId);
+				const { element, arrow, arrowPath, label } = markerElement(vehicleId);
 				// setLngLat must precede addTo: adding projects the position
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg])
 					.addTo(map);
-				handle = { marker, arrow };
+				handle = { marker, arrow, arrowPath, label };
 				markers[vehicleId] = handle;
 			}
 			handle.marker.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg]);
 			// heading is relative to true north; map bearing is fixed at 0 for now
 			handle.arrow.style.rotate = `${state.headingDeg}deg`;
+			const selected = fleet.selectedVehicleId === vehicleId;
+			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
+			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
+			handle.label.classList.toggle('border-selected', selected);
+			handle.label.classList.toggle('border-edge', !selected);
 		}
 		for (const vehicleId of Object.keys(markers)) {
 			if (!fleet.vehicleIds.includes(vehicleId)) {
