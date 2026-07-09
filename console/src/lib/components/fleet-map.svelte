@@ -28,6 +28,8 @@
 	let markers: Record<string, MarkerHandle> = {};
 	let waypointMarkers: maplibregl.Marker[] = [];
 	let mapLoaded = $state(false);
+	// camera bearing; heading arrows must compensate when the map is rotated
+	let bearingDeg = $state(0);
 
 	function markerElement(vehicleId: string): {
 		element: HTMLElement;
@@ -101,6 +103,9 @@
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
 			}
+		});
+		created.on('rotate', () => {
+			bearingDeg = created.getBearing();
 		});
 		created.on('load', () => {
 			created.addSource(ROUTE_SOURCE, {
@@ -187,8 +192,10 @@
 				markers[vehicleId] = handle;
 			}
 			handle.marker.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg]);
-			// heading is relative to true north; map bearing is fixed at 0 for now
-			handle.arrow.style.rotate = `${state.headingDeg}deg`;
+			// heading is relative to true north; subtract the camera bearing so
+			// the arrow stays correct when the operator rotates the map
+			handle.arrow.style.rotate = `${state.headingDeg - bearingDeg}deg`;
+			handle.label.textContent = `${vehicleId} \u00b7 ${state.position.altitudeRelM.toFixed(0)} m`;
 			const selected = fleet.selectedVehicleId === vehicleId;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
