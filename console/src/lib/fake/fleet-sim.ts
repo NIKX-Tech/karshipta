@@ -1,10 +1,14 @@
-import { FlightMode, GpsFixType, VehicleType } from '$lib/gen/karshipta/v1/common';
+import { FlightMode, GpsFixType, Severity, VehicleType } from '$lib/gen/karshipta/v1/common';
+import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
+import type { FleetTransport } from '$lib/transport';
 
 /**
- * Emits Envelopes for three simulated multirotors circling the PX4 SITL
- * default home position, through the same sink the real transport feeds.
- * Dev stand-in until the gateway telemetry milestone lands.
+ * Dev stand-in for the real gateway until its milestones land. Implements
+ * FleetTransport: publishes telemetry Envelopes, accepts Command envelopes,
+ * answers every one with CommandAcks, and emits Events, through the exact
+ * same seam the WebSocket transport uses. Three simulated multirotors start
+ * on patrol around the PX4 SITL default home.
  */
 
 // PX4 SITL default home (Zurich Irchel), so the fake fleet and the real
@@ -14,88 +18,448 @@ const HOME_LON_DEG = 8.545594;
 const HOME_ALT_MSL_M = 488;
 
 const TICK_HZ = 5;
-const BATTERY_DRAIN_PCT_PER_S = 0.05;
+const TICK_S = 1 / TICK_HZ;
+const BATTERY_DRAIN_AIR_PCT_PER_S = 0.05;
+const BATTERY_DRAIN_GROUND_PCT_PER_S = 0.005;
+const LOW_BATTERY_PCT = 20;
 const METERS_PER_DEG_LAT = 111_320;
-
-interface FakeVehicle {
-	vehicleId: string;
-	radiusM: number;
-	periodS: number;
-	altitudeRelM: number;
-	phaseRad: number;
-}
-
-const FAKE_FLEET: FakeVehicle[] = [
-	{ vehicleId: 'sitl-1', radiusM: 60, periodS: 45, altitudeRelM: 20, phaseRad: 0 },
-	{ vehicleId: 'sitl-2', radiusM: 100, periodS: 70, altitudeRelM: 35, phaseRad: (2 * Math.PI) / 3 },
-	{ vehicleId: 'sitl-3', radiusM: 140, periodS: 95, altitudeRelM: 50, phaseRad: (4 * Math.PI) / 3 }
-];
+const CRUISE_SPEED_M_S = 8;
+const CLIMB_RATE_M_S = 2.5;
+const ARRIVAL_RADIUS_M = 2;
+const DEFAULT_TAKEOFF_ALT_M = 20;
 
 export const FAKE_FLEET_CENTER = { lat: HOME_LAT_DEG, lon: HOME_LON_DEG };
 
-function infoEnvelope(vehicle: FakeVehicle): Envelope {
+interface VehicleSpec {
+	vehicleId: string;
+	radiusM: number;
+	periodS: number;
+	cruiseAltM: number;
+	phaseRad: number;
+}
+
+const FLEET_SPECS: VehicleSpec[] = [
+	{ vehicleId: 'sitl-1', radiusM: 60, periodS: 45, cruiseAltM: 20, phaseRad: 0 },
+	{ vehicleId: 'sitl-2', radiusM: 100, periodS: 70, cruiseAltM: 35, phaseRad: (2 * Math.PI) / 3 },
+	{ vehicleId: 'sitl-3', radiusM: 140, periodS: 95, cruiseAltM: 50, phaseRad: (4 * Math.PI) / 3 }
+];
+
+/** what the vehicle does when it reaches its current target */
+type Arrival = 'hold' | 'land';
+
+interface Target {
+	northM: number;
+	eastM: number;
+	altM: number;
+	speedMS: number;
+	onArrival: Arrival;
+	commandId: string;
+	commandVehicleId: string;
+}
+
+interface SimVehicle {
+	spec: VehicleSpec;
+	armed: boolean;
+	inAir: boolean;
+	mode: FlightMode;
+	northM: number;
+	eastM: number;
+	altM: number;
+	headingDeg: number;
+	velocityNorth: number;
+	velocityEast: number;
+	velocityDown: number;
+	batteryPct: number;
+	lowBatteryReported: boolean;
+	thetaRad: number;
+	patrolling: boolean;
+	target: Target | undefined;
+}
+
+function initialVehicle(spec: VehicleSpec): SimVehicle {
 	return {
-		payload: {
-			$case: 'vehicleInfo',
-			vehicleInfo: {
-				vehicleId: vehicle.vehicleId,
-				type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
-				autopilot: 'PX4',
-				firmwareVersion: 'sim-fake',
-				mavlinkSystemId: 0
-			}
-		}
+		spec,
+		armed: true,
+		inAir: true,
+		mode: FlightMode.FLIGHT_MODE_MISSION,
+		northM: spec.radiusM * Math.cos(spec.phaseRad),
+		eastM: spec.radiusM * Math.sin(spec.phaseRad),
+		altM: spec.cruiseAltM,
+		headingDeg: 0,
+		velocityNorth: 0,
+		velocityEast: 0,
+		velocityDown: 0,
+		batteryPct: 100,
+		lowBatteryReported: false,
+		thetaRad: spec.phaseRad,
+		patrolling: true,
+		target: undefined
 	};
 }
 
-function stateEnvelope(vehicle: FakeVehicle, elapsedS: number, nowMs: number): Envelope {
-	const angularVel = (2 * Math.PI) / vehicle.periodS;
-	const theta = vehicle.phaseRad + angularVel * elapsedS;
-	const northM = vehicle.radiusM * Math.cos(theta);
-	const eastM = vehicle.radiusM * Math.sin(theta);
-	const northVel = -vehicle.radiusM * angularVel * Math.sin(theta);
-	const eastVel = vehicle.radiusM * angularVel * Math.cos(theta);
-	const headingDeg = ((Math.atan2(eastVel, northVel) * 180) / Math.PI + 360) % 360;
-	const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((HOME_LAT_DEG * Math.PI) / 180);
+export class FakeGateway implements FleetTransport {
+	private vehicles = new Map<string, SimVehicle>();
+	private timer: ReturnType<typeof setInterval> | undefined;
 
+	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {}
+
+	start(): void {
+		if (this.timer !== undefined) return;
+		for (const spec of FLEET_SPECS) {
+			this.vehicles.set(spec.vehicleId, initialVehicle(spec));
+			this.onEnvelope({
+				payload: {
+					$case: 'vehicleInfo',
+					vehicleInfo: {
+						vehicleId: spec.vehicleId,
+						type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
+						autopilot: 'PX4',
+						firmwareVersion: 'sim-fake',
+						mavlinkSystemId: 0
+					}
+				}
+			});
+		}
+		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
+	}
+
+	stop(): void {
+		if (this.timer !== undefined) {
+			clearInterval(this.timer);
+			this.timer = undefined;
+		}
+		this.vehicles.clear();
+	}
+
+	send(envelope: Envelope): void {
+		if (envelope.payload?.$case !== 'command') {
+			console.warn('fake gateway: ignoring unsupported upstream payload', envelope.payload?.$case);
+			return;
+		}
+		this.handleCommand(envelope.payload.command);
+	}
+
+	private handleCommand(command: Command): void {
+		const vehicle = this.vehicles.get(command.vehicleId);
+		if (!vehicle) {
+			this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, 'unknown vehicle');
+			return;
+		}
+		const action = command.action;
+		if (!action) {
+			this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, 'command has no action');
+			return;
+		}
+		switch (action.$case) {
+			case 'arm':
+				if (vehicle.armed) {
+					this.reject(command, vehicle, 'already armed');
+				} else if (vehicle.batteryPct < LOW_BATTERY_PCT) {
+					this.reject(command, vehicle, 'battery too low to arm');
+				} else {
+					vehicle.armed = true;
+					vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'armed');
+				}
+				break;
+			case 'disarm':
+				if (!vehicle.armed) {
+					this.reject(command, vehicle, 'not armed');
+				} else if (vehicle.inAir && !action.disarm.force) {
+					this.reject(command, vehicle, 'vehicle is in air; use force to override');
+				} else {
+					if (vehicle.inAir) {
+						this.event(
+							vehicle,
+							Severity.SEVERITY_CRITICAL,
+							'FORCED_DISARM',
+							'forced disarm while in air'
+						);
+						vehicle.inAir = false;
+						vehicle.altM = 0;
+					}
+					this.stopMotion(vehicle);
+					vehicle.armed = false;
+					vehicle.mode = FlightMode.FLIGHT_MODE_MANUAL;
+					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'disarmed');
+				}
+				break;
+			case 'takeoff': {
+				if (!vehicle.armed) {
+					this.reject(command, vehicle, 'not armed');
+					break;
+				}
+				if (vehicle.inAir) {
+					this.reject(command, vehicle, 'already in air');
+					break;
+				}
+				const altM =
+					action.takeoff.altitudeRelM > 0 ? action.takeoff.altitudeRelM : DEFAULT_TAKEOFF_ALT_M;
+				vehicle.inAir = true;
+				vehicle.mode = FlightMode.FLIGHT_MODE_TAKEOFF;
+				this.setTarget(vehicle, command, vehicle.northM, vehicle.eastM, altM, 0, 'hold');
+				this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, `taking off to ${altM} m`);
+				break;
+			}
+			case 'land':
+				if (!vehicle.inAir) {
+					this.reject(command, vehicle, 'not in air');
+				} else {
+					vehicle.mode = FlightMode.FLIGHT_MODE_LAND;
+					this.setTarget(vehicle, command, vehicle.northM, vehicle.eastM, 0, 0, 'land');
+					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'landing');
+				}
+				break;
+			case 'rtl':
+				if (!vehicle.inAir) {
+					this.reject(command, vehicle, 'not in air');
+				} else {
+					vehicle.mode = FlightMode.FLIGHT_MODE_RETURN;
+					this.setTarget(vehicle, command, 0, 0, vehicle.altM, 0, 'land');
+					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'returning to launch');
+				}
+				break;
+			case 'goto': {
+				if (!vehicle.inAir) {
+					this.reject(command, vehicle, 'not in air');
+					break;
+				}
+				const target = action.goto.target;
+				if (!target) {
+					this.reject(command, vehicle, 'goto has no target');
+					break;
+				}
+				const northM = (target.latitudeDeg - HOME_LAT_DEG) * METERS_PER_DEG_LAT;
+				const eastM = (target.longitudeDeg - HOME_LON_DEG) * metersPerDegLon();
+				const altM = target.altitudeRelM > 0 ? target.altitudeRelM : vehicle.altM;
+				vehicle.mode = FlightMode.FLIGHT_MODE_OFFBOARD;
+				this.setTarget(vehicle, command, northM, eastM, altM, action.goto.speedMS, 'hold');
+				this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'flying to target');
+				break;
+			}
+			case 'startMission':
+			case 'pauseMission':
+				this.reject(command, vehicle, 'missions land in a later milestone');
+				break;
+			default: {
+				const unhandled: never = action;
+				this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, `unsupported action ${unhandled}`);
+			}
+		}
+	}
+
+	private setTarget(
+		vehicle: SimVehicle,
+		command: Command,
+		northM: number,
+		eastM: number,
+		altM: number,
+		speedMS: number,
+		onArrival: Arrival
+	): void {
+		// a newer maneuver preempts the current one; its command still gets a
+		// terminal ack so the console tracker never dangles
+		const previous = vehicle.target;
+		if (previous && previous.commandId !== command.commandId) {
+			this.onEnvelope({
+				payload: {
+					$case: 'commandAck',
+					commandAck: {
+						commandId: previous.commandId,
+						vehicleId: previous.commandVehicleId,
+						status: CommandStatus.COMMAND_STATUS_REJECTED,
+						message: 'superseded by a newer command'
+					}
+				}
+			});
+		}
+		vehicle.patrolling = false;
+		vehicle.target = {
+			northM,
+			eastM,
+			altM,
+			speedMS: speedMS > 0 ? speedMS : CRUISE_SPEED_M_S,
+			onArrival,
+			commandId: command.commandId,
+			commandVehicleId: command.vehicleId
+		};
+	}
+
+	private stopMotion(vehicle: SimVehicle): void {
+		vehicle.patrolling = false;
+		vehicle.target = undefined;
+		vehicle.velocityNorth = 0;
+		vehicle.velocityEast = 0;
+		vehicle.velocityDown = 0;
+	}
+
+	private tick(): void {
+		const nowMs = Date.now();
+		for (const vehicle of this.vehicles.values()) {
+			this.advance(vehicle);
+			this.drainBattery(vehicle);
+			this.onEnvelope(stateEnvelope(vehicle, nowMs));
+		}
+	}
+
+	private advance(vehicle: SimVehicle): void {
+		if (vehicle.patrolling) {
+			const angularVel = (2 * Math.PI) / vehicle.spec.periodS;
+			vehicle.thetaRad += angularVel * TICK_S;
+			vehicle.northM = vehicle.spec.radiusM * Math.cos(vehicle.thetaRad);
+			vehicle.eastM = vehicle.spec.radiusM * Math.sin(vehicle.thetaRad);
+			vehicle.velocityNorth = -vehicle.spec.radiusM * angularVel * Math.sin(vehicle.thetaRad);
+			vehicle.velocityEast = vehicle.spec.radiusM * angularVel * Math.cos(vehicle.thetaRad);
+			vehicle.velocityDown = 0;
+			vehicle.headingDeg = headingFrom(vehicle.velocityNorth, vehicle.velocityEast);
+			return;
+		}
+		const target = vehicle.target;
+		if (!target) return;
+
+		const dNorth = target.northM - vehicle.northM;
+		const dEast = target.eastM - vehicle.eastM;
+		const dAlt = target.altM - vehicle.altM;
+		const horizontal = Math.hypot(dNorth, dEast);
+
+		if (horizontal < ARRIVAL_RADIUS_M && Math.abs(dAlt) < 0.5) {
+			vehicle.northM = target.northM;
+			vehicle.eastM = target.eastM;
+			vehicle.altM = target.altM;
+			this.stopMotion(vehicle);
+			this.arrive(vehicle, target);
+			return;
+		}
+
+		const stepH = Math.min(target.speedMS * TICK_S, horizontal);
+		if (horizontal > 0) {
+			vehicle.northM += (dNorth / horizontal) * stepH;
+			vehicle.eastM += (dEast / horizontal) * stepH;
+			vehicle.velocityNorth = (dNorth / horizontal) * target.speedMS;
+			vehicle.velocityEast = (dEast / horizontal) * target.speedMS;
+			vehicle.headingDeg = headingFrom(dNorth, dEast);
+		} else {
+			vehicle.velocityNorth = 0;
+			vehicle.velocityEast = 0;
+		}
+		const stepV = Math.min(CLIMB_RATE_M_S * TICK_S, Math.abs(dAlt));
+		vehicle.altM += Math.sign(dAlt) * stepV;
+		vehicle.velocityDown = -Math.sign(dAlt) * (stepV > 0 ? CLIMB_RATE_M_S : 0);
+	}
+
+	private arrive(vehicle: SimVehicle, target: Target): void {
+		const pseudoCommand: Command = {
+			commandId: target.commandId,
+			vehicleId: target.commandVehicleId,
+			timestampMs: Date.now(),
+			action: undefined
+		};
+		switch (target.onArrival) {
+			case 'hold':
+				vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+				this.ack(pseudoCommand, CommandStatus.COMMAND_STATUS_SUCCESS, 'holding position');
+				break;
+			case 'land':
+				if (vehicle.altM <= 0.01) {
+					vehicle.altM = 0;
+					vehicle.inAir = false;
+					vehicle.armed = false;
+					vehicle.mode = FlightMode.FLIGHT_MODE_MANUAL;
+					this.event(vehicle, Severity.SEVERITY_INFO, 'LANDED', 'landed and disarmed');
+					this.ack(pseudoCommand, CommandStatus.COMMAND_STATUS_SUCCESS, 'landed');
+				} else {
+					// reached the horizontal point; now descend in place
+					vehicle.mode = FlightMode.FLIGHT_MODE_LAND;
+					this.setTarget(vehicle, pseudoCommand, vehicle.northM, vehicle.eastM, 0, 0, 'land');
+				}
+				break;
+		}
+	}
+
+	private drainBattery(vehicle: SimVehicle): void {
+		const drain = vehicle.inAir ? BATTERY_DRAIN_AIR_PCT_PER_S : BATTERY_DRAIN_GROUND_PCT_PER_S;
+		vehicle.batteryPct = Math.max(0, vehicle.batteryPct - drain * TICK_S);
+		if (!vehicle.lowBatteryReported && vehicle.batteryPct < LOW_BATTERY_PCT) {
+			vehicle.lowBatteryReported = true;
+			this.event(
+				vehicle,
+				Severity.SEVERITY_WARNING,
+				'LOW_BATTERY',
+				`battery at ${vehicle.batteryPct.toFixed(0)}%`
+			);
+		}
+	}
+
+	private reject(command: Command, vehicle: SimVehicle, reason: string): void {
+		this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, reason);
+		this.event(vehicle, Severity.SEVERITY_WARNING, 'COMMAND_REJECTED', reason);
+	}
+
+	private ack(command: Command, status: CommandStatus, message: string): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'commandAck',
+				commandAck: {
+					commandId: command.commandId,
+					vehicleId: command.vehicleId,
+					status,
+					message
+				}
+			}
+		});
+	}
+
+	private event(vehicle: SimVehicle, severity: Severity, code: string, message: string): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'event',
+				event: {
+					vehicleId: vehicle.spec.vehicleId,
+					timestampMs: Date.now(),
+					severity,
+					code,
+					message
+				}
+			}
+		});
+	}
+}
+
+function metersPerDegLon(): number {
+	return METERS_PER_DEG_LAT * Math.cos((HOME_LAT_DEG * Math.PI) / 180);
+}
+
+function headingFrom(north: number, east: number): number {
+	return ((Math.atan2(east, north) * 180) / Math.PI + 360) % 360;
+}
+
+function stateEnvelope(vehicle: SimVehicle, nowMs: number): Envelope {
 	return {
 		payload: {
 			$case: 'vehicleState',
 			vehicleState: {
-				vehicleId: vehicle.vehicleId,
+				vehicleId: vehicle.spec.vehicleId,
 				timestampMs: nowMs,
 				position: {
-					latitudeDeg: HOME_LAT_DEG + northM / METERS_PER_DEG_LAT,
-					longitudeDeg: HOME_LON_DEG + eastM / metersPerDegLon,
-					altitudeMslM: HOME_ALT_MSL_M + vehicle.altitudeRelM,
-					altitudeRelM: vehicle.altitudeRelM
+					latitudeDeg: HOME_LAT_DEG + vehicle.northM / METERS_PER_DEG_LAT,
+					longitudeDeg: HOME_LON_DEG + vehicle.eastM / metersPerDegLon(),
+					altitudeMslM: HOME_ALT_MSL_M + vehicle.altM,
+					altitudeRelM: vehicle.altM
 				},
-				velocity: { northMS: northVel, eastMS: eastVel, downMS: 0 },
-				headingDeg,
-				battery: {
-					voltageV: 15.8,
-					remainingPct: Math.max(0, 100 - elapsedS * BATTERY_DRAIN_PCT_PER_S)
+				velocity: {
+					northMS: vehicle.velocityNorth,
+					eastMS: vehicle.velocityEast,
+					downMS: vehicle.velocityDown
 				},
+				headingDeg: vehicle.headingDeg,
+				battery: { voltageV: 15.8, remainingPct: vehicle.batteryPct },
 				gps: { fixType: GpsFixType.GPS_FIX_TYPE_FIX_3D, numSatellites: 14, hdop: 0.8 },
-				flightMode: FlightMode.FLIGHT_MODE_MISSION,
-				armed: true,
-				inAir: true,
+				flightMode: vehicle.mode,
+				armed: vehicle.armed,
+				inAir: vehicle.inAir,
 				healthOk: true,
 				connected: true
 			}
 		}
 	};
-}
-
-export function startFakeFleet(sink: (envelope: Envelope) => void): () => void {
-	const startedMs = Date.now();
-	for (const vehicle of FAKE_FLEET) sink(infoEnvelope(vehicle));
-
-	const timer = setInterval(() => {
-		const nowMs = Date.now();
-		const elapsedS = (nowMs - startedMs) / 1000;
-		for (const vehicle of FAKE_FLEET) sink(stateEnvelope(vehicle, elapsedS, nowMs));
-	}, 1000 / TICK_HZ);
-
-	return () => clearInterval(timer);
 }

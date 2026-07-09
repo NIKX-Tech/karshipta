@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { flightModeToJSON } from '$lib/gen/karshipta/v1/common';
-	import type { Vehicle } from '$lib/fleet-store.svelte';
+	import { fleet, type Vehicle } from '$lib/fleet-store.svelte';
 
 	interface Props {
 		vehicleId: string;
@@ -17,9 +17,28 @@
 	);
 	const batteryPct = $derived(state?.battery?.remainingPct);
 	const connected = $derived(state?.connected ?? false);
+	const selected = $derived(fleet.selectedVehicleId === vehicleId);
+
+	function toggleSelect() {
+		fleet.select(selected ? undefined : vehicleId);
+	}
 </script>
 
-<article class="border-edge bg-panel/90 rounded border p-3">
+<div
+	role="button"
+	tabindex="0"
+	aria-pressed={selected}
+	onclick={toggleSelect}
+	onkeydown={(event) => {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			toggleSelect();
+		}
+	}}
+	class="cursor-pointer rounded border p-3 {selected
+		? 'border-selected bg-panel'
+		: 'border-edge bg-panel/90 hover:border-fg-muted'}"
+>
 	<header class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
 		{#if state?.armed}
@@ -50,4 +69,4 @@
 	{:else}
 		<p class="text-fg-muted mt-2 text-xs">Waiting for telemetry</p>
 	{/if}
-</article>
+</div>

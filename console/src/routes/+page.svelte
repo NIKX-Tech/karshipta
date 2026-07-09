@@ -2,29 +2,28 @@
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
 	import { fleet } from '$lib/fleet-store.svelte';
-	import { WebSocketTransport } from '$lib/transport';
-	import { FAKE_FLEET_CENTER, startFakeFleet } from '$lib/fake/fleet-sim';
+	import { WebSocketTransport, type FleetTransport } from '$lib/transport';
+	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import VehicleCard from '$lib/components/vehicle-card.svelte';
+	import CommandPanel from '$lib/components/command-panel.svelte';
+	import EventsFeed from '$lib/components/events-feed.svelte';
 
-	// Real gateway when PUBLIC_GATEWAY_WS_URL is set, fake fleet otherwise.
-	// Both feed the store through the same applyEnvelope path. onMount, not
-	// $effect: feeding the store must not make this block depend on it.
+	// Real gateway when PUBLIC_GATEWAY_WS_URL is set, FakeGateway otherwise.
+	// Both implement FleetTransport and feed the store through the same
+	// applyEnvelope path. onMount, not $effect: feeding the store must not
+	// make this block depend on it.
 	onMount(() => {
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
-		if (gatewayUrl) {
-			const transport = new WebSocketTransport(gatewayUrl, {
-				onEnvelope: (envelope) => fleet.applyEnvelope(envelope)
-			});
-			transport.start();
-			return () => {
-				transport.stop();
-				fleet.clear();
-			};
-		}
-		const stopFakeFleet = startFakeFleet((envelope) => fleet.applyEnvelope(envelope));
+		const transport: FleetTransport = gatewayUrl
+			? new WebSocketTransport(gatewayUrl, {
+					onEnvelope: (envelope) => fleet.applyEnvelope(envelope)
+				})
+			: new FakeGateway((envelope) => fleet.applyEnvelope(envelope));
+		fleet.bindSender((envelope) => transport.send(envelope));
+		transport.start();
 		return () => {
-			stopFakeFleet();
+			transport.stop();
 			fleet.clear();
 		};
 	});
@@ -47,5 +46,9 @@
 		{#each fleet.vehicleIds as vehicleId (vehicleId)}
 			<VehicleCard {vehicleId} vehicle={fleet.vehicles[vehicleId]} />
 		{/each}
+		{#if fleet.selectedVehicleId}
+			<CommandPanel vehicleId={fleet.selectedVehicleId} />
+		{/if}
 	</aside>
+	<EventsFeed />
 </main>
