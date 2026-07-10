@@ -4,6 +4,8 @@
 
 #include "websocket_transport.h"
 
+#include <cassert>
+
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <spdlog/spdlog.h>
@@ -25,10 +27,25 @@ void WebsocketTransport::start() {
                const ix::WebSocketMessagePtr& msg) {
             switch (msg->type) {
                 case ix::WebSocketMessageType::Open: {
+                    // The server owns each connection as a shared_ptr in its own
+                    // client set; look up the matching one so our map shares
+                    // ownership instead of holding a raw pointer that the server
+                    // can free out from under a concurrent send().
+                    std::shared_ptr<ix::WebSocket> shared_socket;
+                    for (const auto& candidate : server_->getClients()) {
+                        if (candidate.get() == &web_socket) {
+                            shared_socket = candidate;
+                            break;
+                        }
+                    }
+                    if (!shared_socket) {
+                        spdlog::warn("client connected but not found in server client set, dropping");
+                        break;
+                    }
                     const ClientId id = next_client_id_.fetch_add(1);
                     {
                         std::lock_guard lock(clients_mutex_);
-                        clients_[id] = &web_socket;
+                        clients_[id] = shared_socket;
                         client_ids_[&web_socket] = id;
                     }
                     spdlog::info("client {} connected from {}", id, connection_state->getRemoteIp());
@@ -108,7 +125,7 @@ bool WebsocketTransport::is_running() const {
 }
 
 void WebsocketTransport::send(const ClientId client, const std::vector<uint8_t>& bytes) {
-    ix::WebSocket* web_socket = nullptr;
+    std::shared_ptr<ix::WebSocket> web_socket;
     {
         std::lock_guard lock(clients_mutex_);
         if (const auto it = clients_.find(client); it != clients_.end()) {
@@ -120,7 +137,7 @@ void WebsocketTransport::send(const ClientId client, const std::vector<uint8_t>&
 }
 
 void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
-    std::vector<ix::WebSocket*> targets;
+    std::vector<std::shared_ptr<ix::WebSocket>> targets;
     {
         std::lock_guard lock(clients_mutex_);
         targets.reserve(clients_.size());
@@ -129,19 +146,22 @@ void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
         }
     }
     const std::string payload(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    for (auto* web_socket : targets) {
+    for (const auto& web_socket : targets) {
         web_socket->sendBinary(payload);
     }
 }
 
 void WebsocketTransport::on_receive(ReceiveCallback callback) {
+    assert(!running_ && "on_receive must be set before start()");
     on_receive_ = std::move(callback);
 }
 
 void WebsocketTransport::on_connect(ConnectCallback callback) {
+    assert(!running_ && "on_connect must be set before start()");
     on_connect_ = std::move(callback);
 }
 
 void WebsocketTransport::on_disconnect(DisconnectCallback callback) {
+    assert(!running_ && "on_disconnect must be set before start()");
     on_disconnect_ = std::move(callback);
 }

@@ -68,8 +68,8 @@ to tell which one is active.
 | `~WebsocketTransport()` | Calls `stop()` if still running. |
 | `void start() override` | Constructs the `ix::WebSocketServer`, registers the internal message-dispatch callback, and calls `listenAndStart()`. Logs and returns without setting `running_` if the bind fails. |
 | `void stop() override` | Stops the server, clears the client maps, and calls `ix::uninitNetSystem()`. |
-| `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up the `ix::WebSocket*` for that id under `clients_mutex_`; no-op if not found. |
-| `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current client pointers under the lock, then sends outside it. |
+| `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_`; no-op if not found. |
+| `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current `shared_ptr<ix::WebSocket>` list under the lock, then sends outside it. |
 
 ## Design: mapping IXWebSocket connections to `ClientId`
 
@@ -92,25 +92,36 @@ server_->setOnClientMessageCallback(
 ```
 
 `WebsocketTransport` keeps two maps under `clients_mutex_`:
-`clients_` (`ClientId -> ix::WebSocket*`, used by `send`/`broadcast`) and
-`client_ids_` (`ix::WebSocket* -> ClientId`, the reverse lookup the message
-callback needs since it only has the `WebSocket&`). `Open` inserts into
-both from `next_client_id_.fetch_add(1)`; `Close` erases both. `Message`
-events are dropped unless `msg->binary` is true — text frames are logged
-and ignored, since the wire protocol is binary Envelope frames only.
+`clients_` (`ClientId -> shared_ptr<ix::WebSocket>`, used by `send`/
+`broadcast`) and `client_ids_` (`ix::WebSocket* -> ClientId`, the reverse
+lookup the message callback needs since it only has the `WebSocket&`).
+`Open` looks up the matching `shared_ptr` from `server_->getClients()` (the
+server's own client set) by comparing it against `&web_socket`, then inserts
+into both maps from `next_client_id_.fetch_add(1)`; `Close` erases both.
+Storing the `shared_ptr` rather than the raw pointer matters: `send()` and
+`broadcast()` copy it out from under the lock before calling `sendBinary()`,
+so a client disconnecting concurrently and being erased from the server's
+own set cannot free the socket while a send against it is in flight.
+`Message` events are dropped unless `msg->binary` is true; text frames are
+logged and ignored, since the wire protocol is binary Envelope frames only.
 
 ## Thread safety
 
 IXWebSocket runs each connection's callback on its own thread from an
 internal pool, so `clients_`/`client_ids_` are guarded by `clients_mutex_`
 for every read and write, including inside `send()` and `broadcast()`.
-`broadcast()` copies the current `ix::WebSocket*` list out from under the
-lock before calling `sendBinary()` on each, so a slow client can't hold the
-lock (and therefore block new connections/disconnects) for the duration of
-the broadcast.
+`broadcast()` copies the current `shared_ptr<ix::WebSocket>` list out from
+under the lock before calling `sendBinary()` on each, so a slow client can't
+hold the lock (and therefore block new connections/disconnects) for the
+duration of the broadcast, and the copied `shared_ptr`s keep each socket
+alive even if it disconnects mid-broadcast.
 
 `running_` is `std::atomic<bool>` since `is_running()` may be polled from a
 different thread than the one that called `start()`/`stop()`.
+
+`on_receive`/`on_connect`/`on_disconnect` are not synchronized: they must be
+called before `start()`, never while the server is running (asserted in
+debug builds).
 
 ## RAII and ownership rules
 
@@ -141,6 +152,12 @@ WebsocketTransport(std::string host, uint16_t port);
 - **`ClientId` is only unique within one `WebsocketTransport` instance's
   lifetime**, not globally, and is not the same value as any MAVLink or
   vehicle id.
+
+## M2 test client
+
+`gateway/tools/websocket_test_client.py` connects to a running gateway,
+decodes each Envelope frame, and prints one line per `VehicleInfo`/
+`VehicleState`. See the setup and usage comment at the top of that file.
 
 ## Automated tests
 

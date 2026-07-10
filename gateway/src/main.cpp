@@ -1,9 +1,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <thread>
 #include <vector>
 
+#include <mavsdk/plugins/info/info.h>
 #include <spdlog/spdlog.h>
 
 #include <karshipta/v1/envelope.pb.h>
@@ -82,12 +84,34 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
     return bytes;
 }
 
-karshipta::v1::VehicleInfo build_vehicle_info(const VehicleConnection& vehicle) {
+// Blocking query against the Info plugin; only called once per client connect,
+// so a fresh plugin instance per call is cheap and needs no lifecycle management
+// (unlike TelemetryInfo's persistent subscriptions).
+std::string query_firmware_version(const std::shared_ptr<mavsdk::System>& system) {
+    const mavsdk::Info info(system);
+    const auto [result, version] = info.get_version();
+    if (result != mavsdk::Info::Result::Success) {
+        spdlog::warn("could not query firmware version: result={}", static_cast<int>(result));
+        return {};
+    }
+    return std::to_string(version.flight_sw_major) + "." + std::to_string(version.flight_sw_minor) + "." +
+           std::to_string(version.flight_sw_patch) +
+           (version.flight_sw_git_hash.empty() ? "" : " (" + version.flight_sw_git_hash + ")");
+}
+
+// Returns std::nullopt if the underlying MAVSDK system has gone away (link
+// drop racing a client connect), so the caller can skip sending VehicleInfo
+// rather than dereference a null system.
+std::optional<karshipta::v1::VehicleInfo> build_vehicle_info(const VehicleConnection& vehicle) {
+    const auto system = vehicle.get_system();
+    if (!system) return std::nullopt;
+
     karshipta::v1::VehicleInfo info;
     info.set_vehicle_id(kVehicleId);
     info.set_type(karshipta::v1::VEHICLE_TYPE_MULTIROTOR);
     info.set_autopilot(kAutopilotName);
-    info.set_mavlink_system_id(vehicle.get_system()->get_system_id());
+    info.set_mavlink_system_id(system->get_system_id());
+    info.set_firmware_version(query_firmware_version(system));
     return info;
 }
 
@@ -121,6 +145,7 @@ karshipta::v1::VehicleState build_vehicle_state(const VehicleConnection& vehicle
     auto* proto_gps = state.mutable_gps();
     proto_gps->set_fix_type(to_proto_fix_type(gps.fix_type));
     proto_gps->set_num_satellites(static_cast<uint32_t>(gps.num_satellites));
+    proto_gps->set_hdop(telemetry.get_raw_gps().hdop);
 
     state.set_flight_mode(to_proto_flight_mode(telemetry.get_flight_mode()));
     state.set_armed(telemetry.is_armed());
@@ -151,8 +176,13 @@ int main() {
     WebsocketTransport transport(kWebSocketHost, kWebSocketPort);
 
     transport.on_connect([&vehicle, &transport](const Transport::ClientId client) {
+        const auto info = build_vehicle_info(vehicle);
+        if (!info) {
+            spdlog::warn("client {} connected but vehicle system is gone, skipping VehicleInfo", client);
+            return;
+        }
         karshipta::v1::Envelope envelope;
-        *envelope.mutable_vehicle_info() = build_vehicle_info(vehicle);
+        *envelope.mutable_vehicle_info() = *info;
         transport.send(client, serialize_envelope(envelope));
     });
     transport.on_receive([](const Transport::ClientId client, const std::vector<uint8_t>& bytes) {

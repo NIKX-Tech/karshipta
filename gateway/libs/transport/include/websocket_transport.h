@@ -42,6 +42,8 @@ public:
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Not synchronized against IXWebSocket's callback threads: must be called
+    // before start(), never while the server is running.
     void on_receive(ReceiveCallback callback) override;
     void on_connect(ConnectCallback callback) override;
     void on_disconnect(DisconnectCallback callback) override;
@@ -57,11 +59,14 @@ private:
     // connection, so connect/disconnect/send can all race with each other.
     mutable std::mutex clients_mutex_;
     // Live connections keyed by the ClientId this transport assigned them.
-    // The ix::WebSocket* stays valid for the connection's lifetime (owned by
-    // the server); erased on disconnect before the underlying object dies.
-    std::unordered_map<ClientId, ix::WebSocket*> clients_;
+    // Holds a shared_ptr matching the one the server keeps in its own client
+    // set: send()/broadcast() copy this out under the lock, so a concurrent
+    // disconnect erasing the server's copy cannot free the socket out from
+    // under an in-flight sendBinary().
+    std::unordered_map<ClientId, std::shared_ptr<ix::WebSocket>> clients_;
     // Reverse lookup of the above, needed because IXWebSocket's message
-    // callback only identifies the connection by its ix::WebSocket&.
+    // callback only identifies the connection by its ix::WebSocket&. Keyed
+    // by raw pointer purely for identity; ownership lives in clients_.
     std::unordered_map<ix::WebSocket*, ClientId> client_ids_;
     std::atomic<ClientId> next_client_id_{1};
 
