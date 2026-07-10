@@ -53,6 +53,27 @@ public:
     [[nodiscard]] float get_relative_altitude_m() const;
     // Returns the vehicle's current estimated battery remaining, in percent (0 to 100).
     [[nodiscard]] float get_battery_remaining_percent() const;
+    // Returns the vehicle's current global position (lat/lon/altitude). Default-constructed
+    // (NaN fields) if the Telemetry plugin isn't available yet.
+    [[nodiscard]] mavsdk::Telemetry::Position get_position() const;
+    // Returns the vehicle's current velocity in the NED frame, in m/s.
+    [[nodiscard]] mavsdk::Telemetry::VelocityNed get_velocity_ned() const;
+    // Returns the vehicle's current heading, in degrees true north (0 to 360).
+    [[nodiscard]] float get_heading_deg() const;
+    // Returns the vehicle's current full battery reading (voltage + remaining percent).
+    [[nodiscard]] mavsdk::Telemetry::Battery get_battery() const;
+    // Returns the vehicle's current GPS fix type and satellite count.
+    [[nodiscard]] mavsdk::Telemetry::GpsInfo get_gps_info() const;
+    // Returns the vehicle's current raw GPS reading (adds hdop/vdop over get_gps_info()).
+    [[nodiscard]] mavsdk::Telemetry::RawGps get_raw_gps() const;
+    // Returns the vehicle's current flight mode.
+    [[nodiscard]] mavsdk::Telemetry::FlightMode get_flight_mode() const;
+    // True if the vehicle is currently armed.
+    [[nodiscard]] bool is_armed() const;
+    // True if the vehicle is currently airborne.
+    [[nodiscard]] bool is_in_air() const;
+    // True if every MAVSDK health check currently passes.
+    [[nodiscard]] bool is_health_ok() const;
     // Blocks, polling once per second, until relative altitude reaches target_alt.
     void check_current_takeoff_process(float target_alt) const;
     // Blocks, polling once per second and printing altitude, until the vehicle disarms.

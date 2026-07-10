@@ -177,6 +177,56 @@ float TelemetryInfo::get_battery_remaining_percent() const {
     return telemetry_->battery().remaining_percent;
 }
 
+mavsdk::Telemetry::Position TelemetryInfo::get_position() const {
+    if (!ensure_telemetry()) return {};
+    return telemetry_->position();
+}
+
+mavsdk::Telemetry::VelocityNed TelemetryInfo::get_velocity_ned() const {
+    if (!ensure_telemetry()) return {};
+    return telemetry_->velocity_ned();
+}
+
+float TelemetryInfo::get_heading_deg() const {
+    if (!ensure_telemetry()) return 0.0f;
+    return static_cast<float>(telemetry_->heading().heading_deg);
+}
+
+mavsdk::Telemetry::Battery TelemetryInfo::get_battery() const {
+    if (!ensure_telemetry()) return {};
+    return telemetry_->battery();
+}
+
+mavsdk::Telemetry::GpsInfo TelemetryInfo::get_gps_info() const {
+    if (!ensure_telemetry()) return {};
+    return telemetry_->gps_info();
+}
+
+mavsdk::Telemetry::RawGps TelemetryInfo::get_raw_gps() const {
+    if (!ensure_telemetry()) return {};
+    return telemetry_->raw_gps();
+}
+
+mavsdk::Telemetry::FlightMode TelemetryInfo::get_flight_mode() const {
+    if (!ensure_telemetry()) return mavsdk::Telemetry::FlightMode::Unknown;
+    return telemetry_->flight_mode();
+}
+
+bool TelemetryInfo::is_armed() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->armed();
+}
+
+bool TelemetryInfo::is_in_air() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->in_air();
+}
+
+bool TelemetryInfo::is_health_ok() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->health_all_ok();
+}
+
 void TelemetryInfo::check_current_takeoff_process(const float target_alt) const {
     float current_position = 0;
     while (current_position < target_alt) {
