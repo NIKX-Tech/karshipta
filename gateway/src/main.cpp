@@ -1,11 +1,15 @@
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 
 #include <spdlog/spdlog.h>
 
+#include "telemetry.h"
 #include "vehicle_connection.h"
 
 namespace {
 constexpr auto kConnectionUrl = "udp://:14540";
+constexpr float kPositionRateHz = 1.0f;
 }  // namespace
 
 int main() {
@@ -17,11 +21,17 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    spdlog::info(
-        "connected to {} (is_connected={})", vehicle.get_connection_url(), vehicle.is_connected());
+    spdlog::info("connected to {}", vehicle.get_connection_url());
 
-    vehicle.disconnect();
-    spdlog::info("is_connected after disconnect: {}", vehicle.is_connected());
+    TelemetryInfo telemetry(vehicle);
+    telemetry.set_telemetry_rate(kPositionRateHz);
+    telemetry.subscribe_position();
+    telemetry.subscribe_battery();
 
+    while (vehicle.is_connected()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    spdlog::warn("link lost, exiting");
     return EXIT_SUCCESS;
 }
