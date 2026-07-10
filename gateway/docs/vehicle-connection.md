@@ -14,57 +14,62 @@ discovered so other classes can do that.
 ## Responsibilities
 
 - Register/deregister one vehicle's connection URL on a shared `Mavsdk` core.
-- Discover that vehicle's `mavsdk::System` and hold it for the duration of
-  the connection.
-- Report live link state (`isConnected()`, `subscribeConnectionState()`).
+- Discover that vehicle's `mavsdk::System` by MAVLink system id and hold it
+  for the duration of the connection.
+- Report live link state (`is_connected()`, `subscribe_connection_state()`).
 - Retry connecting with a cancellable backoff loop
-  (`connectWithRetry()`).
-- Guarantee cleanup on every teardown path (RAII).
+  (`connect_with_retry()`).
+- Guarantee cleanup on every teardown path (RAII), including cancelling every
+  subscription it handed out.
 
 ## Explicitly out of scope
 
 - **Telemetry** (`VehicleState`: position, battery, gps, flight mode, ...).
-  A separate class consumes `getSystem()` for this.
+  A separate class consumes `get_system()` for this.
 - **Commands** (`Command`/`CommandAck`, arm/disarm/takeoff/land/rtl/goto). A
-  separate class, using MAVSDK's `Action` plugin against `getSystem()`.
-- **Vehicle identity** (`vehicle_id`, human-facing labels like `"sitl-1"`).
-  Assigned and owned by whoever constructs a fleet of these
-  (`VehicleManager`), not by the connection itself.
-- **Correlating a shared core's newly discovered `System` to a specific
-  configured vehicle when connecting concurrently.** See Constraints below.
+  separate class, using MAVSDK's `Action` plugin against `get_system()`.
+- **Vehicle identity beyond the MAVLink system id** (`vehicle_id`,
+  human-facing labels like `"sitl-1"`, and the `vehicle_id -> system_id`
+  mapping itself). Assigned and owned by whoever constructs a fleet of these
+  (`VehicleManager`), which passes the resolved system id into the
+  constructor.
 
 ## Public API
 
 | Member | Behavior |
 |---|---|
-| `VehicleConnection(shared_ptr<Mavsdk>, const string& drone_url)` | Stores the shared core and validates `drone_url`. Does not open a connection. |
-| `static shared_ptr<Mavsdk> createSharedCore()` | Builds a `Mavsdk` core configured `ComponentType::GroundStation`. Call once per fleet; pass the result to every `VehicleConnection`. |
-| `setDroneUrl(const string&)` / `getDroneUrl() const` | Get/replace the URL used by the next `connect()`. |
-| `bool connect()` | Single attempt. Registers `drone_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for an autopilot heartbeat via `first_autopilot()`. Returns `false` on socket failure or discovery timeout. |
-| `bool connectWithRetry(stop_token, retry_interval = 2s)` | Calls `connect()` in a loop, sleeping in 100ms ticks (so cancellation is responsive), until it succeeds or `stop_token` is cancelled. |
-| `void disconnect()` | Drops the `System` handle and removes `drone_url` from the shared core. No-op if already disconnected — safe to call unconditionally, including from a moved-from object. |
-| `bool isConnected() const` | `true` only while a `System` was discovered **and** MAVSDK currently reports its heartbeat as live. Reflects current state, not "was ever connected." |
-| `shared_ptr<System> getSystem() const` | The discovered vehicle handle; `nullptr` if not connected. |
-| `shared_ptr<Mavsdk> getMavsdk() const` | The shared core this connection uses. |
-| `IsConnectedHandle subscribeConnectionState(callback)` | Live link up/down notifications on the discovered `System`. Throws `std::logic_error` if called before a successful `connect()`. |
-| `void unsubscribeConnectionState(handle)` | Cancels a subscription. No-op if already disconnected. |
+| `VehicleConnection(shared_ptr<Mavsdk>, const string& drone_url, optional<uint32_t> expected_system_id = nullopt)` | Stores the shared core and validates `drone_url`. Does not open a connection. `expected_system_id` is the MAVLink system id (`VehicleInfo.mavlink_system_id`) this connection must bind to; omit only for the single-vehicle M1 case. |
+| `static shared_ptr<Mavsdk> create_shared_core()` | Builds a `Mavsdk` core configured `ComponentType::GroundStation`. Call once per fleet; pass the result to every `VehicleConnection`. |
+| `set_drone_url(const string&)` / `get_drone_url() const` | Get/replace the URL used by the next `connect()`. |
+| `bool connect()` | Single attempt. Registers `drone_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for the expected system id (or, if none was configured, any autopilot via `first_autopilot()`). Returns `false` on socket failure or discovery timeout. |
+| `bool connect_with_retry(stop_token, retry_interval = 2s)` | Calls `connect()` in a loop, sleeping in 100ms ticks (so cancellation is responsive), until it succeeds or `stop_token` is cancelled. |
+| `void disconnect()` | Cancels every `subscribe_connection_state()` handle this instance issued, drops the `System` handle, and removes `drone_url` from the shared core. No-op if already disconnected — safe to call unconditionally. |
+| `bool is_connected() const` | `true` only while a `System` was discovered **and** MAVSDK currently reports its heartbeat as live. Reflects current state, not "was ever connected." |
+| `shared_ptr<System> get_system() const` | The discovered vehicle handle; `nullptr` if not connected. |
+| `shared_ptr<Mavsdk> get_mavsdk() const` | The shared core this connection uses. |
+| `IsConnectedHandle subscribe_connection_state(callback)` | Live link up/down notifications on the discovered `System`. Throws `std::logic_error` if called before a successful `connect()`. Tracked internally so `disconnect()` can cancel it. |
+| `void unsubscribe_connection_state(handle)` | Cancels a subscription early. No-op if already disconnected. |
 
 ## Ownership model: one shared core, many connections
 
-The constructor does not create the `Mavsdk` core it uses — it receives one:
+The constructor does not create the `Mavsdk` core it uses — it receives one,
+plus the MAVLink system id it is responsible for:
 
 ```cpp
-auto core = VehicleConnection::createSharedCore();
+auto core = VehicleConnection::create_shared_core();
 
-VehicleConnection a(core, "udp://:14540");
-VehicleConnection b(core, "udp://:14541");
-VehicleConnection c(core, "udp://:14542");
+VehicleConnection a(core, "udp://:14540", 1);
+VehicleConnection b(core, "udp://:14541", 2);
+VehicleConnection c(core, "udp://:14542", 3);
 ```
 
-All three `VehicleConnection`s' `mavsdk_instance` members point at the same
+All three `VehicleConnection`s' `mavsdk_instance_` members point at the same
 `Mavsdk` object; the `shared_ptr` reference count, not any code in this
 class, is what keeps that object alive until every connection using it has
-been destroyed.
+been destroyed. Because each instance waits for its own system id rather
+than "whichever autopilot showed up first", `a`, `b`, and `c` can call
+`connect()`/`connect_with_retry()` concurrently and from independent
+`std::jthread`s without risk of binding to the wrong airframe.
 
 **Why a shared core, not one core per connection:** MAVLink is designed for
 many vehicles on one link — every message carries a `system_id`/
@@ -76,14 +81,34 @@ core per connection would mean N independent thread pools and sockets for an
 N-vehicle fleet, for no benefit MAVSDK's own design already gives you for
 free.
 
+## Identity: system id, not discovery order
+
+`connect()` never relies on "whichever `System` the shared core happens to
+have seen" to decide which vehicle it just bound to. If `expected_system_id`
+was given to the constructor:
+
+- `find_system()` first checks `Mavsdk::systems()` for an already-discovered
+  match (covers reconnects, where the System may already exist on the shared
+  core from before the link dropped).
+- Otherwise `wait_for_system()` subscribes via `subscribe_on_new_system()`
+  and checks each newly discovered `System::get_system_id()` against the
+  expected id, resolving a promise the first time it matches, up to
+  `kAutopilotDiscoveryTimeoutS`.
+
+`expected_system_id` is optional so the single-vehicle M1 program (one
+`VehicleConnection`, no config file yet) can keep using bare
+`first_autopilot()`. As soon as a config file exists mapping
+`vehicle_id -> mavlink_system_id`, every constructed `VehicleConnection`
+should be given its id.
+
 ## RAII and ownership rules
 
 ```cpp
 VehicleConnection() = delete;
 VehicleConnection(const VehicleConnection&) = delete;
 VehicleConnection& operator=(const VehicleConnection&) = delete;
-VehicleConnection(VehicleConnection&&) = default;
-VehicleConnection& operator=(VehicleConnection&&) = default;
+VehicleConnection(VehicleConnection&&) = delete;
+VehicleConnection& operator=(VehicleConnection&&) = delete;
 ~VehicleConnection();  // calls disconnect()
 ```
 
@@ -94,29 +119,24 @@ VehicleConnection& operator=(VehicleConnection&&) = default;
   own the same `System`, each independently disconnecting/logging for what
   is really one connection. Mirrors `std::unique_ptr`, `std::thread`,
   `std::fstream`.
-- **Move defaulted** — ownership transfer is fine (storing in a
-  `std::vector`, returning from a factory). A moved-from object's `system`
-  is null, which combines with `disconnect()`'s null-check to make
-  moved-from destruction silent and safe.
+- **Move deleted** — `subscribe_connection_state()` callbacks can capture
+  `this`; moving the object out from under a live callback would leave it
+  pointing at a stale address. Nothing in the manager design needs to move a
+  live connection (build it in place, e.g. in a `std::vector` via
+  `emplace_back` with a fleet-sized reservation, or hold it through a
+  `unique_ptr`).
 - **Destructor calls `disconnect()`** — guarantees teardown regardless of how
   the object's scope ends (normal return, early return, exception
   unwinding), without relying on callers to clean up manually. `disconnect()`
-  never throws, so this is safe destructor behavior.
+  never throws, so this is safe destructor behavior, and it cancels every
+  subscription this instance handed out before the object goes away.
 
 ## Constraints and preconditions
 
-- **`subscribeConnectionState()` requires a prior successful `connect()`.**
+- **`subscribe_connection_state()` requires a prior successful `connect()`.**
   Calling it beforehand throws `std::logic_error`.
-- **Concurrent `connect()` calls across `VehicleConnection`s sharing one core
-  are not safe.** `first_autopilot()` returns whichever autopilot the shared
-  core has seen — it is not scoped to a particular connection's URL, and
-  MAVSDK does not expose an API mapping a `ConnectionHandle` to the `System`
-  it produced. Callers must connect vehicles on a shared core **one at a
-  time**. (A future system-id-aware registry at the `VehicleManager` level
-  can lift this constraint; it does not belong in this class, which only
-  ever reasons about its own single connection.)
-- **Not thread-safe.** No internal synchronization guards `system`,
-  `connection_added`, or `connection_handle`. A single `VehicleConnection`
+- **Not thread-safe.** No internal synchronization guards `system_`,
+  `connection_added_`, or `connection_handle_`. A single `VehicleConnection`
   instance must not be accessed from more than one thread without external
   synchronization.
 - **The caller must keep the shared `Mavsdk` core alive** at least as long as
