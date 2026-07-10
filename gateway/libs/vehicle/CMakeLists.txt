@@ -1,6 +1,7 @@
 add_library(vehicle
         src/vehicle_connection.cpp
         src/telemetry.cpp
+        src/vehicle_actions.cpp
 )
 
 target_include_directories(vehicle
