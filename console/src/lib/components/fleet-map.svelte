@@ -14,38 +14,62 @@
 
 	interface MarkerHandle {
 		marker: maplibregl.Marker;
+		body: HTMLElement;
+		stem: HTMLElement;
 		arrow: SVGSVGElement;
 		arrowPath: SVGPathElement;
 		label: HTMLElement;
 	}
 
+	const EARTH_CIRCUMFERENCE_M = 40_075_016.686;
+	/** maplibre zoom is normalized to 512px world tiles */
+	const WORLD_TILE_PX = 512;
+
 	let container: HTMLDivElement;
 	let map = $state<maplibregl.Map | undefined>(undefined);
 	let mapError = $state<string | undefined>(undefined);
+	const ROUTE_SOURCE = 'mission-route';
+
 	// imperative per-vehicle marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
+	let waypointMarkers: maplibregl.Marker[] = [];
+	let mapLoaded = $state(false);
+	// camera state; arrows compensate for bearing, marker elevation for pitch/zoom
+	let bearingDeg = $state(0);
+	let pitchDeg = $state(0);
+	let zoomLevel = $state(INITIAL_ZOOM);
 
-	function markerElement(vehicleId: string): {
+	function markerElement(vehicleId: string): Omit<MarkerHandle, 'marker'> & {
 		element: HTMLElement;
-		arrow: SVGSVGElement;
-		arrowPath: SVGPathElement;
-		label: HTMLElement;
 	} {
+		// zero-size root pinned to the ground position; the body (arrow + label)
+		// is lifted above it by the projected altitude, connected by a stem
 		const element = document.createElement('div');
 		element.setAttribute('role', 'button');
 		element.setAttribute('tabindex', '0');
 		element.setAttribute('aria-label', `Vehicle ${vehicleId}`);
-		element.className = 'relative cursor-pointer';
-		// arrow rotates with heading; the label span below stays upright
+		element.className = 'relative h-0 w-0 cursor-pointer';
 		element.innerHTML = `
-			<svg width="30" height="30" viewBox="0 0 34 34">
-				<path d="M17 3 L27 29 L17 22 L7 29 Z" fill="#f5a623" stroke="#0a0e12" stroke-width="1.5" stroke-linejoin="round" />
-			</svg>
-			<span class="border-edge bg-panel/90 text-fg absolute top-full left-1/2 -translate-x-1/2 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap">${vehicleId}</span>`;
+			<span class="bg-accent/50 absolute -top-0.5 -left-0.5 h-1 w-1 rounded-full" data-part="ground"></span>
+			<span class="bg-edge absolute left-0 w-px" data-part="stem"></span>
+			<div class="absolute" data-part="body">
+				<svg width="30" height="30" viewBox="0 0 34 34" class="-translate-x-1/2 -translate-y-1/2">
+					<path d="M17 3 L27 29 L17 22 L7 29 Z" fill="#f5a623" stroke="#0a0e12" stroke-width="1.5" stroke-linejoin="round" />
+				</svg>
+				<span class="border-edge bg-panel/90 text-fg absolute top-3 left-0 -translate-x-1/2 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"></span>
+			</div>`;
+		const body = element.querySelector<HTMLElement>('[data-part="body"]');
+		const stem = element.querySelector<HTMLElement>('[data-part="stem"]');
 		const arrow = element.querySelector('svg');
 		const arrowPath = element.querySelector('path');
-		const label = element.querySelector('span');
-		if (!(arrow instanceof SVGSVGElement) || !(arrowPath instanceof SVGPathElement) || !label) {
+		const label = body?.querySelector<HTMLElement>('span.border-edge') ?? null;
+		if (
+			!body ||
+			!stem ||
+			!(arrow instanceof SVGSVGElement) ||
+			!(arrowPath instanceof SVGPathElement) ||
+			!label
+		) {
 			throw new Error('fleet-map: marker template is missing its parts');
 		}
 		const toggleSelect = (event: Event) => {
@@ -60,7 +84,7 @@
 				toggleSelect(event);
 			}
 		});
-		return { element, arrow, arrowPath, label };
+		return { element, body, stem, arrow, arrowPath, label };
 	}
 
 	$effect(() => {
@@ -92,20 +116,83 @@
 			return;
 		}
 		created.on('click', (event) => {
-			fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+			if (fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId) {
+				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
+			} else {
+				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+			}
+		});
+		created.on('move', () => {
+			bearingDeg = created.getBearing();
+			pitchDeg = created.getPitch();
+			zoomLevel = created.getZoom();
+		});
+		created.on('load', () => {
+			created.addSource(ROUTE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
+			});
+			created.addLayer({
+				id: ROUTE_SOURCE,
+				type: 'line',
+				source: ROUTE_SOURCE,
+				paint: { 'line-color': '#3b9eff', 'line-width': 2, 'line-dasharray': [2, 1.5] }
+			});
+			mapLoaded = true;
 		});
 		map = created;
 		return () => {
 			markers = {};
+			waypointMarkers = [];
+			mapLoaded = false;
 			created.remove();
 			map = undefined;
 		};
 	});
 
-	// crosshair cursor while goto targeting is armed
+	// crosshair cursor while goto targeting or waypoint planning is active
 	$effect(() => {
 		if (!map) return;
-		map.getCanvas().style.cursor = fleet.gotoArming ? 'crosshair' : '';
+		const planning =
+			fleet.missionDraft?.vehicleId === fleet.selectedVehicleId && fleet.missionDraft;
+		map.getCanvas().style.cursor = fleet.gotoArming || planning ? 'crosshair' : '';
+	});
+
+	// draw the mission draft of the selected vehicle: dashed blue route + numbered points
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const draft =
+			fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId
+				? fleet.missionDraft
+				: undefined;
+		const coordinates = (draft?.waypoints ?? []).map((waypoint) => [
+			waypoint.longitudeDeg,
+			waypoint.latitudeDeg
+		]);
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ROUTE_SOURCE);
+		source?.setData({
+			type: 'Feature',
+			properties: {},
+			geometry: { type: 'LineString', coordinates }
+		});
+
+		while (waypointMarkers.length > coordinates.length) {
+			waypointMarkers.pop()?.remove();
+		}
+		coordinates.forEach(([lon, lat], index) => {
+			let marker = waypointMarkers[index];
+			if (!marker) {
+				const element = document.createElement('div');
+				element.className =
+					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('aria-label', `Waypoint ${index + 1}`);
+				element.textContent = String(index + 1);
+				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
+				waypointMarkers[index] = marker;
+			}
+			marker.setLngLat([lon, lat]);
+		});
 	});
 
 	// sync one marker per vehicle from the store
@@ -116,17 +203,29 @@
 			if (!state?.position) continue;
 			let handle = markers[vehicleId];
 			if (!handle) {
-				const { element, arrow, arrowPath, label } = markerElement(vehicleId);
+				const { element, body, stem, arrow, arrowPath, label } = markerElement(vehicleId);
 				// setLngLat must precede addTo: adding projects the position
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg])
 					.addTo(map);
-				handle = { marker, arrow, arrowPath, label };
+				handle = { marker, body, stem, arrow, arrowPath, label };
 				markers[vehicleId] = handle;
 			}
 			handle.marker.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg]);
-			// heading is relative to true north; map bearing is fixed at 0 for now
-			handle.arrow.style.rotate = `${state.headingDeg}deg`;
+			// heading is relative to true north; subtract the camera bearing so
+			// the arrow stays correct when the operator rotates the map
+			handle.arrow.style.rotate = `${state.headingDeg - bearingDeg}deg`;
+			handle.label.textContent = `${vehicleId} \u00b7 ${state.position.altitudeRelM.toFixed(0)} m`;
+			// lift the body above the ground anchor by the projected altitude:
+			// vertical world axis maps to screen-vertical, scaled by sin(pitch)
+			const pxPerMeter =
+				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
+				(EARTH_CIRCUMFERENCE_M * Math.cos((state.position.latitudeDeg * Math.PI) / 180));
+			const liftPx =
+				state.position.altitudeRelM * pxPerMeter * Math.sin((pitchDeg * Math.PI) / 180);
+			handle.body.style.top = `${-liftPx}px`;
+			handle.stem.style.top = `${-liftPx}px`;
+			handle.stem.style.height = `${Math.max(0, liftPx - 8)}px`;
 			const selected = fleet.selectedVehicleId === vehicleId;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');

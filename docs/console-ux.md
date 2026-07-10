@@ -31,8 +31,7 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 
 | Milestone | Slot |
 |---|---|
-| Mission editor (waypoint list, upload, start/pause, progress) | right panel, tab or section below COMMANDS; waypoints draw on the map as a blue route |
-| Click-to-plan waypoints | map, same targeting pattern as goto (crosshair, confirm) |
+| Mission editor (shipped) | right panel MISSION section below COMMANDS; waypoints draw on the map as a dashed blue route with numbered points |
 | Multi-vehicle actions (select-all RTL) | left rail header, later milestone |
 | Telemetry charts / log review (v0.2) | bottom drawer under the map, collapsed by default |
 | Video feeds (later) | detail panel top, above telemetry |

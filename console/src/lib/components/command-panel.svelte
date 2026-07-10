@@ -60,6 +60,7 @@
 		<button
 			class="command-button"
 			disabled={!vehicleState || vehicleState.armed || inflightKinds.has('arm')}
+			title={!vehicleState ? 'no telemetry yet' : vehicleState.armed ? 'already armed' : undefined}
 			onclick={() => send({ $case: 'arm', arm: {} })}
 		>
 			Arm
@@ -70,6 +71,13 @@
 				!vehicleState.armed ||
 				vehicleState.inAir ||
 				inflightKinds.has('takeoff')}
+			title={!vehicleState
+				? 'no telemetry yet'
+				: vehicleState.inAir
+					? 'already in air'
+					: !vehicleState.armed
+						? 'arm first'
+						: undefined}
 			onclick={() => send({ $case: 'takeoff', takeoff: { altitudeRelM: takeoffAltM } })}
 		>
 			Takeoff
@@ -77,6 +85,7 @@
 		<button
 			class="command-button {fleet.gotoArming ? 'border-selected text-selected' : ''}"
 			disabled={!vehicleState || !vehicleState.inAir}
+			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
 			onclick={() => (fleet.gotoArming ? fleet.cancelGoto() : fleet.armGoto())}
 		>
 			{fleet.gotoArming ? 'Pick point' : 'Goto'}
@@ -84,6 +93,7 @@
 		<button
 			class="command-button"
 			disabled={!vehicleState || !vehicleState.inAir}
+			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
 			onclick={() =>
 				confirmThenSend({
 					title: `Land ${vehicleId}`,
@@ -97,6 +107,7 @@
 		<button
 			class="command-button"
 			disabled={!vehicleState || !vehicleState.inAir}
+			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
 			onclick={() =>
 				confirmThenSend({
 					title: `Return ${vehicleId} to launch`,
@@ -110,6 +121,7 @@
 		<button
 			class="command-button"
 			disabled={!vehicleState || !vehicleState.armed || inflightKinds.has('disarm')}
+			title={!vehicleState ? 'no telemetry yet' : !vehicleState.armed ? 'not armed' : undefined}
 			onclick={() => {
 				if (vehicleState?.inAir) {
 					confirmThenSend({

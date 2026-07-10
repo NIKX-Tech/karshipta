@@ -2,6 +2,7 @@
 	import { flightModeToJSON, gpsFixTypeToJSON } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import CommandPanel from '$lib/components/command-panel.svelte';
+	import MissionPanel from '$lib/components/mission-panel.svelte';
 
 	interface Props {
 		vehicleId: string;
@@ -92,4 +93,5 @@
 	{/if}
 
 	<CommandPanel {vehicleId} />
+	<MissionPanel {vehicleId} />
 </section>
