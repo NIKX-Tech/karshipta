@@ -15,7 +15,7 @@
 #include <mavsdk/mavsdk.h>
 
 // Owns the discovery/link-state of a single vehicle on a Mavsdk core that is
-// SHARED across the fleet. Does not own the Mavsdk core itself — that belongs
+// SHARED across the fleet. Does not own the Mavsdk core itself; that belongs
 // to whoever constructs VehicleConnection (the future VehicleManager) and is
 // expected to outlive every VehicleConnection built on top of it. Does not
 // touch telemetry or commands either; callers use get_system() to hand the
@@ -23,6 +23,15 @@
 class VehicleConnection {
 
     public:
+        // Outcome of a single connect() attempt, so callers (and eventually the
+        // manager, which turns these into Event messages) can tell a socket-level
+        // failure apart from "nothing answered in time".
+        enum class ConnectResult {
+            kSuccess,
+            kSocketFailure,
+            kDiscoveryTimeout,
+        };
+
         VehicleConnection() = delete;
         VehicleConnection(const VehicleConnection&) = delete;
         VehicleConnection& operator=(const VehicleConnection&) = delete;
@@ -34,8 +43,8 @@ class VehicleConnection {
         // clean disconnect regardless of how it goes out of scope.
         ~VehicleConnection();
 
-        // mavsdk_instance: a core shared with other VehicleConnections. Not created
-        // here, not destroyed here — this object only ever adds/removes its own
+        // mavsdk: a core shared with other VehicleConnections. Not created here,
+        // not destroyed here; this object only ever adds/removes its own
         // connection_url on it. Caller must keep the core alive at least as long
         // as this VehicleConnection.
         //
@@ -44,7 +53,7 @@ class VehicleConnection {
         // that system, so multiple VehicleConnections can connect concurrently on
         // the same shared core. When absent, connect() falls back to
         // first_autopilot() (the single-vehicle M1 case, no config needed).
-        VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk_instance,
+        VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk,
                            const std::string& drone_url,
                            std::optional<uint32_t> expected_system_id = std::nullopt);
 
@@ -59,18 +68,16 @@ class VehicleConnection {
         // Returns the currently configured connection URL.
         [[nodiscard]] std::string get_drone_url() const;
 
-        // Single attempt: adds connection_url to the shared core (only once, ever —
+        // Single attempt: adds connection_url to the shared core (only once, ever;
         // later calls just re-wait for discovery) and blocks up to
         // kAutopilotDiscoveryTimeoutS waiting for a matching autopilot.
-        // Returns false on socket failure or if no matching autopilot is
-        // discovered in time.
         //
-        // If expected_system_id was configured, waits specifically for that
-        // system id (subscribe_on_new_system + System::get_system_id()), so
-        // callers may connect several VehicleConnections on one shared core
-        // concurrently. Otherwise falls back to first_autopilot(), which only
-        // gives correct results when vehicles are connected one at a time.
-        bool connect();
+        // If expected_system_id was configured, waits specifically for that system
+        // id (subscribe_on_new_system + System::get_system_id()), so callers may
+        // connect several VehicleConnections on one shared core concurrently.
+        // Otherwise falls back to first_autopilot(), which only gives correct
+        // results when vehicles are connected one at a time.
+        ConnectResult connect();
         // Calls connect() repeatedly, sleeping retry_interval between attempts, until
         // it succeeds or stop_token is cancelled. Returns false only if cancelled
         // before a connection was established.
@@ -104,13 +111,15 @@ class VehicleConnection {
         void unsubscribe_connection_state(mavsdk::System::IsConnectedHandle handle);
 
     private:
+        // Named so a config value can override it later per BRIEF.md M4; serial
+        // links will need a longer timeout than SITL over UDP.
         static constexpr double kAutopilotDiscoveryTimeoutS = 3.0;
         static constexpr std::chrono::milliseconds kDefaultRetryInterval{2000};
 
         // The MAVLink connection URL (e.g. "udpin://0.0.0.0:14540").
         std::string connection_url_;
         // The Mavsdk core instance, shared with other VehicleConnections. Not owned.
-        std::shared_ptr<mavsdk::Mavsdk> mavsdk_instance_;
+        std::shared_ptr<mavsdk::Mavsdk> mavsdk_;
         // The discovered autopilot System, set by connect(), cleared by disconnect().
         std::shared_ptr<mavsdk::System> system_;
         // MAVLink system id this connection must bind to; nullopt falls back to
