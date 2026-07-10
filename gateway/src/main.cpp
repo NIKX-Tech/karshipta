@@ -16,7 +16,7 @@ int main() {
     auto mavsdk = VehicleConnection::create_shared_core();
     VehicleConnection vehicle(mavsdk, kConnectionUrl);
 
-    if (!vehicle.connect()) {
+    if (vehicle.connect() != VehicleConnection::ConnectResult::kSuccess) {
         spdlog::error("failed to connect to {}", vehicle.get_drone_url());
         return EXIT_FAILURE;
     }

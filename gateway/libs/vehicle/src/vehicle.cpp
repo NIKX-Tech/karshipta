@@ -12,10 +12,10 @@
 
 #include <spdlog/spdlog.h>
 
-VehicleConnection::VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk_instance,
+VehicleConnection::VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk,
                                       const std::string& drone_url,
                                       std::optional<uint32_t> expected_system_id)
-    : mavsdk_instance_(std::move(mavsdk_instance)), expected_system_id_(expected_system_id) {
+    : mavsdk_(std::move(mavsdk)), expected_system_id_(expected_system_id) {
     set_drone_url(drone_url);
 }
 
@@ -44,7 +44,7 @@ std::string VehicleConnection::validate_drone_url(const std::string& drone_url) 
 
 std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::find_system(
     uint32_t system_id) const {
-    for (const auto& candidate : mavsdk_instance_->systems()) {
+    for (const auto& candidate : mavsdk_->systems()) {
         if (candidate->get_system_id() == system_id) {
             return candidate;
         }
@@ -62,7 +62,7 @@ std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::wait_for_syste
     auto fulfilled = std::make_shared<std::atomic_bool>(false);
     auto future = promise->get_future();
 
-    const auto handle = mavsdk_instance_->subscribe_on_new_system([this, system_id, promise, fulfilled]() {
+    const auto handle = mavsdk_->subscribe_on_new_system([this, system_id, promise, fulfilled]() {
         if (fulfilled->exchange(true)) {
             return;
         }
@@ -75,7 +75,7 @@ std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::wait_for_syste
 
     const auto status =
         future.wait_for(std::chrono::duration<double>(kAutopilotDiscoveryTimeoutS));
-    mavsdk_instance_->unsubscribe_on_new_system(handle);
+    mavsdk_->unsubscribe_on_new_system(handle);
 
     if (status != std::future_status::ready) {
         return std::nullopt;
@@ -83,17 +83,17 @@ std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::wait_for_syste
     return future.get();
 }
 
-bool VehicleConnection::connect() {
+VehicleConnection::ConnectResult VehicleConnection::connect() {
     if (!connection_added_) {
         const auto [connection_result, handle] =
-            mavsdk_instance_->add_any_connection_with_handle(connection_url_);
+            mavsdk_->add_any_connection_with_handle(connection_url_);
 
         if (connection_result != mavsdk::ConnectionResult::Success) {
             spdlog::error(
                 "failed to add connection {}: result={}",
                 connection_url_,
                 static_cast<int>(connection_result));
-            return false;
+            return ConnectResult::kSocketFailure;
         }
 
         connection_handle_ = handle;
@@ -102,20 +102,20 @@ bool VehicleConnection::connect() {
 
     auto discovered_system = expected_system_id_
         ? wait_for_system(*expected_system_id_)
-        : mavsdk_instance_->first_autopilot(kAutopilotDiscoveryTimeoutS);
+        : mavsdk_->first_autopilot(kAutopilotDiscoveryTimeoutS);
 
     if (!discovered_system) {
         spdlog::warn(
             "no matching autopilot discovered on {} within {}s",
             connection_url_,
             kAutopilotDiscoveryTimeoutS);
-        return false;
+        return ConnectResult::kDiscoveryTimeout;
     }
 
     this->system_ = discovered_system.value();
     spdlog::info(
         "connected to {} (system_id={})", connection_url_, system_->get_system_id());
-    return true;
+    return ConnectResult::kSuccess;
 }
 
 bool VehicleConnection::connect_with_retry(
@@ -123,7 +123,7 @@ bool VehicleConnection::connect_with_retry(
     constexpr auto kPollInterval = std::chrono::milliseconds(100);
 
     while (!stop_token.stop_requested()) {
-        if (connect()) {
+        if (connect() == ConnectResult::kSuccess) {
             return true;
         }
 
@@ -154,15 +154,16 @@ void VehicleConnection::disconnect() {
     }
     connection_state_handles_.clear();
 
-    // mavsdk_instance_ and system_ are shared_ptrs: any plugin object (DroneActions,
-    // TelemetryInfo, ...) that called get_mavsdk()/get_system() holds its own reference,
-    // so resetting ours here is safe no matter which object destructs first — the
-    // underlying Mavsdk/System stay alive until every holder has released them.
+    // mavsdk_ and system_ are shared_ptrs: any plugin object (DroneActions,
+    // TelemetryInfo, ...) that called get_mavsdk()/get_system() holds its own
+    // reference, so resetting ours here is safe no matter which object destructs
+    // first; the underlying Mavsdk/System stay alive until every holder has
+    // released them.
     spdlog::info("disconnected from {}", connection_url_);
     system_.reset();
 
     if (connection_added_) {
-        mavsdk_instance_->remove_connection(connection_handle_);
+        mavsdk_->remove_connection(connection_handle_);
         connection_added_ = false;
     }
 }
@@ -176,7 +177,7 @@ std::shared_ptr<mavsdk::System> VehicleConnection::get_system() const {
 }
 
 std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::get_mavsdk() const {
-    return mavsdk_instance_;
+    return mavsdk_;
 }
 
 mavsdk::System::IsConnectedHandle VehicleConnection::subscribe_connection_state(

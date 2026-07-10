@@ -39,6 +39,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   enable_testing()
 
   add_executable(karshipta_gateway_tests
+    tests/vehicle/vehicle_connection_test.cpp
     tests/vehicle/vehicle_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
   )
@@ -50,6 +51,15 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     vehicle
     transport
   )
+
+  if(WIN32)
+    add_custom_command(TARGET karshipta_gateway_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:karshipta_gateway_tests>
+      $<TARGET_FILE_DIR:karshipta_gateway_tests>
+      COMMAND_EXPAND_LISTS
+    )
+  endif()
 
   include(GoogleTest)
   gtest_discover_tests(karshipta_gateway_tests)

@@ -41,7 +41,7 @@ discovered so other classes can do that.
 | `VehicleConnection(shared_ptr<Mavsdk>, const string& drone_url, optional<uint32_t> expected_system_id = nullopt)` | Stores the shared core and validates `drone_url`. Does not open a connection. `expected_system_id` is the MAVLink system id (`VehicleInfo.mavlink_system_id`) this connection must bind to; omit only for the single-vehicle M1 case. |
 | `static shared_ptr<Mavsdk> create_shared_core()` | Builds a `Mavsdk` core configured `ComponentType::GroundStation`. Call once per fleet; pass the result to every `VehicleConnection`. |
 | `set_drone_url(const string&)` / `get_drone_url() const` | Get/replace the URL used by the next `connect()`. |
-| `bool connect()` | Single attempt. Registers `drone_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for the expected system id (or, if none was configured, any autopilot via `first_autopilot()`). Returns `false` on socket failure or discovery timeout. |
+| `ConnectResult connect()` | Single attempt. Registers `drone_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for the expected system id (or, if none was configured, any autopilot via `first_autopilot()`). Returns `kSuccess`, `kSocketFailure` (adding the connection itself failed), or `kDiscoveryTimeout` (nothing matching answered in time), so callers can distinguish the two failure modes instead of a bare `false`. |
 | `bool connect_with_retry(stop_token, retry_interval = 2s)` | Calls `connect()` in a loop, sleeping in 100ms ticks (so cancellation is responsive), until it succeeds or `stop_token` is cancelled. |
 | `void disconnect()` | Cancels every `subscribe_connection_state()` handle this instance issued, drops the `System` handle, and removes `drone_url` from the shared core. No-op if already disconnected — safe to call unconditionally. |
 | `bool is_connected() const` | `true` only while a `System` was discovered **and** MAVSDK currently reports its heartbeat as live. Reflects current state, not "was ever connected." |
@@ -63,7 +63,7 @@ VehicleConnection b(core, "udp://:14541", 2);
 VehicleConnection c(core, "udp://:14542", 3);
 ```
 
-All three `VehicleConnection`s' `mavsdk_instance_` members point at the same
+All three `VehicleConnection`s' `mavsdk_` members point at the same
 `Mavsdk` object; the `shared_ptr` reference count, not any code in this
 class, is what keeps that object alive until every connection using it has
 been destroyed. Because each instance waits for its own system id rather
@@ -143,3 +143,68 @@ VehicleConnection& operator=(VehicleConnection&&) = delete;
   every `VehicleConnection` built on top of it — the class holds a
   `shared_ptr` but does not create or extend the core's lifetime beyond
   normal reference counting.
+
+## Automated tests
+
+`gateway/tests/vehicle/vehicle_connection_test.cpp` (GoogleTest, built with
+`-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`):
+
+- `RejectsEmptyDroneUrl`: constructor throws `std::invalid_argument` on an
+  empty URL.
+- `ConnectTimesOutWhenNothingListens`: `connect()` against a loopback port
+  with no sender returns `kDiscoveryTimeout` (takes ~3s, the discovery
+  timeout).
+- `DoesNotBindToMismatchedSystemId`: a fake autopilot heartbeats as one
+  system id while the connection expects a different one; `connect()` times
+  out rather than binding to the wrong system.
+- `BindsToMatchingSystemId`: a fake autopilot heartbeats as the expected
+  system id; `connect()` succeeds and `get_system()->get_system_id()`
+  matches.
+- `DisconnectIsIdempotentAndSafeBeforeConnect` /
+  `DisconnectIsIdempotentAfterConnect`: calling `disconnect()` more than once,
+  with or without a prior successful `connect()`, never throws.
+
+The fake autopilot is a second, independent `mavsdk::Mavsdk` core configured
+with `Configuration(system_id, component_id, always_send_heartbeats=true)`,
+standing in for PX4 SITL so the system-id tests do not depend on Docker or a
+real vehicle.
+
+## Manual verification
+
+With one PX4 SITL container running:
+
+```
+docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
+```
+
+Build and run the gateway (`gateway/CLAUDE.local.md` has the full command
+list):
+
+```
+cmake -S gateway -B gateway/build
+cmake --build gateway/build
+./gateway/build/src/karshipta_gateway
+```
+
+`main.cpp` connects with no `expected_system_id`, so it falls back to
+`first_autopilot()`; you should see:
+
+```
+[info] connected to udp://:14540 (system_id=1)
+[info] connected to udp://:14540 (is_connected=true)
+[info] disconnected from udp://:14540
+[info] is_connected after disconnect: false
+```
+
+To exercise the system-id path directly, construct a `VehicleConnection`
+with the SITL's system id (PX4 SITL defaults to system id 1):
+
+```cpp
+VehicleConnection vehicle(VehicleConnection::create_shared_core(), "udp://:14540", 1);
+```
+
+and confirm the same `connected to ... (system_id=1)` log line appears. To
+see the mismatch path, pass any other id (e.g. `2`): `connect()` should
+return `kDiscoveryTimeout` and log `no matching autopilot discovered on
+udp://:14540 within 3s` after roughly 3 seconds, even though SITL is running
+and answering heartbeats.
