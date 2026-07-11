@@ -32,6 +32,10 @@ MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` (gateway 
 
 `dev` is the integration branch: all work and PRs target it. `main` is production only, advanced by reviewed merges from `dev`, and carries the release tags. Never commit directly to `main`.
 
+## Terminology
+
+`docs/glossary.md` is the locked vocabulary. In code, schema, and technical docs the unit is always a "vehicle" (never "drone"), a gateway manages a "fleet", and MAVLink endpoints are "connection URLs". Reviews enforce this.
+
 ## Hygiene rules (strict)
 
 - Never use em dashes in any text, code comments, docs, or commit messages.
