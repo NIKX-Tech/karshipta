@@ -9,10 +9,10 @@
 #include <spdlog/spdlog.h>
 
 VehicleConnection::VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk,
-                                      const std::string& drone_url,
+                                      const std::string& connection_url,
                                       std::optional<uint32_t> expected_system_id)
     : mavsdk_(std::move(mavsdk)), expected_system_id_(expected_system_id) {
-    set_drone_url(drone_url);
+    set_connection_url(connection_url);
 }
 
 VehicleConnection::~VehicleConnection() {
@@ -24,18 +24,18 @@ std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::create_shared_core() {
         mavsdk::Mavsdk::Configuration{mavsdk::ComponentType::GroundStation});
 }
 
-void VehicleConnection::set_drone_url(const std::string& drone_url) {
-    this->connection_url_ = validate_drone_url(drone_url);
+void VehicleConnection::set_connection_url(const std::string& connection_url) {
+    this->connection_url_ = validate_connection_url(connection_url);
 }
 
-std::string VehicleConnection::get_drone_url() const {
+std::string VehicleConnection::get_connection_url() const {
     return this->connection_url_;
 }
-std::string VehicleConnection::validate_drone_url(const std::string& drone_url) {
-    if (drone_url.empty()) {
-        throw std::invalid_argument("Drone URL cannot be empty");
+std::string VehicleConnection::validate_connection_url(const std::string& connection_url) {
+    if (connection_url.empty()) {
+        throw std::invalid_argument("connection URL cannot be empty");
     }
-    return drone_url;
+    return connection_url;
 }
 
 std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::find_system(

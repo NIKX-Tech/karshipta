@@ -38,12 +38,12 @@ discovered so other classes can do that.
 
 | Member | Behavior |
 |---|---|
-| `VehicleConnection(shared_ptr<Mavsdk>, const string& drone_url, optional<uint32_t> expected_system_id = nullopt)` | Stores the shared core and validates `drone_url`. Does not open a connection. `expected_system_id` is the MAVLink system id (`VehicleInfo.mavlink_system_id`) this connection must bind to; omit only for the single-vehicle M1 case. |
+| `VehicleConnection(shared_ptr<Mavsdk>, const string& connection_url, optional<uint32_t> expected_system_id = nullopt)` | Stores the shared core and validates `connection_url`. Does not open a connection. `expected_system_id` is the MAVLink system id (`VehicleInfo.mavlink_system_id`) this connection must bind to; omit only for the single-vehicle M1 case. |
 | `static shared_ptr<Mavsdk> create_shared_core()` | Builds a `Mavsdk` core configured `ComponentType::GroundStation`. Call once per fleet; pass the result to every `VehicleConnection`. |
-| `set_drone_url(const string&)` / `get_drone_url() const` | Get/replace the URL used by the next `connect()`. |
-| `ConnectResult connect()` | Single attempt. Registers `drone_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for the expected system id (or, if none was configured, any autopilot via `first_autopilot()`). Returns `kSuccess`, `kSocketFailure` (adding the connection itself failed), or `kDiscoveryTimeout` (nothing matching answered in time), so callers can distinguish the two failure modes instead of a bare `false`. |
+| `set_connection_url(const string&)` / `get_connection_url() const` | Get/replace the URL used by the next `connect()`. |
+| `ConnectResult connect()` | Single attempt. Registers `connection_url` on the shared core (only on the first call), then waits up to `kAutopilotDiscoveryTimeoutS` (3s) for the expected system id (or, if none was configured, any autopilot via `first_autopilot()`). Returns `kSuccess`, `kSocketFailure` (adding the connection itself failed), or `kDiscoveryTimeout` (nothing matching answered in time), so callers can distinguish the two failure modes instead of a bare `false`. |
 | `bool connect_with_retry(stop_token, retry_interval = 2s)` | Calls `connect()` in a loop, sleeping in 100ms ticks (so cancellation is responsive), until it succeeds or `stop_token` is cancelled. |
-| `void disconnect()` | Cancels every `subscribe_connection_state()` handle this instance issued, drops the `System` handle, and removes `drone_url` from the shared core. No-op if already disconnected: safe to call unconditionally. |
+| `void disconnect()` | Cancels every `subscribe_connection_state()` handle this instance issued, drops the `System` handle, and removes `connection_url` from the shared core. No-op if already disconnected: safe to call unconditionally. |
 | `bool is_connected() const` | `true` only while a `System` was discovered **and** MAVSDK currently reports its heartbeat as live. Reflects current state, not "was ever connected." |
 | `shared_ptr<System> get_system() const` | The discovered vehicle handle; `nullptr` if not connected. |
 | `shared_ptr<Mavsdk> get_mavsdk() const` | The shared core this connection uses. |

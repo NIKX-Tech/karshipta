@@ -50,7 +50,7 @@ class VehicleConnection {
         // the same shared core. When absent, connect() falls back to
         // first_autopilot() (the single-vehicle M1 case, no config needed).
         VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk,
-                           const std::string& drone_url,
+                           const std::string& connection_url,
                            std::optional<uint32_t> expected_system_id = std::nullopt);
 
         // Builds a Mavsdk core configured the way every VehicleConnection expects
@@ -60,9 +60,9 @@ class VehicleConnection {
         static std::shared_ptr<mavsdk::Mavsdk> create_shared_core();
 
         // Validates and replaces the connection URL used by a subsequent connect().
-        void set_drone_url(const std::string& drone_url);
+        void set_connection_url(const std::string& connection_url);
         // Returns the currently configured connection URL.
-        [[nodiscard]] std::string get_drone_url() const;
+        [[nodiscard]] std::string get_connection_url() const;
 
         // Single attempt: adds connection_url to the shared core (only once, ever;
         // later calls just re-wait for discovery) and blocks up to
@@ -130,8 +130,8 @@ class VehicleConnection {
         bool connection_added_ = false;
         mavsdk::Mavsdk::ConnectionHandle connection_handle_{};
 
-        // Throws std::invalid_argument if drone_url is empty; otherwise returns it unchanged.
-        static std::string validate_drone_url(const std::string& drone_url);
+        // Throws std::invalid_argument if connection_url is empty; otherwise returns it unchanged.
+        static std::string validate_connection_url(const std::string& connection_url);
         // Returns the already-discovered system matching system_id, if any.
         [[nodiscard]] std::optional<std::shared_ptr<mavsdk::System>> find_system(
             uint32_t system_id) const;
