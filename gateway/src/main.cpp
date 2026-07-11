@@ -80,7 +80,12 @@ uint64_t unix_epoch_ms() {
 
 std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope) {
     std::vector<uint8_t> bytes(envelope.ByteSizeLong());
-    envelope.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()));
+    if (!envelope.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()))) {
+        // sizes come from ByteSizeLong() just above, so this cannot fail in
+        // practice; observable anyway per repo rule 5
+        spdlog::error("failed to serialize an Envelope of {} bytes", bytes.size());
+        bytes.clear();
+    }
     return bytes;
 }
 
@@ -145,6 +150,8 @@ karshipta::v1::VehicleState build_vehicle_state(const VehicleConnection& vehicle
     auto* proto_gps = state.mutable_gps();
     proto_gps->set_fix_type(to_proto_fix_type(gps.fix_type));
     proto_gps->set_num_satellites(static_cast<uint32_t>(gps.num_satellites));
+    // Gps.hdop stays unset: MAVSDK's GpsInfo does not carry it (RawGps does;
+    // schema gap tracked for a later milestone).
     proto_gps->set_hdop(telemetry.get_raw_gps().hdop);
 
     state.set_flight_mode(to_proto_flight_mode(telemetry.get_flight_mode()));

@@ -33,7 +33,24 @@ endif()
 find_package(MAVSDK REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
-find_package(ixwebsocket CONFIG REQUIRED)
+
+# IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
+# (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
+# TLS stays off: the local transport is plain ws://, the encrypted path is
+# the M4 relay transport.
+find_package(ixwebsocket CONFIG QUIET)
+if(NOT ixwebsocket_FOUND)
+  include(FetchContent)
+  set(USE_TLS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    ixwebsocket
+    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.5.zip
+  )
+  FetchContent_MakeAvailable(ixwebsocket)
+  if(NOT TARGET ixwebsocket::ixwebsocket)
+    add_library(ixwebsocket::ixwebsocket ALIAS ixwebsocket)
+  endif()
+endif()
 
 # proto/karshipta/v1/*.proto is the single source of truth (root CLAUDE.md); protoc
 # regenerates the C++ bindings into gen/ at configure time so `gateway/gen/` never
@@ -63,6 +80,7 @@ add_library(karshipta_proto STATIC ${KARSHIPTA_PROTO_GENERATED_SRCS})
 target_include_directories(karshipta_proto PUBLIC "${KARSHIPTA_PROTO_GEN_DIR}")
 target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/vehicle)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
@@ -83,6 +101,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   # Stacked milestone branches append their own test sources to this list.
   set(KARSHIPTA_TEST_SOURCES
     tests/vehicle/vehicle_connection_test.cpp
+    tests/transport/websocket_transport_test.cpp
   )
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
@@ -92,6 +111,9 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     MAVSDK::mavsdk
     spdlog::spdlog
     vehicle
+    transport
+    # the transport test drives the server with a real ix client
+    ixwebsocket::ixwebsocket
     karshipta_warnings
   )
 

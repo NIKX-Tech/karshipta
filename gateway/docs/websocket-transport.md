@@ -161,12 +161,15 @@ decodes each Envelope frame, and prints one line per `VehicleInfo`/
 
 ## Automated tests
 
-None yet. `gateway/tests/transport/websocket_transport_test.cpp` exists as
-an empty placeholder, wired into `karshipta_gateway_tests` in the top-level
-`CMakeLists.txt` but with no test cases. Coverage worth adding: a client
-connecting and receiving a `send()`'d frame, a `broadcast()` reaching
-multiple clients, and a disconnect firing `on_disconnect` with the same
-`ClientId` that `on_connect` handed out.
+`gateway/tests/transport/websocket_transport_test.cpp` (GoogleTest, real
+server + real IXWebSocket client on loopback ports, deadline-guarded):
+
+- `ConnectDeliversFrameAndDisconnectMatchesId`: a client connect fires
+  `on_connect`, a `send()` to that id arrives as one binary frame, and the
+  disconnect fires `on_disconnect` with the same `ClientId`.
+- `BroadcastReachesEveryClientAndReceiveRoundTrips`: `broadcast()` reaches
+  two clients; a client's binary frame reaches `on_receive` intact.
+- `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety.
 
 ## Manual verification
 
@@ -195,8 +198,14 @@ client's connection:
 and the client receives one 19-byte binary frame immediately (`VehicleInfo`)
 followed by an 88-byte binary frame roughly every 200 ms (`VehicleState` at
 ~5 Hz), both `karshipta::v1::Envelope` messages. Verified against the real
-gateway process (connected to a live MAVLink source) using a
-`System.Net.WebSockets.ClientWebSocket` client:
+gateway process (connected to a live MAVLink source) using the committed
+test client, `gateway/tools/ws_client.py` (setup lines in its docstring):
+
+```
+python3 gateway/tools/ws_client.py ws://localhost:8765
+```
+
+Sample session (any WebSocket client sees the same frames):
 
 ```
 State: Open

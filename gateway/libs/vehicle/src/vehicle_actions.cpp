@@ -1,13 +1,9 @@
-//
-// Created by amir abkhoshk on 10/07/2026.
-//
-
 #include "vehicle_actions.h"
 
 #include <spdlog/fmt/ostr.h>
 #include <spdlog/spdlog.h>
 
-VehicleActions::VehicleActions(VehicleConnection& d_system) : connection_(d_system) {}
+VehicleActions::VehicleActions(VehicleConnection& connection) : connection_(connection) {}
 
 bool VehicleActions::ensure_action() const {
     if (action_) return true;

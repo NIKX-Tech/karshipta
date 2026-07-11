@@ -1,7 +1,3 @@
-//
-// Created by amir abkhoshk on 10/07/2026.
-//
-
 #ifndef KARSHIPTA_GATEWAY_WEBSOCKET_TRANSPORT_H
 #define KARSHIPTA_GATEWAY_WEBSOCKET_TRANSPORT_H
 

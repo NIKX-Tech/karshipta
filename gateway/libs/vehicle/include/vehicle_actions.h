@@ -1,11 +1,7 @@
-//
-// Created by amir abkhoshk on 10/07/2026.
-//
-
 #ifndef KARSHIPTA_GATEWAY_VEHICLE_ACTIONS_H
 #define KARSHIPTA_GATEWAY_VEHICLE_ACTIONS_H
 
-#include "vehicle.h"
+#include "vehicle_connection.h"
 #include <mavsdk/plugins/action/action.h>
 #include <memory>
 #include <string>
@@ -20,7 +16,7 @@ class VehicleActions {
 public:
     // Binds this wrapper to a connection; does not create the Action plugin yet
     // (that happens lazily in ensure_action() on first use).
-    explicit VehicleActions(VehicleConnection& d_system);
+    explicit VehicleActions(VehicleConnection& connection);
 
     // Implements ArmCommand. Arms the vehicle (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.

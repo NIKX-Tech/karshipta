@@ -1,7 +1,3 @@
-//
-// Created by amir abkhoshk on 10/07/2026.
-//
-
 #ifndef KARSHIPTA_GATEWAY_TRANSPORT_H
 #define KARSHIPTA_GATEWAY_TRANSPORT_H
 
@@ -45,7 +41,8 @@ public:
     virtual void broadcast(const std::vector<uint8_t>& bytes) = 0;
 
     // Registers the callback invoked for every received frame. Only one
-    // callback at a time; a later call replaces the earlier one.
+    // callback at a time, and registration must happen before start():
+    // implementations deliver events from their own threads once running.
     virtual void on_receive(ReceiveCallback callback) = 0;
     // Registers the callback invoked when a client connects.
     virtual void on_connect(ConnectCallback callback) = 0;

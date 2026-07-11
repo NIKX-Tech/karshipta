@@ -1,7 +1,3 @@
-//
-// Created by amir abkhoshk on 10/07/2026.
-//
-
 #include "websocket_transport.h"
 
 #include <cassert>
