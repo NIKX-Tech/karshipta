@@ -1,7 +1,3 @@
-//
-// Created by amir abkhoshk on 09/07/2026.
-//
-
 #include "telemetry.h"
 
 #include <future>
@@ -9,7 +5,32 @@
 
 #include <spdlog/spdlog.h>
 
-TelemetryInfo::TelemetryInfo(VehicleConnection& d_connection) : connection_(d_connection) {}
+namespace {
+
+// Operators read logs; MAVSDK's enum values do not mean anything to them.
+const char* flight_mode_name(const mavsdk::Telemetry::FlightMode mode) {
+    switch (mode) {
+        case mavsdk::Telemetry::FlightMode::Ready: return "ready";
+        case mavsdk::Telemetry::FlightMode::Takeoff: return "takeoff";
+        case mavsdk::Telemetry::FlightMode::Hold: return "hold";
+        case mavsdk::Telemetry::FlightMode::Mission: return "mission";
+        case mavsdk::Telemetry::FlightMode::ReturnToLaunch: return "return-to-launch";
+        case mavsdk::Telemetry::FlightMode::Land: return "land";
+        case mavsdk::Telemetry::FlightMode::Offboard: return "offboard";
+        case mavsdk::Telemetry::FlightMode::FollowMe: return "follow-me";
+        case mavsdk::Telemetry::FlightMode::Manual: return "manual";
+        case mavsdk::Telemetry::FlightMode::Altctl: return "altitude-control";
+        case mavsdk::Telemetry::FlightMode::Posctl: return "position-control";
+        case mavsdk::Telemetry::FlightMode::Acro: return "acro";
+        case mavsdk::Telemetry::FlightMode::Stabilized: return "stabilized";
+        case mavsdk::Telemetry::FlightMode::Rattitude: return "rattitude";
+        default: return "unknown";
+    }
+}
+
+}  // namespace
+
+TelemetryInfo::TelemetryInfo(VehicleConnection& connection) : connection_(connection) {}
 
 TelemetryInfo::~TelemetryInfo() {
     if (!telemetry_) return;
@@ -27,7 +48,7 @@ bool TelemetryInfo::ensure_telemetry() const {
     return true;
 }
 
-void TelemetryInfo::set_telemetry_rate(const float rate) const {
+void TelemetryInfo::set_telemetry_rate(const float rate) {
     if (!ensure_telemetry()) {
         spdlog::error("setting rate failed: telemetry not available");
         return;
@@ -40,7 +61,7 @@ void TelemetryInfo::set_telemetry_rate(const float rate) const {
     spdlog::info("telemetry rate set successfully");
 }
 
-void TelemetryInfo::subscribe_drone_position() const {
+void TelemetryInfo::subscribe_position() {
     if (!ensure_telemetry()) {
         spdlog::error("subscribe to position failed: telemetry not available");
         return;
@@ -55,33 +76,33 @@ void TelemetryInfo::subscribe_drone_position() const {
     spdlog::info("subscribed to position");
 }
 
-void TelemetryInfo::unsubscribe_drone_position() const {
+void TelemetryInfo::unsubscribe_position() {
     if (!ensure_telemetry() || !position_handle_) return;
     telemetry_->unsubscribe_position(*position_handle_);
     position_handle_.reset();
     spdlog::info("unsubscribed from position");
 }
 
-void TelemetryInfo::subscribe_drone_flight_mode() const {
+void TelemetryInfo::subscribe_flight_mode() {
     if (!ensure_telemetry()) return;
 
     last_flight_mode_ = mavsdk::Telemetry::FlightMode::Unknown;
     flight_mode_handle_ = telemetry_->subscribe_flight_mode([this](mavsdk::Telemetry::FlightMode flight_mode) {
         if (last_flight_mode_.exchange(flight_mode) != flight_mode) {
-            spdlog::info("flight mode changed: {}", static_cast<int>(flight_mode));
+            spdlog::info("flight mode changed: {}", flight_mode_name(flight_mode));
         }
     });
     spdlog::info("subscribed to flight mode");
 }
 
-void TelemetryInfo::unsubscribe_drone_flight_mode() const {
+void TelemetryInfo::unsubscribe_flight_mode() {
     if (!ensure_telemetry() || !flight_mode_handle_) return;
     telemetry_->unsubscribe_flight_mode(*flight_mode_handle_);
     flight_mode_handle_.reset();
     spdlog::info("unsubscribed from flight mode");
 }
 
-void TelemetryInfo::subscribe_drone_battery() const {
+void TelemetryInfo::subscribe_battery() {
     if (!ensure_telemetry()) {
         spdlog::error("subscribe to battery failed: telemetry not available");
         return;
@@ -92,55 +113,11 @@ void TelemetryInfo::subscribe_drone_battery() const {
     spdlog::info("subscribed to battery");
 }
 
-void TelemetryInfo::unsubscribe_drone_battery() const {
+void TelemetryInfo::unsubscribe_battery() {
     if (!ensure_telemetry() || !battery_handle_) return;
     telemetry_->unsubscribe_battery(*battery_handle_);
     battery_handle_.reset();
     spdlog::info("unsubscribed from battery");
-}
-
-bool TelemetryInfo::check_drone_health() const {
-    if (!ensure_telemetry()) return false;
-
-    while (!telemetry_->health_all_ok()) {
-        spdlog::info("vehicle not ready to arm, waiting on:");
-        const mavsdk::Telemetry::Health current_health = telemetry_->health();
-        if (!current_health.is_global_position_ok) {
-            spdlog::info("  - GPS fix");
-        }
-        if (!current_health.is_local_position_ok) {
-            spdlog::info("  - local position estimate");
-        }
-        if (!current_health.is_home_position_ok) {
-            spdlog::info("  - home position to be set");
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    return true;
-}
-
-void TelemetryInfo::async_check_drone_health() const {
-    if (!ensure_telemetry()) return;
-
-    spdlog::info("waiting for system to be ready");
-    auto prom = std::make_shared<std::promise<void>>();
-    auto fulfilled = std::make_shared<std::atomic_bool>(false);
-    auto future_result = prom->get_future();
-
-    // subscribe_health_all_ok() is a persistent subscription: the callback fires
-    // every time health status is reported, not just once. Guard with `fulfilled`
-    // so a second `true` after the first can never call set_value() twice (that
-    // throws std::future_error on a MAVSDK-internal thread, crashing the process),
-    // then unsubscribe below as soon as the wait is over.
-    const auto handle = telemetry_->subscribe_health_all_ok([prom, fulfilled](bool result) {
-        if (result && !fulfilled->exchange(true)) {
-            prom->set_value();
-        }
-    });
-
-    future_result.get();  // blocks until the promise is fulfilled
-    telemetry_->unsubscribe_health_all_ok(handle);
-    spdlog::info("system ready to arm");
 }
 
 bool TelemetryInfo::check_for_calibration() const {
@@ -227,21 +204,3 @@ bool TelemetryInfo::is_health_ok() const {
     return telemetry_->health_all_ok();
 }
 
-void TelemetryInfo::check_current_takeoff_process(const float target_alt) const {
-    float current_position = 0;
-    while (current_position < target_alt) {
-        current_position = get_relative_altitude_m();
-        spdlog::info("takeoff altitude: {:.1f}m", current_position);
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-}
-
-void TelemetryInfo::landing_state() const {
-    if (!ensure_telemetry()) return;
-    while (telemetry_->armed()) {
-        const float current_position = get_relative_altitude_m();
-        spdlog::info("landing altitude: {:.1f}m", current_position);
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    spdlog::info("disarmed, exiting");
-}

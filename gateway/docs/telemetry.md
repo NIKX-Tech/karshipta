@@ -23,11 +23,6 @@ succeeded. It does not perform discovery, retries, or link-state tracking
   as an independent, individually cancellable subscription.
 - Poll one-shot values on demand: relative altitude, battery remaining
   percent.
-- Block until pre-arm health passes, either by polling
-  (`check_drone_health()`) or by waiting on a single health-all-ok event
-  (`async_check_drone_health()`).
-- Block until calibration is confirmed OK, until a target altitude is
-  reached, or until the vehicle disarms.
 - Guarantee every subscription this instance registered is cancelled on
   destruction (RAII), so no MAVSDK callback can fire against a destroyed
   `TelemetryInfo`.
@@ -49,20 +44,16 @@ succeeded. It does not perform discovery, retries, or link-state tracking
 |---|---|
 | `explicit TelemetryInfo(VehicleConnection&)` | Binds to a connection. Does not create the `Telemetry` plugin yet; that happens lazily on first use. |
 | `~TelemetryInfo()` | Unsubscribes every position/flight-mode/battery subscription this instance still holds. |
-| `void subscribe_drone_position() const` | Logs `altitude=... latitude=... longitude=...` on every position update. Stores the returned `PositionHandle`. |
-| `void unsubscribe_drone_position() const` | Cancels the stored `PositionHandle`, if any. No-op if never subscribed. |
-| `void subscribe_drone_flight_mode() const` | Logs `flight mode changed: N` only when the mode actually changes (tracked via `last_flight_mode_`). Stores the returned `FlightModeHandle`. |
-| `void unsubscribe_drone_flight_mode() const` | Cancels the stored `FlightModeHandle`, if any. |
-| `void subscribe_drone_battery() const` | Logs `battery remaining=...% voltage=...V` on every battery update. Stores the returned `BatteryHandle`. |
-| `void unsubscribe_drone_battery() const` | Cancels the stored `BatteryHandle`, if any. |
+| `void subscribe_position() const` | Logs `altitude=... latitude=... longitude=...` on every position update. Stores the returned `PositionHandle`. |
+| `void unsubscribe_position() const` | Cancels the stored `PositionHandle`, if any. No-op if never subscribed. |
+| `void subscribe_flight_mode() const` | Logs `flight mode changed: N` only when the mode actually changes (tracked via `last_flight_mode_`). Stores the returned `FlightModeHandle`. |
+| `void unsubscribe_flight_mode() const` | Cancels the stored `FlightModeHandle`, if any. |
+| `void subscribe_battery() const` | Logs `battery remaining=...% voltage=...V` on every battery update. Stores the returned `BatteryHandle`. |
+| `void unsubscribe_battery() const` | Cancels the stored `BatteryHandle`, if any. |
 | `void set_telemetry_rate(float rate) const` | Requests the autopilot send position updates at `rate` Hz via `set_rate_position()`. Logs and returns on failure. |
-| `bool check_drone_health() const` | Blocks, polling once per second, logging which pre-arm check (GPS fix / local position / home position) is still failing, until `health_all_ok()` is true. |
-| `void async_check_drone_health() const` | Blocks until a single `health_all_ok() == true` event, via a promise/future instead of polling. Subscribes, waits, then unsubscribes itself before returning, so it never leaves a subscription running past the call. |
 | `bool check_for_calibration() const` | One-shot check of gyro/accelerometer/magnetometer calibration. Logs and returns `false` for each sensor that still needs calibration. |
 | `float get_relative_altitude_m() const` | Polls `telemetry_->position()` once; returns `relative_altitude_m`. |
 | `float get_battery_remaining_percent() const` | Polls `telemetry_->battery()` once; returns `remaining_percent` (0 to 100). |
-| `void check_current_takeoff_process(float target_alt) const` | Blocks, polling once per second and logging altitude, until `get_relative_altitude_m() >= target_alt`. |
-| `void landing_state() const` | Blocks, polling once per second and logging altitude, until `telemetry_->armed()` is false. |
 
 ## Design: lazy plugin construction against a live connection
 
@@ -74,7 +65,7 @@ VehicleConnection vehicle(core, "udp://:14540");
 TelemetryInfo telemetry(vehicle);       // fine, even before connect()
 
 vehicle.connect();
-telemetry.subscribe_drone_position();   // ensure_telemetry() lazily builds
+telemetry.subscribe_position();   // ensure_telemetry() lazily builds
                                          // the Telemetry plugin here
 ```
 
@@ -114,12 +105,12 @@ by the matching `subscribe_*()` and cleared by the matching
 `unsubscribe_*()`:
 
 ```cpp
-void TelemetryInfo::subscribe_drone_position() const {
+void TelemetryInfo::subscribe_position() const {
     if (!ensure_telemetry()) { ... return; }
     position_handle_ = telemetry_->subscribe_position([](const auto& position) { ... });
 }
 
-void TelemetryInfo::unsubscribe_drone_position() const {
+void TelemetryInfo::unsubscribe_position() const {
     if (!ensure_telemetry() || !position_handle_) return;
     telemetry_->unsubscribe_position(*position_handle_);
     position_handle_.reset();
@@ -131,19 +122,10 @@ are still set, so a `TelemetryInfo` that goes out of scope while
 subscribed never leaves a callback capturing a dangling `this` registered
 on the `Telemetry` plugin.
 
-`async_check_drone_health()` does not use a member handle: it subscribes,
-blocks on the future, and unsubscribes with the local handle before
-returning, all within the one call, so the subscription's lifetime never
-outlives the function. An `std::atomic_bool` guards against
-`subscribe_health_all_ok()` firing `true` more than once before the
-unsubscribe takes effect; without it, a second `true` would call
-`std::promise::set_value()` on an already-satisfied promise, which throws
-`std::future_error` on a MAVSDK-internal thread and terminates the process.
-
 ## Thread safety of callback state
 
-`subscribe_drone_flight_mode()`'s callback runs on a MAVSDK-internal
-thread, not necessarily the thread that called `subscribe_drone_flight_mode()`.
+`subscribe_flight_mode()`'s callback runs on a MAVSDK-internal
+thread, not necessarily the thread that called `subscribe_flight_mode()`.
 The only piece of state it touches, `last_flight_mode_`, is
 `std::atomic<mavsdk::Telemetry::FlightMode>` for exactly this reason:
 
@@ -160,12 +142,12 @@ thread-safe either (see its docs' Constraints section).
 ## RAII and ownership rules
 
 ```cpp
-explicit TelemetryInfo(VehicleConnection& d_connection);
+explicit TelemetryInfo(VehicleConnection& connection);
 ~TelemetryInfo();  // unsubscribes position/flight-mode/battery if still active
 ```
 
 - **No default construction, no copy/move declared** (implicitly deleted by
-  the reference member `connection_`) — a `TelemetryInfo` cannot exist
+  the reference member `connection_`): a `TelemetryInfo` cannot exist
   without a `VehicleConnection` to read from, and cannot be copied or moved
   out from under a live subscription whose callback may capture `this`.
   Mirrors `VehicleConnection`'s own move-deleted rationale.
@@ -188,18 +170,14 @@ explicit TelemetryInfo(VehicleConnection& d_connection);
   unsubscribe pairs, `ensure_telemetry()`). MAVSDK's own callback delivery
   runs on its internal threads regardless; only `last_flight_mode_` is
   built to tolerate that.
-- **`async_check_drone_health()` blocks the calling thread** until health
-  passes; despite the name, it is not asynchronous from the caller's point
-  of view; "async" refers to it not polling.
 
 ## Automated tests
 
 None yet. `gateway/tests/vehicle/vehicle_connection_test.cpp` covers
 `VehicleConnection`; there is no `telemetry_test.cpp`. Coverage worth adding
 against the same fake-autopilot pattern used there: subscribe/unsubscribe
-does not leave a dangling handle, the destructor unsubscribes an active
-position subscription, and `async_check_drone_health()` does not deadlock
-or double-fire when health flips healthy more than once in a row.
+does not leave a dangling handle, and the destructor unsubscribes an active
+position subscription.
 
 ## Manual verification
 
@@ -233,3 +211,11 @@ once per second, interleaved lines like:
 
 until SITL is stopped, at which point `vehicle.is_connected()` goes false
 and the program logs `link lost, exiting`.
+
+## Removed on review: blocking waits
+
+The first draft had blocking helpers (health/calibration gates, takeoff
+progress, landing wait). They were M3 workflow scaffolding, could not run
+inside the gateway's publish loop, and one of them looped forever after a
+link loss. The M3 command executor implements those flows against the
+one-shot accessors above, cancellably.
