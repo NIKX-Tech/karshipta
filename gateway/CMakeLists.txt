@@ -32,7 +32,13 @@ if(WIN32)
 endif()
 find_package(MAVSDK REQUIRED)
 find_package(spdlog REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
+# Homebrew/vcpkg protobuf ships a CMake config; apt's ships only the classic
+# find module. Try config mode first, fall back to module mode, which also
+# defines protobuf::libprotobuf and protobuf::protoc.
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+  find_package(Protobuf REQUIRED)
+endif()
 
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
