@@ -6,6 +6,9 @@ console/.svelte-kit/
 console/build/
 console/src/lib/gen/
 
+# local notes
+CLAUDE.local.md
+
 # tooling
 .DS_Store
 *.log
@@ -13,3 +16,7 @@ console/src/lib/gen/
 .env.*
 compile_commands.json
 .cache/
+/.idea
+/gateway/.gitignore
+
+/.claude/
