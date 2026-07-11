@@ -18,6 +18,10 @@ public:
     // (that happens lazily in ensure_action() on first use).
     explicit VehicleActions(VehicleConnection& connection);
 
+    // Human-readable text for a MAVSDK result (via its operator<<), the string
+    // that CommandAck.message carries on rejection.
+    static std::string result_name(mavsdk::Action::Result result);
+
     // Implements ArmCommand. Arms the vehicle (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.
     [[nodiscard]] mavsdk::Action::Result arm() const;
