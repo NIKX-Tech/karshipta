@@ -14,4 +14,5 @@ target_link_libraries(karshipta_gateway
             MAVSDK::mavsdk
             spdlog::spdlog
             vehicle
+            karshipta_warnings
 )

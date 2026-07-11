@@ -1,6 +1,5 @@
 add_library(vehicle
-        src/vehicle.cpp
-        src/telemetry.cpp
+        src/vehicle_connection.cpp
 )
 
 target_include_directories(vehicle
@@ -12,4 +11,6 @@ target_link_libraries(vehicle
         PUBLIC
             MAVSDK::mavsdk
             spdlog::spdlog
+        PRIVATE
+            karshipta_warnings
 )

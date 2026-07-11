@@ -9,16 +9,20 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Warnings are errors (repo rule), applied per-target through this interface
+# library so fetched third-party code (GoogleTest) is not held to our flags.
+# MSVC is a local Windows development convenience; CI enforces gcc and clang.
+add_library(karshipta_warnings INTERFACE)
 if(MSVC)
-  add_compile_options(/W4)
+  target_compile_options(karshipta_warnings INTERFACE /W4)
 else()
-  add_compile_options(-Wall -Wextra)
+  target_compile_options(karshipta_warnings INTERFACE -Wall -Wextra -Werror)
 endif()
 
-# On Linux, MAVSDK/spdlog are installed system-wide via apt (libmavsdk-dev,
-# libspdlog-dev). On Windows, fall back to vendored copies under third_party/
-# (vcpkg is not used here: it requires PowerShell Core, which this machine
-# does not have and could not auto-download).
+# On Linux, MAVSDK comes from the prebuilt release .deb and spdlog from apt
+# (libspdlog-dev); macOS gets both from Homebrew. On Windows, fall back to
+# vendored copies under third_party/ (kept in sync with vcpkg.json for anyone
+# using vcpkg instead).
 if(WIN32)
   list(APPEND CMAKE_PREFIX_PATH
     "${CMAKE_SOURCE_DIR}/third_party/mavsdk"
@@ -28,28 +32,36 @@ endif()
 find_package(MAVSDK REQUIRED)
 find_package(spdlog REQUIRED)
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/vehicle)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
 
 if(KARSHIPTA_GATEWAY_BUILD_TESTS)
-  find_package(GTest REQUIRED)
+  # GoogleTest is fetched and pinned rather than system-installed: hermetic on
+  # CI and identical on every dev machine.
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
   enable_testing()
 
-  add_executable(karshipta_gateway_tests
+  # Stacked milestone branches append their own test sources to this list.
+  set(KARSHIPTA_TEST_SOURCES
     tests/vehicle/vehicle_connection_test.cpp
-    tests/vehicle/vehicle_manager_test.cpp
-    tests/transport/websocket_transport_test.cpp
   )
+
+  add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
 
   target_link_libraries(karshipta_gateway_tests PRIVATE
     GTest::gtest_main
     MAVSDK::mavsdk
     spdlog::spdlog
     vehicle
-    transport
+    karshipta_warnings
   )
 
   if(WIN32)
@@ -62,5 +74,5 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   endif()
 
   include(GoogleTest)
-  gtest_discover_tests(karshipta_gateway_tests)
+  gtest_discover_tests(karshipta_gateway_tests PROPERTIES TIMEOUT 60)
 endif()

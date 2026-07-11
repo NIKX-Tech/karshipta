@@ -1,12 +1,8 @@
-//
-// Created by amir abkhoshk on 09/07/2026.
-//
-
 #include <cstdlib>
 
 #include <spdlog/spdlog.h>
 
-#include "vehicle.h"
+#include "vehicle_connection.h"
 
 namespace {
 constexpr auto kConnectionUrl = "udp://:14540";
