@@ -10,8 +10,10 @@
 
 #include <karshipta/v1/envelope.pb.h>
 
+#include "command_executor.h"
 #include "telemetry.h"
 #include "transport.h"
+#include "vehicle_actions.h"
 #include "vehicle_connection.h"
 #include "websocket_transport.h"
 
@@ -182,6 +184,24 @@ int main() {
 
     WebsocketTransport transport(kWebSocketHost, kWebSocketPort);
 
+    VehicleActions actions(vehicle);
+    CommandExecutor executor(actions, telemetry, [&transport](const karshipta::v1::CommandAck& ack) {
+        karshipta::v1::Envelope ack_envelope;
+        *ack_envelope.mutable_command_ack() = ack;
+        transport.broadcast(serialize_envelope(ack_envelope));
+        // rejected commands are events a human should see (gateway rule 5)
+        if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
+            karshipta::v1::Envelope event_envelope;
+            auto* event = event_envelope.mutable_event();
+            event->set_vehicle_id(ack.vehicle_id());
+            event->set_timestamp_ms(unix_epoch_ms());
+            event->set_severity(karshipta::v1::SEVERITY_WARNING);
+            event->set_code("COMMAND_REJECTED");
+            event->set_message(ack.message());
+            transport.broadcast(serialize_envelope(event_envelope));
+        }
+    });
+
     transport.on_connect([&vehicle, &transport](const Transport::ClientId client) {
         const auto info = build_vehicle_info(vehicle);
         if (!info) {
@@ -192,10 +212,39 @@ int main() {
         *envelope.mutable_vehicle_info() = *info;
         transport.send(client, serialize_envelope(envelope));
     });
-    transport.on_receive([](const Transport::ClientId client, const std::vector<uint8_t>& bytes) {
-        // Command/Mission envelopes land here starting BRIEF.md M3; for now the
-        // gateway is publish-only, so incoming frames are only observable, not acted on.
-        spdlog::info("received {} byte frame from client {} (not yet handled)", bytes.size(), client);
+    transport.on_receive([&executor, &transport](const Transport::ClientId client,
+                                                 const std::vector<uint8_t>& bytes) {
+        karshipta::v1::Envelope envelope;
+        if (!envelope.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
+            spdlog::warn("undecodable {} byte frame from client {}", bytes.size(), client);
+            return;
+        }
+        switch (envelope.payload_case()) {
+            case karshipta::v1::Envelope::kCommand: {
+                karshipta::v1::Command command = envelope.command();
+                if (command.vehicle_id() != kVehicleId) {
+                    // single-vehicle gateway until M4's VehicleManager routes by id
+                    karshipta::v1::Envelope ack_envelope;
+                    auto* ack = ack_envelope.mutable_command_ack();
+                    ack->set_command_id(command.command_id());
+                    ack->set_vehicle_id(command.vehicle_id());
+                    ack->set_status(karshipta::v1::COMMAND_STATUS_REJECTED);
+                    ack->set_message("unknown vehicle");
+                    transport.broadcast(serialize_envelope(ack_envelope));
+                    spdlog::warn("command for unknown vehicle {} rejected", command.vehicle_id());
+                    break;
+                }
+                executor.enqueue(std::move(command));
+                break;
+            }
+            case karshipta::v1::Envelope::kMissionUpload:
+                spdlog::warn("mission upload from client {} ignored: missions land in M5", client);
+                break;
+            default:
+                spdlog::warn("unexpected downstream payload kind {} from client {}",
+                             static_cast<int>(envelope.payload_case()), client);
+                break;
+        }
     });
     transport.start();
 

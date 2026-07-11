@@ -4,18 +4,14 @@
 
 #include <spdlog/spdlog.h>
 
-namespace {
-
 // MAVSDK only offers operator<< for Action::Result, and fmt::streamed needs
 // fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one stringstream keeps the
 // human-readable reason portable.
-std::string result_name(const mavsdk::Action::Result result) {
+std::string VehicleActions::result_name(const mavsdk::Action::Result result) {
     std::ostringstream stream;
     stream << result;
     return stream.str();
 }
-
-}  // namespace
 
 VehicleActions::VehicleActions(VehicleConnection& connection) : connection_(connection) {}
 
