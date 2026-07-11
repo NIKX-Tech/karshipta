@@ -1,7 +1,21 @@
 #include "vehicle_actions.h"
 
-#include <spdlog/fmt/ostr.h>
+#include <sstream>
+
 #include <spdlog/spdlog.h>
+
+namespace {
+
+// MAVSDK only offers operator<< for Action::Result, and fmt::streamed needs
+// fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one stringstream keeps the
+// human-readable reason portable.
+std::string result_name(const mavsdk::Action::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
+}  // namespace
 
 VehicleActions::VehicleActions(VehicleConnection& connection) : connection_(connection) {}
 
@@ -17,7 +31,7 @@ bool VehicleActions::ensure_action() const {
 mavsdk::Action::Result VehicleActions::log_result(const std::string& label,
                                                    const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
-        spdlog::error("{} failed: {}", label, fmt::streamed(result));
+        spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
     spdlog::info("{} succeeded", label);
