@@ -92,6 +92,8 @@
 		<p class="text-fg-muted text-xs">Waiting for telemetry</p>
 	{/if}
 
-	<CommandPanel {vehicleId} />
-	<MissionPanel {vehicleId} />
+	{#if !fleet.readonly}
+		<CommandPanel {vehicleId} />
+		<MissionPanel {vehicleId} />
+	{/if}
 </section>

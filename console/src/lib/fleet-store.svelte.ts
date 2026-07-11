@@ -67,6 +67,8 @@ class FleetStore {
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
 	/** gateway link as the operator should read it; set by the page wiring */
 	link = $state<'live' | 'sim' | 'connecting' | 'down'>('down');
+	/** read-only session: telemetry flows, commanding is refused observably */
+	readonly = $state(false);
 	/** mission being planned; while set, map clicks add waypoints for its vehicle */
 	missionDraft = $state<MissionDraft | undefined>(undefined);
 	/** last uploaded mission per vehicle, so Start knows what it refers to */
@@ -169,6 +171,20 @@ class FleetStore {
 	}
 
 	sendCommand(vehicleId: string, action: NonNullable<Command['action']>): string {
+		if (this.readonly) {
+			// belt and braces: viewer mode hides the command UI, but any path
+			// that still sends must settle observably, never silently
+			const refusedId = crypto.randomUUID();
+			this.commands[refusedId] = {
+				commandId: refusedId,
+				vehicleId,
+				kind: action.$case,
+				status: CommandStatus.COMMAND_STATUS_REJECTED,
+				message: 'read-only session',
+				sentAtMs: Date.now()
+			};
+			return refusedId;
+		}
 		const command: Command = {
 			commandId: crypto.randomUUID(),
 			vehicleId,

@@ -14,6 +14,7 @@
 	// applyEnvelope path. onMount, not $effect: feeding the store must not
 	// make this block depend on it.
 	onMount(() => {
+		fleet.readonly = env.PUBLIC_READONLY === 'true';
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		let transport: FleetTransport;
 		if (gatewayUrl) {
@@ -59,6 +60,15 @@
 		<span class="text-fg-muted ml-auto font-mono text-[10px] tabular-nums">
 			FLEET {fleet.vehicleIds.length}
 		</span>
+		{#if fleet.readonly}
+			<span
+				class="border-edge text-fg-muted rounded border px-1.5 py-0.5 font-mono text-[10px]"
+				role="status"
+				aria-label="Read-only session"
+			>
+				VIEWER
+			</span>
+		{/if}
 		<span class="flex items-center gap-1.5" role="status" aria-label="Gateway link {linkLabel}">
 			<span class="inline-block h-2 w-2 rounded-full {linkTone}"></span>
 			<span class="text-fg-muted font-mono text-[10px]">{linkLabel}</span>
