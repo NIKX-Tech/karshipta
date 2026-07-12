@@ -27,6 +27,7 @@ if(WIN32)
   list(APPEND CMAKE_PREFIX_PATH
     "${CMAKE_SOURCE_DIR}/third_party/mavsdk"
     "${CMAKE_SOURCE_DIR}/third_party/spdlog"
+    "${CMAKE_SOURCE_DIR}/third_party/protobuf"
     "${CMAKE_SOURCE_DIR}/third_party/vcpkg/installed/x64-windows"
   )
 endif()
@@ -43,11 +44,13 @@ endif()
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
 # TLS stays off: the local transport is plain ws://, the encrypted path is
-# the M4 relay transport.
+# the M4 relay transport. Zlib (permessage-deflate compression) stays off
+# too: it is optional and not vendored anywhere, so skip the dependency.
 find_package(ixwebsocket CONFIG QUIET)
 if(NOT ixwebsocket_FOUND)
   include(FetchContent)
   set(USE_TLS OFF CACHE BOOL "" FORCE)
+  set(USE_ZLIB OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     ixwebsocket
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.5.zip
@@ -130,13 +133,6 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
       $<TARGET_RUNTIME_DLLS:karshipta_gateway_tests>
       $<TARGET_FILE_DIR:karshipta_gateway_tests>
       COMMAND_EXPAND_LISTS
-    )
-    # See the matching comment in src/CMakeLists.txt: vcpkg's zlib DLL is missed by
-    # $<TARGET_RUNTIME_DLLS:...> and needs an explicit copy.
-    add_custom_command(TARGET karshipta_gateway_tests POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_SOURCE_DIR}/third_party/vcpkg/installed/x64-windows/bin/z.dll"
-      $<TARGET_FILE_DIR:karshipta_gateway_tests>
     )
   endif()
 
