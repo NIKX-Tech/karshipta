@@ -39,6 +39,7 @@ For console logs, pageerrors, and timed multi-shot captures, use playwright-core
 - If store state looks impossible (commands vanish, sender unbound) after many HMR edits, restart the dev server before debugging: stale HMR module graphs split the store singleton.
 - Events feed (bottom right): landing/rejection events with severity dots and mono timestamps.
 - Without WebGL the map shows an inline "Map unavailable" alert but cards keep updating.
+- With `PUBLIC_READONLY=true`: VIEWER badge in the top bar, COMMANDS and MISSION panels absent from the detail panel, telemetry still updating.
 - With `PUBLIC_GATEWAY_WS_URL` set and no gateway: no fake vehicles, `transport: websocket error` retries with growing backoff, no crash; sent commands settle TIMEOUT after 10 s.
 
 ## Gotchas

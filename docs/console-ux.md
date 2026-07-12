@@ -36,6 +36,10 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 | Telemetry charts / log review (v0.2) | bottom drawer under the map, collapsed by default |
 | Video feeds (later) | detail panel top, above telemetry |
 
+## Viewer mode
+
+`PUBLIC_READONLY=true` makes the session read-only: a VIEWER badge in the top bar, no command dock, no mission panel, telemetry untouched. Client-side only; the gateway-side rejection policy is issue #20.
+
 ## Interaction rules (do not regress)
 
 - Flight-critical or destructive actions (land, RTL, force disarm, goto) always confirm first; Escape cancels without sending.
