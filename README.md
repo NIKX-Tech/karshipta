@@ -38,9 +38,9 @@ Early development, pre-release. The roadmap to v0.1 is in [ROADMAP.md](ROADMAP.m
 | Component | State |
 |---|---|
 | `proto/` protobuf contract | ✅ v1 schema defined |
-| `console/` web dashboard | 🚧 live map with simulated fleet |
-| `gateway/` MAVLink edge service | 🚧 in development (M1 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
-| `deploy/` one-command demo | 🚧 SITL containers ready, services land with their Dockerfiles |
+| `console/` web dashboard | 🚧 live map, commands, missions, simulated fleet |
+| `gateway/` MAVLink edge service | 🚧 connect, telemetry, commands done (M1 to M3); multi-vehicle and missions next (M4 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
+| `deploy/` one-command demo | 🚧 SITL containers ready, services land with their Dockerfiles (M6) |
 
 ## The 60-second demo (coming with v0.1)
 
@@ -51,7 +51,11 @@ docker compose up
 # open http://localhost:5173 and watch 3 simulated vehicles fly
 ```
 
-Until then, the console runs standalone with a simulated fleet:
+Until `docker compose up` covers the gateway too (M6), you can already run
+the console against one real simulated vehicle by hand: see
+[docs/quickstart.md](docs/quickstart.md).
+
+For just the console with a simulated fleet and no real vehicle:
 
 ```bash
 cd console
