@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 
 	interface Props {
@@ -16,6 +17,20 @@
 	const uploaded = $derived(fleet.uploadedMissions[vehicleId]);
 	const progress = $derived(fleet.missionProgress[vehicleId]);
 	const vehicleState = $derived(fleet.vehicles[vehicleId]?.state);
+
+	const startWarning = $derived.by(() => {
+		if (!uploaded) return undefined;
+		const names = uploaded.items.flatMap((item) => {
+			const position = item.position;
+			if (!position) return [];
+			return geozoneStore
+				.zonesContaining(position.latitudeDeg, position.longitudeDeg)
+				.map((zone) => zone.name);
+		});
+		const uniqueNames = [...new Set(names)];
+		if (uniqueNames.length === 0) return undefined;
+		return `Route crosses ${uniqueNames.join(', ')}.`;
+	});
 </script>
 
 <section class="border-edge bg-panel/90 rounded border p-3" aria-label="Mission for {vehicleId}">
@@ -117,6 +132,7 @@
 	<ConfirmDialog
 		title={`Start mission on ${vehicleId}`}
 		body={`The vehicle will fly ${uploaded?.items.length ?? 0} waypoints${(uploaded?.repeatCount ?? 0) > 0 ? ` and repeat ${uploaded?.repeatCount} more times` : ''}.`}
+		warning={startWarning}
 		confirmLabel="Start"
 		onconfirm={() => {
 			fleet.sendCommand(vehicleId, { $case: 'startMission', startMission: {} });

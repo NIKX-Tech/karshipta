@@ -40,6 +40,10 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 
 `PUBLIC_READONLY=true` makes the session read-only: a VIEWER badge in the top bar, no command dock, no mission panel, telemetry untouched. Client-side only; the gateway-side rejection policy is issue #20.
 
+## Airspace zones
+
+`PUBLIC_OPENAIP_KEY` turns on the geozone layer: translucent zone polygons under the mission route (red prohibited, amber restricted, blue other), a legend at bottom-left of the map, and a non-blocking warning line in the goto and mission-start confirm dialogs when the target crosses a zone. Absent key means no layer, no requests, no legend: silent by design. `src/lib/geozones/` is built behind a `GeozoneSource` interface so an official ED-269 per-country feed can slot in later without touching the map or the dialogs.
+
 ## Interaction rules (do not regress)
 
 - Flight-critical or destructive actions (land, RTL, force disarm, goto) always confirm first; Escape cancels without sending.

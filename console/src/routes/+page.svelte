@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
@@ -15,6 +16,7 @@
 	// make this block depend on it.
 	onMount(() => {
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
+		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		let transport: FleetTransport;
 		if (gatewayUrl) {
