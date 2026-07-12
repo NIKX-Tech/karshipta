@@ -2,12 +2,14 @@
 	interface Props {
 		title: string;
 		body: string;
+		/** non-blocking notice, e.g. a target inside an airspace zone; operator still decides */
+		warning?: string;
 		confirmLabel: string;
 		onconfirm: () => void;
 		oncancel: () => void;
 	}
 
-	const { title, body, confirmLabel, onconfirm, oncancel }: Props = $props();
+	const { title, body, warning, confirmLabel, onconfirm, oncancel }: Props = $props();
 
 	function onkeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') oncancel();
@@ -25,6 +27,9 @@
 	>
 		<h3 class="font-display text-sm font-semibold">{title}</h3>
 		<p class="text-fg-muted mt-2 text-xs">{body}</p>
+		{#if warning}
+			<p class="text-accent mt-2 text-xs" role="alert">{warning}</p>
+		{/if}
 		<div class="mt-4 flex justify-end gap-2">
 			<!-- autofocus on the safe action when a flight-critical dialog opens -->
 			<!-- svelte-ignore a11y_autofocus -->

@@ -2,6 +2,8 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
+	import type { ViewportBounds } from '$lib/geozones/types';
 
 	interface Props {
 		centerLat: number;
@@ -29,6 +31,9 @@
 	let map = $state<maplibregl.Map | undefined>(undefined);
 	let mapError = $state<string | undefined>(undefined);
 	const ROUTE_SOURCE = 'mission-route';
+	const GEOZONE_SOURCE = 'geozones';
+	const GEOZONE_FILL_LAYER = 'geozones-fill';
+	const GEOZONE_LINE_LAYER = 'geozones-line';
 
 	// imperative per-vehicle marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
@@ -127,10 +132,21 @@
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
 		});
+		const requestGeozones = () => {
+			const bounds = created.getBounds();
+			const viewport: ViewportBounds = [
+				bounds.getWest(),
+				bounds.getSouth(),
+				bounds.getEast(),
+				bounds.getNorth()
+			];
+			geozoneStore.requestViewport(viewport);
+		};
+		created.on('moveend', requestGeozones);
 		created.on('load', () => {
 			created.addSource(ROUTE_SOURCE, {
 				type: 'geojson',
-				data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
+				data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }
 			});
 			created.addLayer({
 				id: ROUTE_SOURCE,
@@ -138,7 +154,54 @@
 				source: ROUTE_SOURCE,
 				paint: { 'line-color': '#3b9eff', 'line-width': 2, 'line-dasharray': [2, 1.5] }
 			});
+			// geozones sit under the route/markers: added first, so later layers paint on top
+			created.addSource(GEOZONE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: GEOZONE_FILL_LAYER,
+					type: 'fill',
+					source: GEOZONE_SOURCE,
+					paint: {
+						'fill-color': [
+							'match',
+							['get', 'category'],
+							'prohibited',
+							'#e74c3c',
+							'restricted',
+							'#f5a623',
+							'#3b9eff'
+						],
+						'fill-opacity': 0.15
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addLayer(
+				{
+					id: GEOZONE_LINE_LAYER,
+					type: 'line',
+					source: GEOZONE_SOURCE,
+					paint: {
+						'line-color': [
+							'match',
+							['get', 'category'],
+							'prohibited',
+							'#e74c3c',
+							'restricted',
+							'#f5a623',
+							'#3b9eff'
+						],
+						'line-width': 1.5,
+						'line-opacity': 0.6
+					}
+				},
+				ROUTE_SOURCE
+			);
 			mapLoaded = true;
+			requestGeozones();
 		});
 		map = created;
 		return () => {
@@ -156,6 +219,20 @@
 		const planning =
 			fleet.missionDraft?.vehicleId === fleet.selectedVehicleId && fleet.missionDraft;
 		map.getCanvas().style.cursor = fleet.gotoArming || planning ? 'crosshair' : '';
+	});
+
+	// push loaded airspace zones into their source whenever the store updates
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(GEOZONE_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: geozoneStore.zones.map((zone) => ({
+				...zone.polygon,
+				properties: { category: zone.category, name: zone.name }
+			}))
+		});
 	});
 
 	// draw the mission draft of the selected vehicle: dashed blue route + numbered points
@@ -241,7 +318,13 @@
 	});
 </script>
 
-<div bind:this={container} class="h-full w-full" aria-label="Fleet map">
+<div class="relative h-full w-full">
+	<!--
+		MapLibre takes ownership of this div's contents (canvas, its own
+		control divs) and paints over anything already inside it, so overlays
+		must be siblings here, not children of the bound container below.
+	-->
+	<div bind:this={container} class="h-full w-full" aria-label="Fleet map"></div>
 	{#if mapError}
 		<p
 			role="alert"
@@ -249,5 +332,24 @@
 		>
 			Map unavailable: {mapError}
 		</p>
+	{/if}
+	{#if geozoneStore.active}
+		<ul
+			class="border-edge bg-panel/90 absolute bottom-8 left-4 flex gap-3 rounded border px-2 py-1"
+			aria-label="Airspace zone legend"
+		>
+			<li class="flex items-center gap-1 text-[10px]">
+				<span class="h-2 w-2 rounded-full" style="background-color: #e74c3c"></span>
+				Prohibited
+			</li>
+			<li class="flex items-center gap-1 text-[10px]">
+				<span class="h-2 w-2 rounded-full" style="background-color: #f5a623"></span>
+				Restricted
+			</li>
+			<li class="flex items-center gap-1 text-[10px]">
+				<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
+				Other airspace
+			</li>
+		</ul>
 	{/if}
 </div>

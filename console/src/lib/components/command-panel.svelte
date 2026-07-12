@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { fleet, isTerminal } from '$lib/fleet-store.svelte';
+	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { CommandStatus, commandStatusToJSON, type Command } from '$lib/gen/karshipta/v1/command';
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 
@@ -51,6 +52,12 @@
 	const pendingGoto = $derived(
 		fleet.selectedVehicleId === vehicleId ? fleet.pendingGoto : undefined
 	);
+	const gotoWarning = $derived.by(() => {
+		if (!pendingGoto) return undefined;
+		const zones = geozoneStore.zonesContaining(pendingGoto.latitudeDeg, pendingGoto.longitudeDeg);
+		if (zones.length === 0) return undefined;
+		return `Target is inside ${zones.map((zone) => zone.name).join(', ')}.`;
+	});
 </script>
 
 <section class="border-edge bg-panel/90 rounded border p-3" aria-label="Commands for {vehicleId}">
@@ -198,6 +205,7 @@
 	<ConfirmDialog
 		title={`Goto for ${vehicleId}`}
 		body={`Fly to ${point.latitudeDeg.toFixed(6)}, ${point.longitudeDeg.toFixed(6)} at current altitude.`}
+		warning={gotoWarning}
 		confirmLabel="Fly"
 		onconfirm={() => {
 			send({

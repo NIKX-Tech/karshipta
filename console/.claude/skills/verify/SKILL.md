@@ -41,8 +41,12 @@ For console logs, pageerrors, and timed multi-shot captures, use playwright-core
 - Without WebGL the map shows an inline "Map unavailable" alert but cards keep updating.
 - With `PUBLIC_READONLY=true`: VIEWER badge in the top bar, COMMANDS and MISSION panels absent from the detail panel, telemetry still updating.
 - With `PUBLIC_GATEWAY_WS_URL` set and no gateway: no fake vehicles, `transport: websocket error` retries with growing backoff, no crash; sent commands settle TIMEOUT after 10 s.
+- Without `PUBLIC_OPENAIP_KEY`: no geozone layer, no legend, zero requests to api.core.openaip.net (only the local module URL appears in the network log; that is Vite serving the source, not a real API call).
+- With `PUBLIC_OPENAIP_KEY` set (even to a bogus value): legend appears bottom-left of the map; a failed or unexpected response is caught and logged (`geozones: failed to load viewport`), never thrown, and the rest of the console keeps working.
 
 ## Gotchas
 
 - A single `--screenshot` at page load races the first 200 ms telemetry tick; use `--virtual-time-budget` or a real wait.
 - The fake fleet is fed from `onMount` in `+page.svelte`; it must never move into an `$effect` (feeding the store from inside an effect that also reads it causes an infinite setup/teardown loop).
+- Overlays that sit on top of the map (legend, error banner) must be siblings of the `bind:this={container}` div in `fleet-map.svelte`, never children of it: MapLibre takes ownership of that div's contents and paints its own canvas over anything already inside it.
+- Class fields read from a template (e.g. a store's `active` getter) must be `$state` in Svelte 5, even when private; a plain field silently breaks reactivity with no error, only a UI that never updates.
