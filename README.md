@@ -51,8 +51,10 @@ docker compose up
 # open http://localhost:5173 and watch 3 simulated vehicles fly
 ```
 
-Until `docker compose up` covers the gateway too (M6), you can already run
-the console against one real simulated vehicle by hand: see
+Today that command starts the three simulated PX4 vehicles; the gateway and
+console join the compose file when their Dockerfiles land (M6/C6), which is
+what turns it into the full demo. Until then, you can already run the
+console against a real simulated vehicle by hand: see
 [docs/quickstart.md](docs/quickstart.md).
 
 For just the console with a simulated fleet and no real vehicle:

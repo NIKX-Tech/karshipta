@@ -1,0 +1,6 @@
+# The 60-second demo entrypoint: `docker compose up` from the repo root, as
+# the README promises. The actual service definitions live in
+# deploy/docker-compose.yml (see the repo layout in CLAUDE.md); this file only
+# makes the root command work. Requires Docker Compose v2.20+ for `include`.
+include:
+  - deploy/docker-compose.yml
