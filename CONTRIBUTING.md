@@ -36,7 +36,13 @@ Verify with `npm run lint && npm run check && npm run build`.
 
 ### Gateway
 
-The gateway is under construction; see `gateway/BRIEF.md` for the milestone plan and setup notes (C++20, CMake, MAVSDK v2).
+```sh
+cmake -S gateway -B gateway/build
+cmake --build gateway/build -j
+./gateway/build/src/karshipta_gateway   # needs PX4 SITL running, see docs/quickstart.md
+```
+
+Build tests with `-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`. Milestone plan in `gateway/BRIEF.md`; running it end to end against a real simulated vehicle and the console is in [docs/quickstart.md](docs/quickstart.md).
 
 ### Schema
 
