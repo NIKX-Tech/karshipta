@@ -27,7 +27,7 @@ Karshipta connects to real or simulated vehicles over MAVLink (PX4, ArduPilot) a
 
 ![Karshipta console showing three simulated vehicles on a dark map](docs/images/console.png)
 
-*The console today: three simulated multirotors flying over the PX4 SITL home position.*
+*The console flying three demo vehicles over the PX4 SITL home position.*
 
 ---
 
@@ -42,28 +42,35 @@ Early development, pre-release. The roadmap to v0.1 is in [ROADMAP.md](ROADMAP.m
 | `gateway/` MAVLink edge service | 🚧 connect, telemetry, commands done (M1 to M3); multi-vehicle and missions next (M4 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
 | `deploy/` one-command demo | 🚧 SITL containers ready, services land with their Dockerfiles (M6) |
 
-## The 60-second demo (coming with v0.1)
+## Try the console
 
 ```bash
 git clone https://github.com/NIKX-Tech/karshipta
-cd karshipta
-docker compose up
-# open http://localhost:5173 and watch 3 simulated vehicles fly
-```
-
-Today that command starts the three simulated PX4 vehicles; the gateway and
-console join the compose file when their Dockerfiles land (M6/C6), which is
-what turns it into the full demo. Until then, you can already run the
-console against a real simulated vehicle by hand: see
-[docs/quickstart.md](docs/quickstart.md).
-
-For just the console with a simulated fleet and no real vehicle:
-
-```bash
-cd console
+cd karshipta/console
 npm install && npm run proto:gen
 npm run dev -- --open
 ```
+
+The console opens empty, on purpose: no auto-started fleet pretending to be
+your hardware. Everything from there is one click:
+
+- **Add demo vehicle**: instant, no setup, nothing to connect. Good for a
+  first look.
+- **Add simulated vehicle** or **Connect real vehicle**: both need a running
+  gateway (the C++ service that speaks MAVLink); the console's connection
+  panel (top bar) walks you to it, or see [docs/quickstart.md](docs/quickstart.md)
+  to run one against PX4 SITL.
+
+## The one-command demo (coming with v0.1)
+
+```bash
+docker compose up
+```
+
+Today that starts three PX4 SITL vehicles only; the gateway and console join
+the compose file when their Dockerfiles land (M6/C6), at which point this
+command plus opening the console and clicking "Add simulated vehicle" is the
+whole demo.
 
 ## Architecture
 

@@ -3,39 +3,30 @@
 	import { env } from '$env/dynamic/public';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
-	import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import VehicleCard from '$lib/components/vehicle-card.svelte';
 	import VehicleDetail from '$lib/components/vehicle-detail.svelte';
 	import EventsFeed from '$lib/components/events-feed.svelte';
+	import ConnectionPanel from '$lib/components/connection-panel.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
 
-	// Real gateway when PUBLIC_GATEWAY_WS_URL is set, FakeGateway otherwise.
-	// Both implement FleetTransport and feed the store through the same
-	// applyEnvelope path. onMount, not $effect: feeding the store must not
-	// make this block depend on it.
+	let connectionPanelOpen = $state(false);
+
+	// The demo engine is always available (instant, local, no network); the
+	// gateway is opt-in and explicit. PUBLIC_GATEWAY_WS_URL/PUBLIC_READONLY
+	// stay as automation overrides (docker, CI) but no longer decide what the
+	// console shows by default: it opens empty and every vehicle is a UI
+	// action. onMount, not $effect: feeding the store must not make this
+	// block depend on it.
 	onMount(() => {
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
+		fleet.bindDemoEngine(new FakeGateway((envelope) => fleet.applyEnvelope(envelope, 'demo')));
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
-		let transport: FleetTransport;
-		if (gatewayUrl) {
-			transport = new WebSocketTransport(gatewayUrl, {
-				onEnvelope: (envelope) => fleet.applyEnvelope(envelope),
-				onStatus: (status) => {
-					fleet.link = status === 'open' ? 'live' : status === 'connecting' ? 'connecting' : 'down';
-				}
-			});
-		} else {
-			transport = new FakeGateway((envelope) => fleet.applyEnvelope(envelope));
-			fleet.link = 'sim';
-		}
-		fleet.bindSender((envelope) => transport.send(envelope));
-		transport.start();
-		return () => {
-			transport.stop();
-			fleet.clear();
-		};
+		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
+		return () => fleet.teardown();
 	});
 
 	const linkLabel = $derived(fleet.link.toUpperCase());
@@ -71,13 +62,19 @@
 				VIEWER
 			</span>
 		{/if}
-		<span class="flex items-center gap-1.5" role="status" aria-label="Gateway link {linkLabel}">
+		<button
+			class="flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-white/5"
+			onclick={() => (connectionPanelOpen = !connectionPanelOpen)}
+			aria-expanded={connectionPanelOpen}
+			aria-label="Gateway connection, currently {linkLabel}"
+		>
 			<span class="inline-block h-2 w-2 rounded-full {linkTone}"></span>
 			<span class="text-fg-muted font-mono text-[10px]">{linkLabel}</span>
-		</span>
+		</button>
 	</header>
 
 	<aside class="flex flex-col gap-2 overflow-y-auto p-3" aria-label="Fleet">
+		<AddVehicleMenu variant="compact" onopenconnection={() => (connectionPanelOpen = true)} />
 		{#each fleet.vehicleIds as vehicleId (vehicleId)}
 			<VehicleCard {vehicleId} vehicle={fleet.vehicles[vehicleId]} />
 		{/each}
@@ -86,9 +83,16 @@
 	<div class="relative">
 		<FleetMap centerLat={FAKE_FLEET_CENTER.lat} centerLon={FAKE_FLEET_CENTER.lon} />
 		<EventsFeed />
+		{#if fleet.vehicleIds.length === 0}
+			<EmptyState onopenconnection={() => (connectionPanelOpen = true)} />
+		{/if}
 	</div>
 
 	{#if fleet.selectedVehicleId}
 		<VehicleDetail vehicleId={fleet.selectedVehicleId} />
+	{/if}
+
+	{#if connectionPanelOpen}
+		<ConnectionPanel onclose={() => (connectionPanelOpen = false)} />
 	{/if}
 </div>

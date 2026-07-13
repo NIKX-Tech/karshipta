@@ -21,9 +21,9 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 +-----------+---------------------------------------+--------------+
 ```
 
-- **Top bar**: identity, fleet count, gateway link state (LIVE / SIM / CONNECTING / DOWN). The one place the amber pulse always lives.
-- **Left rail (16rem)**: the whole fleet at a glance. Compact cards: id, armed, link dot, one mono line of mode/alt/battery. Click selects; selection is blue everywhere (card, marker, ring).
-- **Map (center)**: fills all remaining space. Markers are amber arrows rotating with heading; labels stay upright. Goto targeting arms a crosshair.
+- **Top bar**: identity, fleet count, a clickable gateway status button (LIVE / CONNECTING / DOWN) that opens the connection panel. The one place the amber pulse always lives.
+- **Left rail (16rem)**: the whole fleet at a glance. Compact cards: id, DEMO badge when applicable, armed, link dot, remove action, one mono line of mode/alt/battery. Click selects; selection is blue everywhere (card, marker, ring).
+- **Map (center)**: fills all remaining space. Markers are amber arrows rotating with heading; labels stay upright. Goto targeting arms a crosshair. An empty-state overlay with the three onboarding actions renders here when the fleet is empty.
 - **Right detail panel (18rem, only when a vehicle is selected)**: full telemetry of the selected vehicle, then the command dock, then command trackers. Everything about ONE vehicle lives here; the left rail never grows detail.
 - **Events (overlay, bottom right of map)**: fleet-wide feed with severity dots and mono timestamps.
 
@@ -35,6 +35,15 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 | Multi-vehicle actions (select-all RTL) | left rail header, later milestone |
 | Telemetry charts / log review (v0.2) | bottom drawer under the map, collapsed by default |
 | Video feeds (later) | detail panel top, above telemetry |
+
+## Vehicle onboarding (C7)
+
+The console opens empty: no automatic fleet, no vehicle until an explicit UI action. Two independent channels feed the fleet, and every vehicle in `fleet.vehicles` carries which one it came from (`source: 'demo' | 'gateway'`):
+
+- **Demo engine**: always available, pure client-side (`FakeGateway`), zero network. "Add demo vehicle" spawns one instantly with a procedurally varied patrol; ids are `demo-1`, `demo-2`, ... Removing one is instant and local. This is also the console's test harness; it is not a toy to delete, only to stop treating as the default.
+- **Gateway channel**: opt-in. The connection panel (opened from the top bar's status button) holds the WebSocket URL (remembered in `localStorage`, never auto-connected) and a Connect/Disconnect action. Both "Add simulated vehicle" (a PX4 SITL preset, prefilled `udpin://0.0.0.0:14540`) and "Connect real vehicle" (blank form: id, name, type, connection URL, MAVLink system id) send the same `AddVehicle` envelope to the connected gateway and track the `VehicleConfigAck` lifecycle (pending / rejected with reason / accepted). The gateway sees no difference between "simulated" and "real"; the distinction is console-side framing only. Adding a second or later simulated vehicle in one session shows a resource-warning confirm first (each is a full autopilot build).
+- Disconnecting the gateway removes only `source: 'gateway'` vehicles; demo vehicles are untouched. Removing a vehicle is guarded: disabled while armed or airborne, on both channels.
+- `PUBLIC_GATEWAY_WS_URL` and `PUBLIC_READONLY` are automation overrides only (docker, CI), not the default experience: when set, the console auto-connects on load; when unset, connecting is always a click.
 
 ## Viewer mode
 
