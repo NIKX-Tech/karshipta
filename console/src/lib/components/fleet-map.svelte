@@ -308,6 +308,9 @@
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
 			handle.label.classList.toggle('border-selected', selected);
 			handle.label.classList.toggle('border-edge', !selected);
+			// link lost: fade the marker so a stale last-known position doesn't
+			// read as live
+			handle.body.style.opacity = state.connected ? '1' : '0.4';
 		}
 		for (const vehicleId of Object.keys(markers)) {
 			if (!fleet.vehicleIds.includes(vehicleId)) {
