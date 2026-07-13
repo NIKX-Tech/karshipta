@@ -35,6 +35,13 @@ const DEFAULT_TAKEOFF_ALT_M = 20;
 
 export const FAKE_FLEET_CENTER = { lat: HOME_LAT_DEG, lon: HOME_LON_DEG };
 
+/** owner-facing contract for spawning/removing demo vehicles from the UI */
+export interface DemoEngine extends FleetTransport {
+	/** spawns one demo vehicle with a procedurally varied patrol; returns its id */
+	spawnVehicle(): string;
+	despawnVehicle(vehicleId: string): void;
+}
+
 interface VehicleSpec {
 	vehicleId: string;
 	radiusM: number;
@@ -43,11 +50,25 @@ interface VehicleSpec {
 	phaseRad: number;
 }
 
-const FLEET_SPECS: VehicleSpec[] = [
-	{ vehicleId: 'sitl-1', radiusM: 60, periodS: 45, cruiseAltM: 20, phaseRad: 0 },
-	{ vehicleId: 'sitl-2', radiusM: 100, periodS: 70, cruiseAltM: 35, phaseRad: (2 * Math.PI) / 3 },
-	{ vehicleId: 'sitl-3', radiusM: 140, periodS: 95, cruiseAltM: 50, phaseRad: (4 * Math.PI) / 3 }
-];
+const SPAWN_RADIUS_MIN_M = 50;
+const SPAWN_RADIUS_STEP_M = 40;
+const SPAWN_PERIOD_MIN_S = 40;
+const SPAWN_PERIOD_STEP_S = 25;
+const SPAWN_ALT_MIN_M = 20;
+const SPAWN_ALT_STEP_M = 15;
+/** golden-angle-ish spread so consecutively spawned vehicles don't overlap */
+const SPAWN_PHASE_STEP_RAD = 2.4;
+
+/** procedurally varied patrol so each newly spawned demo vehicle looks distinct */
+function nextSpec(vehicleId: string, spawnIndex: number): VehicleSpec {
+	return {
+		vehicleId,
+		radiusM: SPAWN_RADIUS_MIN_M + (spawnIndex % 4) * SPAWN_RADIUS_STEP_M,
+		periodS: SPAWN_PERIOD_MIN_S + (spawnIndex % 3) * SPAWN_PERIOD_STEP_S,
+		cruiseAltM: SPAWN_ALT_MIN_M + (spawnIndex % 5) * SPAWN_ALT_STEP_M,
+		phaseRad: (spawnIndex * SPAWN_PHASE_STEP_RAD) % (2 * Math.PI)
+	};
+}
 
 /** what the vehicle does when it reaches its current target */
 type Arrival = 'hold' | 'land' | 'mission-item';
@@ -115,30 +136,22 @@ function initialVehicle(spec: VehicleSpec): SimVehicle {
 	};
 }
 
-export class FakeGateway implements FleetTransport {
+/**
+ * The console's local demo engine: spawns/despawns purely client-side,
+ * never touches a network. Vehicles are added one at a time from the UI
+ * (never automatically), each getting a procedurally varied patrol so a
+ * freshly spawned fleet still looks distinct.
+ */
+export class FakeGateway implements DemoEngine {
 	private vehicles = new Map<string, SimVehicle>();
 	private missions = new Map<string, Mission>();
 	private timer: ReturnType<typeof setInterval> | undefined;
+	private spawnCount = 0;
 
 	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {}
 
 	start(): void {
 		if (this.timer !== undefined) return;
-		for (const spec of FLEET_SPECS) {
-			this.vehicles.set(spec.vehicleId, initialVehicle(spec));
-			this.onEnvelope({
-				payload: {
-					$case: 'vehicleInfo',
-					vehicleInfo: {
-						vehicleId: spec.vehicleId,
-						type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
-						autopilot: 'PX4',
-						firmwareVersion: 'sim-fake',
-						mavlinkSystemId: 0
-					}
-				}
-			});
-		}
 		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
 	}
 
@@ -149,6 +162,32 @@ export class FakeGateway implements FleetTransport {
 		}
 		this.vehicles.clear();
 		this.missions.clear();
+		this.spawnCount = 0;
+	}
+
+	spawnVehicle(): string {
+		const vehicleId = `demo-${this.spawnCount + 1}`;
+		const spec = nextSpec(vehicleId, this.spawnCount);
+		this.spawnCount += 1;
+		this.vehicles.set(vehicleId, initialVehicle(spec));
+		this.onEnvelope({
+			payload: {
+				$case: 'vehicleInfo',
+				vehicleInfo: {
+					vehicleId,
+					type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
+					autopilot: 'PX4',
+					firmwareVersion: 'demo-fake',
+					mavlinkSystemId: 0
+				}
+			}
+		});
+		return vehicleId;
+	}
+
+	despawnVehicle(vehicleId: string): void {
+		this.vehicles.delete(vehicleId);
+		this.missions.delete(vehicleId);
 	}
 
 	send(envelope: Envelope): void {
