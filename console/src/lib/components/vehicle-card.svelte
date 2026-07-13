@@ -52,7 +52,9 @@
 	}}
 	class="cursor-pointer rounded border px-3 py-2 {selected
 		? 'border-selected bg-panel'
-		: 'border-edge bg-panel/90 hover:border-fg-muted'}"
+		: 'border-edge bg-panel/90 hover:border-fg-muted'} {state && !connected
+		? 'opacity-50 grayscale'
+		: ''}"
 >
 	<div class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
