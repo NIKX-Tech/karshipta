@@ -1,9 +1,9 @@
 {
-	"name": "@karshipta/console-core",
+	"name": "@nikx-tech/karshipta-console-core",
 	"version": "0.1.0",
 	"type": "module",
 	"license": "AGPL-3.0-only",
-	"description": "Karshipta console: fleet store, gateway transport, wire types, and the live-map UI. Reference app in src/routes; the publishable library is src/lib.",
+	"description": "Karshipta console: fleet store, gateway transport, wire types, and the live-map UI. Reference app in src/routes; the publishable library is src/lib. Interim name: GitHub Packages requires the npm scope to match the repo owner (NIKX-Tech), a scope shared by every NIKX product, so the product name stays in the package name itself. Renames to @karshipta/console-core once a real karshipta npm org exists at OSS launch: a rename and republish, not a rebuild.",
 	"svelte": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"exports": {
@@ -25,7 +25,13 @@
 	},
 	"publishConfig": {
 		"access": "restricted",
-		"directory": "dist"
+		"directory": "dist",
+		"registry": "https://npm.pkg.github.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/NIKX-Tech/karshipta.git",
+		"directory": "console"
 	},
 	"scripts": {
 		"dev": "vite dev",

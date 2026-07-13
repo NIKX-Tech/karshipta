@@ -1,5 +1,5 @@
 /**
- * Public surface of @karshipta/console-core. Everything a consuming app
+ * Public surface of @nikx-tech/karshipta-console-core. Everything a consuming app
  * needs to render a live fleet map and wire it to a gateway: the store,
  * the transport, the wire types, and the display components. Onboarding
  * UI (empty-state, add-vehicle dialogs, connection panel) stays app-shell
