@@ -7,6 +7,9 @@ node_modules
 .wrangler
 /.svelte-kit
 /build
+# svelte-package output (npm run package); regenerate, never commit
+/dist
+*.tgz
 
 # OS
 .DS_Store

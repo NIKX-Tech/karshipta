@@ -1,0 +1,22 @@
+/*
+ * Karshipta brand system tokens. Dark instrumentation look, one signature
+ * accent. Functional colors carry meaning only, never decoration: armed
+ * green, critical red, selected blue. Amber is the brand accent (logo
+ * mark, active states, live-telemetry pulse). Part of the console-core
+ * package: any app consuming it shares these tokens, not a copy.
+ */
+@theme {
+	--color-ink: #0a0e12;
+	--color-panel: #141a21;
+	--color-edge: #1e2630;
+	--color-fg: #e8edf2;
+	--color-fg-muted: #8b98a5;
+	--color-accent: #f5a623;
+	--color-armed: #2ecc71;
+	--color-critical: #e74c3c;
+	--color-selected: #3b9eff;
+
+	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+	--font-display: 'Space Grotesk Variable', 'Inter Variable', ui-sans-serif, sans-serif;
+	--font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', monospace;
+}
