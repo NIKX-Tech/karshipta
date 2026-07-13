@@ -1,0 +1,53 @@
+name: publish console-core
+
+on:
+  push:
+    branches: [dev, main]
+    paths: ['console/**']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: '@nikx-tech'
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate protobuf types
+        run: npm run proto:gen
+      # dev pushes publish a unique prerelease on every commit (dist-tag
+      # "dev"), so console-consuming apps can track dev without a human
+      # bumping the version each time. main pushes publish the version
+      # already set in package.json under "latest": bumping that version
+      # is a deliberate, reviewed step in the PR that changes it. Must run
+      # before `npm run package`: svelte-package copies package.json's
+      # current version into dist/package.json, which is what actually
+      # gets published (publishConfig.directory points npm there).
+      - name: Set prerelease version (dev only)
+        if: github.ref == 'refs/heads/dev'
+        run: npm version --no-git-tag-version "0.1.0-dev.$(date -u +%Y%m%d%H%M%S).${GITHUB_SHA::7}"
+      - name: Build the package
+        run: npm run package
+      - name: Publish (dev)
+        if: github.ref == 'refs/heads/dev'
+        run: npm publish --tag dev
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish (main)
+        if: github.ref == 'refs/heads/main'
+        run: npm publish --tag latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,6 @@
 # Karshipta console
 
-SvelteKit web dashboard for the Karshipta fleet: live map (MapLibre GL), vehicle status, commands, and missions. `src/lib` is also published as [`@karshipta/console-core`](#consuming-karshiptaconsole-core), the reusable half of this app; `src/routes` is the reference app that consumes it. See [CLAUDE.md](CLAUDE.md) for the conventions and `../docs/architecture.md` for the big picture.
+SvelteKit web dashboard for the Karshipta fleet: live map (MapLibre GL), vehicle status, commands, and missions. `src/lib` is also published as [`@nikx-tech/karshipta-console-core`](#consuming-nikx-techkarshipta-console-core), the reusable half of this app; `src/routes` is the reference app that consumes it. See [CLAUDE.md](CLAUDE.md) for the conventions and `../docs/architecture.md` for the big picture.
 
 ## Develop
 
@@ -28,13 +28,13 @@ npm run build
 
 Generated code in `src/lib/gen/` is never edited by hand; rerun `npm run proto:gen` after any schema change.
 
-## Consuming `@karshipta/console-core`
+## Consuming `@nikx-tech/karshipta-console-core`
 
 ```sh
 npm run package   # svelte-package src/lib -> dist, then publint
 ```
 
-Publishing runs from this directory (`publishConfig.directory` points npm at `dist`): `npm run package && npm publish`. Not yet published to a real registry; this package needs NIKX npm org credentials neither of us has scripted here yet.
+Published automatically by `.github/workflows/publish-console-core.yml` to GitHub Packages: every push to `dev` publishes a unique prerelease under the `dev` dist-tag, every push to `main` publishes the version in `package.json` under `latest` (bumping that version is a deliberate step in the PR that changes it). GitHub Packages requires the npm scope to match the repo owner (`NIKX-Tech`), which every NIKX product shares, so the product name lives in the package name itself: this will rename to `@karshipta/console-core` (unambiguous under its own scope) once a real `karshipta` npm org exists at OSS launch.
 
 Public surface: `fleet` (the store), `WebSocketTransport`, `FakeGateway` (a self-contained demo engine, handy for any app's dev/demo mode), the generated wire types, and the display components (`FleetMap`, `VehicleCard`, `VehicleDetail`, `CommandPanel`, `MissionPanel`, `EventsFeed`, `ConfirmDialog`). Onboarding UI (empty-state, add-vehicle dialogs, the connection panel) stays app-shell only: it encodes this repo's self-host UX opinions, not a general primitive yet.
 
@@ -43,8 +43,15 @@ Public surface: `fleet` (the store), `WebSocketTransport`, `FakeGateway` (a self
 ```css
 /* src/app.css or equivalent */
 @import 'tailwindcss';
-@source '../node_modules/@karshipta/console-core/dist';
-@import '@karshipta/console-core/theme.css';
+@source '../node_modules/@nikx-tech/karshipta-console-core/dist';
+@import '@nikx-tech/karshipta-console-core/theme.css';
+```
+
+**A consuming app also needs a `.npmrc`** pointing the `@nikx-tech` scope at GitHub Packages, authenticated (GitHub Packages requires auth to read even non-public packages):
+
+```
+@nikx-tech:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
 ```
 
 Minimal usage:
@@ -53,7 +60,12 @@ Minimal usage:
 <script>
 	import { onMount } from 'svelte';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import { fleet, FakeGateway, FleetMap, FAKE_FLEET_CENTER } from '@karshipta/console-core';
+	import {
+		fleet,
+		FakeGateway,
+		FleetMap,
+		FAKE_FLEET_CENTER
+	} from '@nikx-tech/karshipta-console-core';
 
 	onMount(() => {
 		const engine = new FakeGateway((envelope) => fleet.applyEnvelope(envelope, 'demo'));
