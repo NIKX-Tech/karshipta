@@ -20,7 +20,9 @@ Everything a single operator needs to fly their own fleet safely on their own in
 | C3 | Missions: click-to-plan waypoints, upload, start/pause, looping, live progress (pairs with gateway M5) | done |
 | C4 | Live gateway: verified against the real gateway as M2 to M4 land; reconnect UX, link states, multi-vehicle, read-only viewer mode | in progress: telemetry and commands verified live, viewer mode shipped |
 | C5 | Airspace layer: worldwide geo-zones (OpenAIP) on the map, goto/waypoint warnings | |
-| C6 | Demo polish: console Dockerfile, compose service, onboarding, demo GIF | |
+| C6 | Demo polish: console Dockerfile, compose service, demo GIF | |
+| C7 | Onboarding and vehicle management: empty-state console, add demo/simulated/real vehicles from the UI, gateway connection panel (pairs with gateway M4) | next up |
+| C8 | console-core packaging: the console's lib published as a reusable npm package | |
 
 ## v0.2
 

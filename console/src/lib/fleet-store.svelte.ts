@@ -258,8 +258,16 @@ class FleetStore {
 			case 'missionProgress':
 				this.missionProgress[payload.missionProgress.vehicleId] = payload.missionProgress;
 				break;
+			case 'vehicleConfigAck':
+				// consumed by the C7 onboarding UI; observable until then
+				console.warn(
+					`fleet: VehicleConfigAck for ${payload.vehicleConfigAck.vehicleId} not yet handled (C7)`
+				);
+				break;
 			case 'command':
 			case 'missionUpload':
+			case 'addVehicle':
+			case 'removeVehicle':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			default: {
