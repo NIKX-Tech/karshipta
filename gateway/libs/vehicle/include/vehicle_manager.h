@@ -8,6 +8,7 @@
 #include <memory>
 #include <map>
 #include <thread>
+#include <vector>
 #include <mavsdk/mavsdk.h>
 #include <karshipta/v1/fleet.pb.h>
 #include <vehicle_connection.h>
@@ -33,6 +34,15 @@ struct ManagedVehicle {
     // other members above it) are torn down. Empty (not joinable) until
     // VehicleManager::start() launches it.
     std::jthread reconnect_worker;
+};
+
+// Snapshot of one vehicle's start/connect state, returned by
+// VehicleManager::list_status(). started == reconnect_worker running (does
+// not imply connected); connected == currently linked to its autopilot.
+struct VehicleStatus {
+    std::string vehicle_id;
+    bool started;
+    bool connected;
 };
 
 class VehicleManager {
@@ -67,6 +77,10 @@ public:
     // and mutate it out from under the manager.
     [[nodiscard]] const ManagedVehicle* get_vehicle(const std::string& vehicle_id) const;
 
+    // Every currently registered vehicle_id (map key order, i.e. sorted).
+    // Just the ids, no start/connect state; use list_status() for that.
+    [[nodiscard]] std::vector<std::string> list_vehicle_ids() const;
+
     // Routes command to the CommandExecutor of the vehicle named
     // command.vehicle_id(). If no such vehicle is registered, synthesizes a
     // REJECTED CommandAck itself (gateway rule 5: no silent drop) and
@@ -84,12 +98,25 @@ public:
     // Requests reconnect_worker for vehicle_id to stop and joins it. The
     // vehicle stays registered (still in managed_vehicles_), just no longer
     // trying to connect; distinct from remove_vehicle(). Returns false if
-    // vehicle_id is unknown. Not yet implemented.
+    // vehicle_id is unknown or not currently running.
     bool stop(const std::string& vehicle_id);
 
-    // Calls stop() for every currently registered vehicle. Not yet
-    // implemented.
+    // Calls stop() for every currently registered vehicle. Sequential, not
+    // concurrent: each stop() joins before the next one starts.
     void stop_all();
+
+    // True if start() is running for vehicle_id and hasn't been stop()ped.
+    // Does not imply connected. False (not an error) if vehicle_id is
+    // unknown.
+    [[nodiscard]] bool is_started(const std::string& vehicle_id) const;
+
+    // True if vehicle_id is currently linked to its autopilot. False for
+    // both "never started" and "started but link down"; false (not an
+    // error) if vehicle_id is unknown.
+    [[nodiscard]] bool is_connected(const std::string& vehicle_id) const;
+
+    // Snapshot of every registered vehicle's start/connect state.
+    [[nodiscard]] std::vector<VehicleStatus> list_status() const;
 
     // Stops the vehicle first if running, then erases it from
     // managed_vehicles_. Must reject (return false) if the vehicle is armed

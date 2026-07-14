@@ -4,8 +4,17 @@
 
 #include "vehicle_manager.h"
 
+#include <chrono>
+#include <thread>
+
 #include <karshipta/v1/envelope.pb.h>
 #include <spdlog/spdlog.h>
+
+namespace {
+// How often the reconnect loop polls is_connected() while waiting for a
+// known-connected link to drop, before trying to reconnect again.
+constexpr std::chrono::milliseconds kReconnectPollInterval{1000};
+}  // namespace
 
 VehicleManager::VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp)
     : mavsdk_(std::move(mavsdk)), transport_(tp) {}
@@ -58,6 +67,15 @@ const ManagedVehicle* VehicleManager::get_vehicle(const std::string& vehicle_id)
     return it == managed_vehicles_.end() ? nullptr : &it->second;
 }
 
+std::vector<std::string> VehicleManager::list_vehicle_ids() const {
+    std::vector<std::string> ids;
+    ids.reserve(managed_vehicles_.size());
+    for (const auto& entry : managed_vehicles_) {
+        ids.push_back(entry.first);
+    }
+    return ids;
+}
+
 void VehicleManager::dispatch_command(const karshipta::v1::Command& command) const {
     const auto* vehicle = get_vehicle(command.vehicle_id());
     if (vehicle == nullptr) {
@@ -98,4 +116,78 @@ bool VehicleManager::start(const std::string& vehicle_id) {
     vehicle.reconnect_worker = std::jthread(
         [this, &vehicle](std::stop_token stop_token) { run_reconnect_loop(vehicle, stop_token); });
     return true;
+}
+
+void VehicleManager::start_all() {
+    for (const auto& entry : managed_vehicles_) {
+        start(entry.first);
+    }
+}
+
+bool VehicleManager::stop(const std::string& vehicle_id) {
+    const auto it = managed_vehicles_.find(vehicle_id);
+    if (it == managed_vehicles_.end()) {
+        spdlog::warn("stop rejected: unknown vehicle_id '{}'", vehicle_id);
+        return false;
+    }
+    ManagedVehicle& vehicle = it->second;
+
+    if (!vehicle.reconnect_worker.joinable()) {
+        spdlog::warn("stop rejected: vehicle_id '{}' not running", vehicle_id);
+        return false;
+    }
+
+    vehicle.reconnect_worker.request_stop();
+    vehicle.reconnect_worker.join();
+    spdlog::info("vehicle_id '{}' stopped", vehicle_id);
+    return true;
+}
+
+void VehicleManager::stop_all() {
+    for (const auto& entry : managed_vehicles_) {
+        stop(entry.first);
+    }
+}
+
+bool VehicleManager::is_started(const std::string& vehicle_id) const {
+    const auto* vehicle = get_vehicle(vehicle_id);
+    return vehicle != nullptr && vehicle->reconnect_worker.joinable();
+}
+
+bool VehicleManager::is_connected(const std::string& vehicle_id) const {
+    const auto* vehicle = get_vehicle(vehicle_id);
+    return vehicle != nullptr && vehicle->connection->is_connected();
+}
+
+std::vector<VehicleStatus> VehicleManager::list_status() const {
+    std::vector<VehicleStatus> statuses;
+    statuses.reserve(managed_vehicles_.size());
+    for (const auto& [id, vehicle] : managed_vehicles_) {
+        statuses.push_back(VehicleStatus{
+            .vehicle_id = id,
+            .started = vehicle.reconnect_worker.joinable(),
+            .connected = vehicle.connection->is_connected(),
+        });
+    }
+    return statuses;
+}
+
+void VehicleManager::run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token stop_token) {
+    while (!stop_token.stop_requested()) {
+        if (!vehicle.connection->connect_with_retry(stop_token)) {
+            // Only false if stop_token was cancelled during the retry itself.
+            break;
+        }
+        spdlog::info("vehicle connected (system_id={})", vehicle.system_id);
+
+        while (vehicle.connection->is_connected() && !stop_token.stop_requested()) {
+            std::this_thread::sleep_for(kReconnectPollInterval);
+        }
+
+        if (stop_token.stop_requested()) {
+            break;
+        }
+        spdlog::warn("vehicle link lost (system_id={}), reconnecting", vehicle.system_id);
+        // 3. loop back around to 1
+    }
 }
