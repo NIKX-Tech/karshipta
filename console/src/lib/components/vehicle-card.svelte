@@ -5,9 +5,14 @@
 	interface Props {
 		vehicleId: string;
 		vehicle: Vehicle;
+		/** See VehicleDetail: per-instance override of fleet.readonly, for a
+		 * multi-tenant consumer showing owned and view-only vehicles in the
+		 * same list. Omitting it keeps the existing store-wide behavior. */
+		readonly?: boolean;
 	}
 
-	const { vehicleId, vehicle }: Props = $props();
+	const { vehicleId, vehicle, readonly }: Props = $props();
+	const effectiveReadonly = $derived(readonly ?? fleet.readonly);
 
 	const FLIGHT_MODE_PREFIX = 'FLIGHT_MODE_';
 
@@ -18,7 +23,7 @@
 	const batteryPct = $derived(state?.battery?.remainingPct);
 	const connected = $derived(state?.connected ?? false);
 	const selected = $derived(fleet.selectedVehicleId === vehicleId);
-	const removable = $derived(!state?.armed && !state?.inAir);
+	const removable = $derived(!effectiveReadonly && !state?.armed && !state?.inAir);
 	const removePending = $derived(
 		fleet
 			.configRequestsFor(vehicleId)
@@ -64,6 +69,9 @@
 		{#if state?.armed}
 			<span class="text-armed text-[9px] font-medium tracking-widest">ARMED</span>
 		{/if}
+		{#if effectiveReadonly}
+			<span class="text-fg-muted text-[9px] font-medium tracking-widest">VIEW ONLY</span>
+		{/if}
 		<span
 			class="ml-auto inline-block h-2 w-2 rounded-full {connected
 				? 'bg-accent animate-pulse'
@@ -72,15 +80,17 @@
 			aria-label={connected ? 'Link live' : 'Link lost'}
 			title={connected ? 'Link live' : 'Link lost'}
 		></span>
-		<button
-			class="text-fg-muted hover:text-critical px-0.5 text-xs leading-none disabled:cursor-not-allowed disabled:opacity-30"
-			aria-label="Remove {vehicleId}"
-			title={removable ? 'Remove vehicle' : 'Land and disarm before removing'}
-			disabled={!removable || removePending}
-			onclick={remove}
-		>
-			&#x2715;
-		</button>
+		{#if !effectiveReadonly}
+			<button
+				class="text-fg-muted hover:text-critical px-0.5 text-xs leading-none disabled:cursor-not-allowed disabled:opacity-30"
+				aria-label="Remove {vehicleId}"
+				title={removable ? 'Remove vehicle' : 'Land and disarm before removing'}
+				disabled={!removable || removePending}
+				onclick={remove}
+			>
+				&#x2715;
+			</button>
+		{/if}
 	</div>
 	{#if state}
 		<p class="text-fg-muted mt-1 truncate font-mono text-[10px] tabular-nums">
