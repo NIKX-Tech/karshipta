@@ -6,9 +6,22 @@
 
 	interface Props {
 		vehicleId: string;
+		/**
+		 * Per-instance override for whether command/mission controls render.
+		 * Defaults to the store-wide `fleet.readonly` flag, which is all the
+		 * single-operator OSS console ever needs: one gateway, one fleet,
+		 * every vehicle in it is "yours". A multi-tenant app is different:
+		 * the same session can show vehicles the signed-in account owns
+		 * (commandable) alongside vehicles it can only view (a teammate's in
+		 * an org, or someone else's on a shared map), which one global flag
+		 * cannot express. Passing this prop lets the consuming app decide
+		 * per vehicle; omitting it keeps the existing global behavior.
+		 */
+		readonly?: boolean;
 	}
 
-	const { vehicleId }: Props = $props();
+	const { vehicleId, readonly }: Props = $props();
+	const effectiveReadonly = $derived(readonly ?? fleet.readonly);
 
 	const FLIGHT_MODE_PREFIX = 'FLIGHT_MODE_';
 	const GPS_FIX_PREFIX = 'GPS_FIX_TYPE_';
@@ -92,7 +105,7 @@
 		<p class="text-fg-muted text-xs">Waiting for telemetry</p>
 	{/if}
 
-	{#if !fleet.readonly}
+	{#if !effectiveReadonly}
 		<CommandPanel {vehicleId} />
 		<MissionPanel {vehicleId} />
 	{/if}
