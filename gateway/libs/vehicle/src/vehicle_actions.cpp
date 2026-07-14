@@ -16,6 +16,7 @@ std::string VehicleActions::result_name(const mavsdk::Action::Result result) {
 VehicleActions::VehicleActions(VehicleConnection& connection) : connection_(connection) {}
 
 bool VehicleActions::ensure_action() const {
+    std::lock_guard lock(init_mutex_);
     if (action_) return true;
     if (!connection_.is_connected()) return false;
     mavsdk_keepalive_ = connection_.get_mavsdk();
