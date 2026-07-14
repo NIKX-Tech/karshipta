@@ -2,15 +2,17 @@
 #ifndef KARSHIPTA_GATEWAY_TELEMETRY_H
 #define KARSHIPTA_GATEWAY_TELEMETRY_H
 
-#include "vehicle_connection.h"
 #include <mavsdk/plugins/telemetry/telemetry.h>
+
 #include <atomic>
-#include <memory>
 #include <chrono>
+#include <memory>
 #include <optional>
 
+#include "vehicle_connection.h"
+
 class TelemetryInfo {
-public:
+   public:
     // Binds this wrapper to a connection; does not create the Telemetry plugin yet
     // (that happens lazily in ensure_telemetry() on first use).
     explicit TelemetryInfo(VehicleConnection& connection);
@@ -64,7 +66,7 @@ public:
     // True if every MAVSDK health check currently passes.
     [[nodiscard]] bool is_health_ok() const;
 
-private:
+   private:
     // Owned copy of the Mavsdk core, grabbed in ensure_telemetry(). Keeps the core alive
     // for as long as `telemetry_` exists, independent of `connection_`'s own lifetime.
     mutable std::shared_ptr<mavsdk::Mavsdk> mavsdk_keepalive_;
@@ -90,7 +92,5 @@ private:
     // `connection_` isn't connected yet; returns true immediately if already created.
     bool ensure_telemetry() const;
 };
-
-
 
 #endif  // KARSHIPTA_GATEWAY_TELEMETRY_H
