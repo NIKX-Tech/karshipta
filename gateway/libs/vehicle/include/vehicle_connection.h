@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -26,6 +27,17 @@ class VehicleConnection {
             kSuccess,
             kSocketFailure,
             kDiscoveryTimeout,
+        };
+
+        // Single-snapshot view of the link, safe to branch on. Distinguishes
+        // "was never discovered" from "was discovered but the heartbeat link is
+        // currently down": is_connected() alone conflates those two, and
+        // safety guards (stop/remove) must treat link-down as state-unknown,
+        // not as landed-and-disarmed.
+        enum class LinkState {
+            kNeverDiscovered,
+            kLinkDown,
+            kConnected,
         };
 
         VehicleConnection() = delete;
@@ -88,9 +100,14 @@ class VehicleConnection {
         void disconnect();
         // True only while a System was discovered AND MAVSDK currently reports the
         // heartbeat link as up; becomes false the instant the link drops, even if
-        // disconnect() was never explicitly called.
+        // disconnect() was never explicitly called. Thread-safe.
         [[nodiscard]] bool is_connected() const;
+        // One atomic snapshot of discovery + link state (see LinkState). Prefer
+        // this over get_system()/is_connected() pairs, which race against the
+        // reconnect thread between the two reads. Thread-safe.
+        [[nodiscard]] LinkState link_state() const;
         // Returns the discovered System handle (shared_ptr; null if not connected).
+        // Thread-safe.
         [[nodiscard]] std::shared_ptr<mavsdk::System> get_system() const;
         // Returns the Mavsdk core handle (shared_ptr; always valid once constructed).
         [[nodiscard]] std::shared_ptr<mavsdk::Mavsdk> get_mavsdk() const;
@@ -116,6 +133,11 @@ class VehicleConnection {
         std::string connection_url_;
         // The Mavsdk core instance, shared with other VehicleConnections. Not owned.
         std::shared_ptr<mavsdk::Mavsdk> mavsdk_;
+        // Guards system_ and connection_state_handles_: connect() runs on the
+        // manager's reconnect worker thread while is_connected()/get_system()/
+        // link_state() are read from manager and executor threads, and an
+        // unsynchronized shared_ptr assign vs copy is a data race.
+        mutable std::mutex system_mutex_;
         // The discovered autopilot System, set by connect(), cleared by disconnect().
         std::shared_ptr<mavsdk::System> system_;
         // MAVLink system id this connection must bind to; nullopt falls back to

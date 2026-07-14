@@ -108,9 +108,13 @@ VehicleConnection::ConnectResult VehicleConnection::connect() {
         return ConnectResult::kDiscoveryTimeout;
     }
 
-    this->system_ = discovered_system.value();
+    const std::shared_ptr<mavsdk::System> system = discovered_system.value();
+    {
+        std::lock_guard lock(system_mutex_);
+        system_ = system;
+    }
     spdlog::info(
-        "connected to {} (system_id={})", connection_url_, system_->get_system_id());
+        "connected to {} (system_id={})", connection_url_, system->get_system_id());
     return ConnectResult::kSuccess;
 }
 
@@ -138,6 +142,7 @@ bool VehicleConnection::connect_with_retry(
 }
 
 void VehicleConnection::disconnect() {
+    std::lock_guard lock(system_mutex_);
     if (!system_) {
         return;
     }
@@ -165,10 +170,19 @@ void VehicleConnection::disconnect() {
 }
 
 bool VehicleConnection::is_connected() const {
-    return system_ != nullptr && system_->is_connected();
+    return link_state() == LinkState::kConnected;
+}
+
+VehicleConnection::LinkState VehicleConnection::link_state() const {
+    std::lock_guard lock(system_mutex_);
+    if (!system_) {
+        return LinkState::kNeverDiscovered;
+    }
+    return system_->is_connected() ? LinkState::kConnected : LinkState::kLinkDown;
 }
 
 std::shared_ptr<mavsdk::System> VehicleConnection::get_system() const {
+    std::lock_guard lock(system_mutex_);
     return system_;
 }
 
@@ -178,6 +192,7 @@ std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::get_mavsdk() const {
 
 mavsdk::System::IsConnectedHandle VehicleConnection::subscribe_connection_state(
     const mavsdk::System::IsConnectedCallback& callback) {
+    std::lock_guard lock(system_mutex_);
     if (!system_) {
         throw std::logic_error("subscribe_connection_state() called before a successful connect()");
     }
@@ -187,6 +202,7 @@ mavsdk::System::IsConnectedHandle VehicleConnection::subscribe_connection_state(
 }
 
 void VehicleConnection::unsubscribe_connection_state(mavsdk::System::IsConnectedHandle handle) {
+    std::lock_guard lock(system_mutex_);
     if (!system_) {
         return;
     }
