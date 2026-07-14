@@ -1,23 +1,21 @@
 #include "vehicle_connection.h"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <atomic>
 #include <future>
 #include <stdexcept>
 #include <thread>
 
-#include <spdlog/spdlog.h>
-
 VehicleConnection::VehicleConnection(std::shared_ptr<mavsdk::Mavsdk> mavsdk,
-                                      const std::string& connection_url,
-                                      std::optional<uint32_t> expected_system_id)
+                                     const std::string& connection_url,
+                                     std::optional<uint32_t> expected_system_id)
     : mavsdk_(std::move(mavsdk)), expected_system_id_(expected_system_id) {
     set_connection_url(connection_url);
 }
 
-VehicleConnection::~VehicleConnection() {
-    disconnect();
-}
+VehicleConnection::~VehicleConnection() { disconnect(); }
 
 std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::create_shared_core() {
     return std::make_shared<mavsdk::Mavsdk>(
@@ -28,9 +26,7 @@ void VehicleConnection::set_connection_url(const std::string& connection_url) {
     this->connection_url_ = validate_connection_url(connection_url);
 }
 
-std::string VehicleConnection::get_connection_url() const {
-    return this->connection_url_;
-}
+std::string VehicleConnection::get_connection_url() const { return this->connection_url_; }
 std::string VehicleConnection::validate_connection_url(const std::string& connection_url) {
     if (connection_url.empty()) {
         throw std::invalid_argument("connection URL cannot be empty");
@@ -69,8 +65,7 @@ std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::wait_for_syste
         }
     });
 
-    const auto status =
-        future.wait_for(std::chrono::duration<double>(kAutopilotDiscoveryTimeoutS));
+    const auto status = future.wait_for(std::chrono::duration<double>(kAutopilotDiscoveryTimeoutS));
     mavsdk_->unsubscribe_on_new_system(handle);
 
     if (status != std::future_status::ready) {
@@ -80,31 +75,34 @@ std::optional<std::shared_ptr<mavsdk::System>> VehicleConnection::wait_for_syste
 }
 
 VehicleConnection::ConnectResult VehicleConnection::connect() {
-    if (!connection_added_) {
-        const auto [connection_result, handle] =
-            mavsdk_->add_any_connection_with_handle(connection_url_);
+    // connection_added_/connection_handle_ are also read and written by
+    // disconnect() under system_mutex_ (to call remove_connection()); a
+    // reconnect worker calling connect() while another thread calls
+    // disconnect() would otherwise race on these same two fields.
+    {
+        std::lock_guard lock(system_mutex_);
+        if (!connection_added_) {
+            const auto [connection_result, handle] =
+                mavsdk_->add_any_connection_with_handle(connection_url_);
 
-        if (connection_result != mavsdk::ConnectionResult::Success) {
-            spdlog::error(
-                "failed to add connection {}: result={}",
-                connection_url_,
-                static_cast<int>(connection_result));
-            return ConnectResult::kSocketFailure;
+            if (connection_result != mavsdk::ConnectionResult::Success) {
+                spdlog::error("failed to add connection {}: result={}", connection_url_,
+                              static_cast<int>(connection_result));
+                return ConnectResult::kSocketFailure;
+            }
+
+            connection_handle_ = handle;
+            connection_added_ = true;
         }
-
-        connection_handle_ = handle;
-        connection_added_ = true;
     }
 
     auto discovered_system = expected_system_id_
-        ? wait_for_system(*expected_system_id_)
-        : mavsdk_->first_autopilot(kAutopilotDiscoveryTimeoutS);
+                                 ? wait_for_system(*expected_system_id_)
+                                 : mavsdk_->first_autopilot(kAutopilotDiscoveryTimeoutS);
 
     if (!discovered_system) {
-        spdlog::warn(
-            "no matching autopilot discovered on {} within {}s",
-            connection_url_,
-            kAutopilotDiscoveryTimeoutS);
+        spdlog::warn("no matching autopilot discovered on {} within {}s", connection_url_,
+                     kAutopilotDiscoveryTimeoutS);
         return ConnectResult::kDiscoveryTimeout;
     }
 
@@ -113,13 +111,12 @@ VehicleConnection::ConnectResult VehicleConnection::connect() {
         std::lock_guard lock(system_mutex_);
         system_ = system;
     }
-    spdlog::info(
-        "connected to {} (system_id={})", connection_url_, system->get_system_id());
+    spdlog::info("connected to {} (system_id={})", connection_url_, system->get_system_id());
     return ConnectResult::kSuccess;
 }
 
-bool VehicleConnection::connect_with_retry(
-    const std::stop_token& stop_token, std::chrono::milliseconds retry_interval) {
+bool VehicleConnection::connect_with_retry(const std::stop_token& stop_token,
+                                           std::chrono::milliseconds retry_interval) {
     constexpr auto kPollInterval = std::chrono::milliseconds(100);
 
     while (!stop_token.stop_requested()) {
@@ -127,8 +124,7 @@ bool VehicleConnection::connect_with_retry(
             return true;
         }
 
-        spdlog::warn(
-            "retrying connection to {} in {}ms", connection_url_, retry_interval.count());
+        spdlog::warn("retrying connection to {} in {}ms", connection_url_, retry_interval.count());
 
         auto remaining = retry_interval;
         while (remaining.count() > 0 && !stop_token.stop_requested()) {
@@ -169,9 +165,7 @@ void VehicleConnection::disconnect() {
     }
 }
 
-bool VehicleConnection::is_connected() const {
-    return link_state() == LinkState::kConnected;
-}
+bool VehicleConnection::is_connected() const { return link_state() == LinkState::kConnected; }
 
 VehicleConnection::LinkState VehicleConnection::link_state() const {
     std::lock_guard lock(system_mutex_);
@@ -186,9 +180,7 @@ std::shared_ptr<mavsdk::System> VehicleConnection::get_system() const {
     return system_;
 }
 
-std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::get_mavsdk() const {
-    return mavsdk_;
-}
+std::shared_ptr<mavsdk::Mavsdk> VehicleConnection::get_mavsdk() const { return mavsdk_; }
 
 mavsdk::System::IsConnectedHandle VehicleConnection::subscribe_connection_state(
     const mavsdk::System::IsConnectedCallback& callback) {
