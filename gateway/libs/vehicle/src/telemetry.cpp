@@ -40,6 +40,7 @@ TelemetryInfo::~TelemetryInfo() {
 }
 
 bool TelemetryInfo::ensure_telemetry() const {
+    std::lock_guard lock(init_mutex_);
     if (telemetry_) return true;
     if (!connection_.is_connected()) return false;
     mavsdk_keepalive_ = connection_.get_mavsdk();

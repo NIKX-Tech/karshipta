@@ -7,6 +7,7 @@
 #include <atomic>
 #include <memory>
 #include <chrono>
+#include <mutex>
 #include <optional>
 
 class TelemetryInfo {
@@ -86,8 +87,15 @@ private:
     mutable std::optional<mavsdk::Telemetry::FlightModeHandle> flight_mode_handle_;
     mutable std::optional<mavsdk::Telemetry::BatteryHandle> battery_handle_;
 
+    // Serializes the lazy init in ensure_telemetry(): both the CommandExecutor
+    // worker and VehicleManager's own threads can trigger the first creation
+    // concurrently. Once created, `telemetry_` is never reset, so reads after a
+    // successful ensure_telemetry() need no lock.
+    mutable std::mutex init_mutex_;
+
     // Lazily creates `telemetry_` the first time it's needed. Returns false if
     // `connection_` isn't connected yet; returns true immediately if already created.
+    // Thread-safe.
     bool ensure_telemetry() const;
 };
 
