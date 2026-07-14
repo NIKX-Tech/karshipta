@@ -1,6 +1,10 @@
+<p>
+  <img src="docs/images/logo-mark.svg" alt="Karshipta" height="64">
+</p>
+
 # Karshipta
 
-**Open-source, self-hosted command and control for drone fleets. In your browser.**
+**Open-source, self-hosted command and control for unmanned vehicle fleets. In your browser.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/NIKX-Tech/karshipta/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/NIKX-Tech/karshipta/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/NIKX-Tech/karshipta?style=flat-square&color=blue)](https://www.gnu.org/licenses/agpl-3.0)

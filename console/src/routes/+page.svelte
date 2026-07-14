@@ -11,6 +11,7 @@
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
+	import logoMark from '$lib/assets/logo-mark.svg';
 
 	let connectionPanelOpen = $state(false);
 
@@ -48,7 +49,7 @@
 		class="border-edge bg-panel col-span-3 flex items-center gap-2 border-b px-4 py-2"
 		aria-label="Karshipta"
 	>
-		<span class="bg-accent h-2 w-2" aria-hidden="true"></span>
+		<img src={logoMark} alt="" class="h-3 w-auto" aria-hidden="true" />
 		<span class="font-display text-xs font-medium tracking-[0.25em]">KARSHIPTA</span>
 		<span class="text-fg-muted ml-auto font-mono text-[10px] tabular-nums">
 			FLEET {fleet.vehicleIds.length}
