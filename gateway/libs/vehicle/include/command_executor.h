@@ -1,14 +1,14 @@
 #ifndef KARSHIPTA_GATEWAY_COMMAND_EXECUTOR_H
 #define KARSHIPTA_GATEWAY_COMMAND_EXECUTOR_H
 
+#include <karshipta/v1/command.pb.h>
+
 #include <condition_variable>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
-
-#include <karshipta/v1/command.pb.h>
 
 #include "telemetry.h"
 #include "vehicle_actions.h"
@@ -20,7 +20,7 @@
 // or REJECTED with a human-readable reason (gateway rule 5); commands still
 // queued at shutdown are rejected, not dropped.
 class CommandExecutor {
-public:
+   public:
     // Receives every ack this executor produces. Invoked from the enqueueing
     // thread (ACCEPTED) and from the worker thread (terminal acks); the
     // callback must be thread-safe, which Transport::broadcast is.
@@ -40,7 +40,7 @@ public:
     // REJECTED for a command that carries no action).
     void enqueue(karshipta::v1::Command command);
 
-private:
+   private:
     void run(const std::stop_token& stop_token);
     void execute(const karshipta::v1::Command& command);
     void send_ack(const karshipta::v1::Command& command, karshipta::v1::CommandStatus status,
