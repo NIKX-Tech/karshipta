@@ -56,6 +56,12 @@ void CommandExecutor::run(const std::stop_token& stop_token) {
             if (!queue_changed_.wait(lock, stop_token, [this] { return !queue_.empty(); })) {
                 break;  // stop requested and nothing runnable
             }
+            // wait() returns true whenever the queue is non-empty, even after a
+            // stop request; without this check a stopping executor would keep
+            // executing queued commands instead of rejecting them below.
+            if (stop_token.stop_requested()) {
+                break;
+            }
             command = std::move(queue_.front());
             queue_.pop_front();
         }
