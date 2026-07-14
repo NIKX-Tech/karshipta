@@ -28,26 +28,23 @@ jobs:
         run: npm ci
       - name: Generate protobuf types
         run: npm run proto:gen
-      # dev pushes publish a unique prerelease on every commit (dist-tag
-      # "dev"), so console-consuming apps can track dev without a human
-      # bumping the version each time. main pushes publish the version
-      # already set in package.json under "latest": bumping that version
-      # is a deliberate, reviewed step in the PR that changes it. Must run
-      # before `npm run package`: svelte-package copies package.json's
-      # current version into dist/package.json, which is what actually
-      # gets published (publishConfig.directory points npm there).
-      - name: Set prerelease version (dev only)
-        if: github.ref == 'refs/heads/dev'
-        run: npm version --no-git-tag-version "0.1.0-dev.$(date -u +%Y%m%d%H%M%S).${GITHUB_SHA::7}"
       - name: Build the package
         run: npm run package
-      - name: Publish (dev)
-        if: github.ref == 'refs/heads/dev'
-        run: npm publish --tag dev
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish (main)
-        if: github.ref == 'refs/heads/main'
-        run: npm publish --tag latest
+      # npm consumers get one stable line: whatever is published under
+      # "latest" is a deliberate version someone chose in package.json,
+      # from dev or main alike; there is no separate prerelease/dev tag to
+      # track. A push that does not change the version is a silent no-op,
+      # not a failure: most console commits do not touch console-core's
+      # version, and that must not fail CI.
+      - name: Publish if the version changed
+        run: |
+          PUBLISHED=$(npm view "$(node -p "require('./package.json').name")" version --registry https://npm.pkg.github.com 2>/dev/null || echo "none")
+          LOCAL=$(node -p "require('./package.json').version")
+          if [ "$PUBLISHED" = "$LOCAL" ]; then
+            echo "console-core@$LOCAL already published, skipping"
+          else
+            echo "publishing console-core@$LOCAL (was $PUBLISHED)"
+            npm publish --tag latest
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
