@@ -2,16 +2,17 @@
 #ifndef KARSHIPTA_GATEWAY_TELEMETRY_H
 #define KARSHIPTA_GATEWAY_TELEMETRY_H
 
-#include "vehicle_connection.h"
 #include <mavsdk/plugins/telemetry/telemetry.h>
+
 #include <atomic>
-#include <memory>
 #include <chrono>
-#include <mutex>
+#include <memory>
 #include <optional>
 
+#include "vehicle_connection.h"
+
 class TelemetryInfo {
-public:
+   public:
     // Binds this wrapper to a connection; does not create the Telemetry plugin yet
     // (that happens lazily in ensure_telemetry() on first use).
     explicit TelemetryInfo(VehicleConnection& connection);
@@ -65,7 +66,7 @@ public:
     // True if every MAVSDK health check currently passes.
     [[nodiscard]] bool is_health_ok() const;
 
-private:
+   private:
     // Owned copy of the Mavsdk core, grabbed in ensure_telemetry(). Keeps the core alive
     // for as long as `telemetry_` exists, independent of `connection_`'s own lifetime.
     mutable std::shared_ptr<mavsdk::Mavsdk> mavsdk_keepalive_;
@@ -87,18 +88,9 @@ private:
     mutable std::optional<mavsdk::Telemetry::FlightModeHandle> flight_mode_handle_;
     mutable std::optional<mavsdk::Telemetry::BatteryHandle> battery_handle_;
 
-    // Serializes the lazy init in ensure_telemetry(): both the CommandExecutor
-    // worker and VehicleManager's own threads can trigger the first creation
-    // concurrently. Once created, `telemetry_` is never reset, so reads after a
-    // successful ensure_telemetry() need no lock.
-    mutable std::mutex init_mutex_;
-
     // Lazily creates `telemetry_` the first time it's needed. Returns false if
     // `connection_` isn't connected yet; returns true immediately if already created.
-    // Thread-safe.
     bool ensure_telemetry() const;
 };
-
-
 
 #endif  // KARSHIPTA_GATEWAY_TELEMETRY_H

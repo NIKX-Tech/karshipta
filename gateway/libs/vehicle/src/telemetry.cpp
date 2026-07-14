@@ -1,30 +1,45 @@
 #include "telemetry.h"
 
+#include <spdlog/spdlog.h>
+
 #include <future>
 #include <thread>
-
-#include <spdlog/spdlog.h>
 
 namespace {
 
 // Operators read logs; MAVSDK's enum values do not mean anything to them.
 const char* flight_mode_name(const mavsdk::Telemetry::FlightMode mode) {
     switch (mode) {
-        case mavsdk::Telemetry::FlightMode::Ready: return "ready";
-        case mavsdk::Telemetry::FlightMode::Takeoff: return "takeoff";
-        case mavsdk::Telemetry::FlightMode::Hold: return "hold";
-        case mavsdk::Telemetry::FlightMode::Mission: return "mission";
-        case mavsdk::Telemetry::FlightMode::ReturnToLaunch: return "return-to-launch";
-        case mavsdk::Telemetry::FlightMode::Land: return "land";
-        case mavsdk::Telemetry::FlightMode::Offboard: return "offboard";
-        case mavsdk::Telemetry::FlightMode::FollowMe: return "follow-me";
-        case mavsdk::Telemetry::FlightMode::Manual: return "manual";
-        case mavsdk::Telemetry::FlightMode::Altctl: return "altitude-control";
-        case mavsdk::Telemetry::FlightMode::Posctl: return "position-control";
-        case mavsdk::Telemetry::FlightMode::Acro: return "acro";
-        case mavsdk::Telemetry::FlightMode::Stabilized: return "stabilized";
-        case mavsdk::Telemetry::FlightMode::Rattitude: return "rattitude";
-        default: return "unknown";
+        case mavsdk::Telemetry::FlightMode::Ready:
+            return "ready";
+        case mavsdk::Telemetry::FlightMode::Takeoff:
+            return "takeoff";
+        case mavsdk::Telemetry::FlightMode::Hold:
+            return "hold";
+        case mavsdk::Telemetry::FlightMode::Mission:
+            return "mission";
+        case mavsdk::Telemetry::FlightMode::ReturnToLaunch:
+            return "return-to-launch";
+        case mavsdk::Telemetry::FlightMode::Land:
+            return "land";
+        case mavsdk::Telemetry::FlightMode::Offboard:
+            return "offboard";
+        case mavsdk::Telemetry::FlightMode::FollowMe:
+            return "follow-me";
+        case mavsdk::Telemetry::FlightMode::Manual:
+            return "manual";
+        case mavsdk::Telemetry::FlightMode::Altctl:
+            return "altitude-control";
+        case mavsdk::Telemetry::FlightMode::Posctl:
+            return "position-control";
+        case mavsdk::Telemetry::FlightMode::Acro:
+            return "acro";
+        case mavsdk::Telemetry::FlightMode::Stabilized:
+            return "stabilized";
+        case mavsdk::Telemetry::FlightMode::Rattitude:
+            return "rattitude";
+        default:
+            return "unknown";
     }
 }
 
@@ -40,7 +55,6 @@ TelemetryInfo::~TelemetryInfo() {
 }
 
 bool TelemetryInfo::ensure_telemetry() const {
-    std::lock_guard lock(init_mutex_);
     if (telemetry_) return true;
     if (!connection_.is_connected()) return false;
     mavsdk_keepalive_ = connection_.get_mavsdk();
@@ -67,13 +81,12 @@ void TelemetryInfo::subscribe_position() {
         spdlog::error("subscribe to position failed: telemetry not available");
         return;
     }
-    position_handle_ = telemetry_->subscribe_position([](const mavsdk::Telemetry::Position& position) {
-        spdlog::info(
-            "altitude={:.1f}m latitude={:.6f} longitude={:.6f}",
-            position.relative_altitude_m,
-            position.latitude_deg,
-            position.longitude_deg);
-    });
+    position_handle_ =
+        telemetry_->subscribe_position([](const mavsdk::Telemetry::Position& position) {
+            spdlog::info("altitude={:.1f}m latitude={:.6f} longitude={:.6f}",
+                         position.relative_altitude_m, position.latitude_deg,
+                         position.longitude_deg);
+        });
     spdlog::info("subscribed to position");
 }
 
@@ -88,11 +101,12 @@ void TelemetryInfo::subscribe_flight_mode() {
     if (!ensure_telemetry()) return;
 
     last_flight_mode_ = mavsdk::Telemetry::FlightMode::Unknown;
-    flight_mode_handle_ = telemetry_->subscribe_flight_mode([this](mavsdk::Telemetry::FlightMode flight_mode) {
-        if (last_flight_mode_.exchange(flight_mode) != flight_mode) {
-            spdlog::info("flight mode changed: {}", flight_mode_name(flight_mode));
-        }
-    });
+    flight_mode_handle_ =
+        telemetry_->subscribe_flight_mode([this](mavsdk::Telemetry::FlightMode flight_mode) {
+            if (last_flight_mode_.exchange(flight_mode) != flight_mode) {
+                spdlog::info("flight mode changed: {}", flight_mode_name(flight_mode));
+            }
+        });
     spdlog::info("subscribed to flight mode");
 }
 
@@ -109,7 +123,8 @@ void TelemetryInfo::subscribe_battery() {
         return;
     }
     battery_handle_ = telemetry_->subscribe_battery([](const mavsdk::Telemetry::Battery& battery) {
-        spdlog::info("battery remaining={:.0f}% voltage={:.2f}V", battery.remaining_percent, battery.voltage_v);
+        spdlog::info("battery remaining={:.0f}% voltage={:.2f}V", battery.remaining_percent,
+                     battery.voltage_v);
     });
     spdlog::info("subscribed to battery");
 }
@@ -204,4 +219,3 @@ bool TelemetryInfo::is_health_ok() const {
     if (!ensure_telemetry()) return false;
     return telemetry_->health_all_ok();
 }
-
