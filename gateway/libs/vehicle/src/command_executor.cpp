@@ -1,10 +1,10 @@
 #include "command_executor.h"
 
+#include <spdlog/spdlog.h>
+
 #include <cmath>
 #include <limits>
 #include <utility>
-
-#include <spdlog/spdlog.h>
 
 namespace {
 
@@ -14,15 +14,24 @@ constexpr float kNoSpeedRequested = 0.0f;
 
 const char* action_case_name(const karshipta::v1::Command& command) {
     switch (command.action_case()) {
-        case karshipta::v1::Command::kArm: return "arm";
-        case karshipta::v1::Command::kDisarm: return "disarm";
-        case karshipta::v1::Command::kTakeoff: return "takeoff";
-        case karshipta::v1::Command::kLand: return "land";
-        case karshipta::v1::Command::kRtl: return "rtl";
-        case karshipta::v1::Command::kGoto: return "goto";
-        case karshipta::v1::Command::kStartMission: return "start_mission";
-        case karshipta::v1::Command::kPauseMission: return "pause_mission";
-        default: return "none";
+        case karshipta::v1::Command::kArm:
+            return "arm";
+        case karshipta::v1::Command::kDisarm:
+            return "disarm";
+        case karshipta::v1::Command::kTakeoff:
+            return "takeoff";
+        case karshipta::v1::Command::kLand:
+            return "land";
+        case karshipta::v1::Command::kRtl:
+            return "rtl";
+        case karshipta::v1::Command::kGoto:
+            return "goto";
+        case karshipta::v1::Command::kStartMission:
+            return "start_mission";
+        case karshipta::v1::Command::kPauseMission:
+            return "pause_mission";
+        default:
+            return "none";
     }
 }
 
@@ -56,6 +65,12 @@ void CommandExecutor::run(const std::stop_token& stop_token) {
             if (!queue_changed_.wait(lock, stop_token, [this] { return !queue_.empty(); })) {
                 break;  // stop requested and nothing runnable
             }
+            // wait() returns true whenever the queue is non-empty, even after a
+            // stop request; without this check a stopping executor would keep
+            // executing queued commands instead of rejecting them below.
+            if (stop_token.stop_requested()) {
+                break;
+            }
             command = std::move(queue_.front());
             queue_.pop_front();
         }
@@ -84,9 +99,7 @@ std::pair<mavsdk::Action::Result, std::string> CommandExecutor::dispatch(
     const karshipta::v1::Command& command) {
     using Result = mavsdk::Action::Result;
 
-    const auto describe = [](const Result result) {
-        return VehicleActions::result_name(result);
-    };
+    const auto describe = [](const Result result) { return VehicleActions::result_name(result); };
 
     switch (command.action_case()) {
         case karshipta::v1::Command::kArm: {
@@ -134,10 +147,11 @@ std::pair<mavsdk::Action::Result, std::string> CommandExecutor::dispatch(
             float altitude_msl_m = target.altitude_msl_m();
             if (altitude_msl_m <= 0.0f) {
                 const auto position = telemetry_.get_position();
-                altitude_msl_m = target.altitude_rel_m() > 0.0f
-                    ? (position.absolute_altitude_m - position.relative_altitude_m) +
-                          target.altitude_rel_m()
-                    : position.absolute_altitude_m;
+                altitude_msl_m =
+                    target.altitude_rel_m() > 0.0f
+                        ? (position.absolute_altitude_m - position.relative_altitude_m) +
+                              target.altitude_rel_m()
+                        : position.absolute_altitude_m;
             }
             const auto result = actions_.goto_location(
                 target.latitude_deg(), target.longitude_deg(), altitude_msl_m,
