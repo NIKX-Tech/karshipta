@@ -366,6 +366,23 @@ void VehicleManager::broadcast_rejection_event(const karshipta::v1::CommandAck& 
     transport_.broadcast(serialize_envelope(envelope));
 }
 
+void VehicleManager::broadcast_link_event(const std::string& vehicle_id, bool connected) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_vehicle_id(vehicle_id);
+    event->set_timestamp_ms(unix_epoch_ms());
+    if (connected) {
+        event->set_severity(karshipta::v1::SEVERITY_INFO);
+        event->set_code("LINK_CONNECTED");
+        event->set_message("vehicle connected");
+    } else {
+        event->set_severity(karshipta::v1::SEVERITY_WARNING);
+        event->set_code("LINK_LOST");
+        event->set_message("vehicle link lost, reconnecting");
+    }
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
 bool VehicleManager::start(const std::string& vehicle_id) {
     std::lock_guard lock(vehicles_mutex_);
     auto* vehicle = find_locked(vehicle_id);
@@ -925,6 +942,7 @@ void VehicleManager::run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token
             break;
         }
         spdlog::info("vehicle connected (system_id={})", vehicle.config.system_id);
+        broadcast_link_event(vehicle.config.vehicle_id, /*connected=*/true);
         // PX4 forgets requested stream rates across a link drop, so this is
         // re-requested on every reconnect, not just the first.
         vehicle.telemetry->set_telemetry_rate(kTelemetryRateHz);
@@ -937,5 +955,6 @@ void VehicleManager::run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token
             break;
         }
         spdlog::warn("vehicle link lost (system_id={}), reconnecting", vehicle.config.system_id);
+        broadcast_link_event(vehicle.config.vehicle_id, /*connected=*/false);
     }
 }

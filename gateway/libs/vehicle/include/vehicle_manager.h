@@ -300,6 +300,12 @@ private:
     // ack.status() first; takes no lock, same as broadcast_command_ack.
     void broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const;
 
+    // Wraps a link up/down transition into an Event and broadcasts it: INFO/
+    // "LINK_CONNECTED" when connected is true, WARNING/"LINK_LOST" when
+    // false. Called from run_reconnect_loop, which already runs unlocked, so
+    // this takes no lock either, same as broadcast_command_ack.
+    void broadcast_link_event(const std::string& vehicle_id, bool connected) const;
+
     // Body of vehicle.reconnect_worker, run on start()'s jthread. Connects,
     // requests the telemetry stream rate (PX4 forgets this across a link
     // drop, so it's re-requested on every reconnect, not just the first),

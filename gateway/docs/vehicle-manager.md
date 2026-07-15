@@ -102,8 +102,11 @@ generated `fleet_state.yaml` itself is gitignored.
   `executor`/`busy`/`reconnect_worker`. Lock order: `vehicles_mutex_` before
   any `VehicleConnection`/`TelemetryInfo`/`VehicleActions` internal mutex.
 - Each vehicle's `reconnect_worker` is an independent `jthread`: connects,
-  requests the telemetry stream rate (re-requested on every reconnect - PX4
-  forgets it across a link drop), waits while connected, reconnects on drop.
+  broadcasts an INFO `LINK_CONNECTED` `Event`, requests the telemetry stream
+  rate (re-requested on every reconnect - PX4 forgets it across a link drop),
+  waits while connected, and on drop broadcasts a WARNING `LINK_LOST` `Event`
+  before reconnecting (not on a deliberate `stop()`/`force_stop()` - the loop
+  only emits `LINK_LOST` when the drop wasn't requested).
 - One shared `publish_worker_` (not one per vehicle: the per-tick work is
   cheap cached-getter reads, not I/O, so batching it on one thread is simpler
   and just as fast) builds every vehicle's `VehicleState` under the lock, then
