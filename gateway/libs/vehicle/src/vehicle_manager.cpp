@@ -269,9 +269,15 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
         .connection = std::move(connection),
         .telemetry = std::move(telemetry),
         .actions = std::move(actions),
-        // executor and busy take ManagedVehicle's own default member
-        // initializers (nullptr, false); executor is filled in below since it
-        // needs a reference to `managed` itself.
+        // Explicit even though these match ManagedVehicle's own default
+        // member initializers (nullptr, false, not-joinable): gcc/clang's
+        // -Wmissing-field-initializers (part of -Wextra) flags a designated
+        // initializer that doesn't reach the struct's last member, even when
+        // the skipped ones have in-class defaults. executor is filled in
+        // below since it needs a reference to `managed` itself.
+        .executor = nullptr,
+        .busy = false,
+        .reconnect_worker = {},
     };
     managed.executor = make_executor(managed);
 
