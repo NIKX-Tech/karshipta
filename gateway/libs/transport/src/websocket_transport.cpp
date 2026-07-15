@@ -1,17 +1,15 @@
 #include "websocket_transport.h"
 
-#include <cassert>
-
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <spdlog/spdlog.h>
 
+#include <cassert>
+
 WebsocketTransport::WebsocketTransport(std::string host, const uint16_t port)
     : host_(std::move(host)), port_(port) {}
 
-WebsocketTransport::~WebsocketTransport() {
-    stop();
-}
+WebsocketTransport::~WebsocketTransport() { stop(); }
 
 void WebsocketTransport::start() {
     if (running_) return;
@@ -19,8 +17,8 @@ void WebsocketTransport::start() {
     ix::initNetSystem();
     server_ = std::make_unique<ix::WebSocketServer>(port_, host_);
     server_->setOnClientMessageCallback(
-        [this](const std::shared_ptr<ix::ConnectionState>& connection_state, ix::WebSocket& web_socket,
-               const ix::WebSocketMessagePtr& msg) {
+        [this](const std::shared_ptr<ix::ConnectionState>& connection_state,
+               ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
             switch (msg->type) {
                 case ix::WebSocketMessageType::Open: {
                     // The server owns each connection as a shared_ptr in its own
@@ -35,7 +33,8 @@ void WebsocketTransport::start() {
                         }
                     }
                     if (!shared_socket) {
-                        spdlog::warn("client connected but not found in server client set, dropping");
+                        spdlog::warn(
+                            "client connected but not found in server client set, dropping");
                         break;
                     }
                     const ClientId id = next_client_id_.fetch_add(1);
@@ -44,7 +43,8 @@ void WebsocketTransport::start() {
                         clients_[id] = shared_socket;
                         client_ids_[&web_socket] = id;
                     }
-                    spdlog::info("client {} connected from {}", id, connection_state->getRemoteIp());
+                    spdlog::info("client {} connected from {}", id,
+                                 connection_state->getRemoteIp());
                     if (on_connect_) on_connect_(id);
                     break;
                 }
@@ -53,7 +53,8 @@ void WebsocketTransport::start() {
                     bool found = false;
                     {
                         std::lock_guard lock(clients_mutex_);
-                        if (const auto it = client_ids_.find(&web_socket); it != client_ids_.end()) {
+                        if (const auto it = client_ids_.find(&web_socket);
+                            it != client_ids_.end()) {
                             id = it->second;
                             found = true;
                             clients_.erase(id);
@@ -75,7 +76,8 @@ void WebsocketTransport::start() {
                     bool found = false;
                     {
                         std::lock_guard lock(clients_mutex_);
-                        if (const auto it = client_ids_.find(&web_socket); it != client_ids_.end()) {
+                        if (const auto it = client_ids_.find(&web_socket);
+                            it != client_ids_.end()) {
                             id = it->second;
                             found = true;
                         }
@@ -116,9 +118,7 @@ void WebsocketTransport::stop() {
     spdlog::info("websocket server stopped");
 }
 
-bool WebsocketTransport::is_running() const {
-    return running_;
-}
+bool WebsocketTransport::is_running() const { return running_; }
 
 void WebsocketTransport::send(const ClientId client, const std::vector<uint8_t>& bytes) {
     std::shared_ptr<ix::WebSocket> web_socket;
