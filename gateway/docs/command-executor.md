@@ -7,8 +7,9 @@
 `CommandExecutor` closes the command loop (BRIEF.md M3): decoded `Command`
 messages go in, `VehicleActions` calls happen on a worker thread, and every
 command is answered with a `CommandAck`. It never touches the wire itself;
-`main.cpp` decodes Envelopes into it and turns its acks back into Envelopes
-through the `Transport`.
+`main.cpp` decodes Envelopes and hands them to `VehicleManager::
+dispatch_command`, which routes to the right vehicle's `CommandExecutor` and
+turns its acks back into Envelopes through the `Transport`.
 
 ## Responsibilities
 
@@ -24,12 +25,14 @@ through the `Transport`.
 
 - **Decoding bytes.** `main.cpp` parses the Envelope and routes by payload
   case; undecodable frames are logged there (no command_id exists to ack).
-- **Vehicle routing.** The single-vehicle gateway rejects commands for any
-  other `vehicle_id` in `main.cpp`; M4's `VehicleManager` owns real routing.
+- **Vehicle routing.** `VehicleManager::dispatch_command` owns routing by
+  `vehicle_id` across the fleet; `main.cpp` never touches `CommandExecutor`
+  directly (see `vehicle-manager.md`).
 - **Missions.** `start_mission`/`pause_mission` reject with a pointer to M5
   (issue #17) until the Mission plugin lands.
-- **Event envelopes.** The ack callback in `main.cpp` publishes a WARNING
-  `Event` for every rejection; the executor only reports acks.
+- **Event envelopes.** `VehicleManager::make_executor`'s ack callback
+  publishes a WARNING `Event` for every rejection; the executor only reports
+  acks.
 
 ## Ack semantics
 
