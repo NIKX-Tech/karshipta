@@ -171,6 +171,13 @@ struct ScopeExit {
     F fn;
     ~ScopeExit() { fn(); }
 };
+// Explicit deduction guide: relying on C++20 aggregate CTAD alone (letting F
+// deduce from the braced-init lambda with no guide) builds clean on MSVC and
+// gcc but fails on clang ("no viable constructor or deduction guide") - CI's
+// clang job is what actually caught this. An explicit guide sidesteps
+// aggregate-CTAD support differences entirely.
+template <typename F>
+ScopeExit(F) -> ScopeExit<F>;
 
 karshipta::v1::CommandAck make_rejected_ack(const karshipta::v1::Command& command,
                                             const std::string& reason) {
