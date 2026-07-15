@@ -1,5 +1,6 @@
 add_library(transport
         src/websocket_transport.cpp
+        src/relay_transport.cpp
 )
 
 target_include_directories(transport
@@ -12,6 +13,7 @@ target_link_libraries(transport
             spdlog::spdlog
         PRIVATE
             ixwebsocket::ixwebsocket
+            yaml-cpp::yaml-cpp
 )
 
 if(WIN32)

@@ -134,6 +134,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/vehicle/command_executor_test.cpp
     tests/vehicle/vehicle_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
+    tests/transport/relay_transport_test.cpp
   )
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
