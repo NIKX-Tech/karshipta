@@ -6,9 +6,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <fstream>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
+
+#include <mavsdk/plugins/info/info.h>
+#include <yaml-cpp/yaml.h>
 
 #include <karshipta/v1/envelope.pb.h>
 #include <spdlog/spdlog.h>
@@ -23,6 +30,139 @@ constexpr std::chrono::milliseconds kReconnectPollInterval{1000};
 // reconnect worker running. Generous: RTL duration scales with distance and
 // altitude. Named so a config value can override it later (BRIEF.md M4).
 constexpr std::chrono::seconds kForceStopLandingTimeout{120};
+
+// BRIEF.md M2's ~5Hz per-vehicle telemetry target: requested from the
+// autopilot on every (re)connect, and matches
+// VehicleManager::kDefaultPublishInterval (1000ms / kTelemetryRateHz).
+constexpr float kTelemetryRateHz = 5.0f;
+
+// Only autopilot this milestone connects to (SITL); AddVehicle carries no
+// autopilot-family field to derive this from.
+constexpr auto kAutopilotName = "PX4";
+
+uint64_t unix_epoch_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch())
+                                      .count());
+}
+
+// Sizes come from ByteSizeLong() just above the failing call, so SerializeToArray
+// cannot fail in practice; the empty-vector-and-log path exists anyway per
+// gateway rule 5 (every failure observable, never silently swallowed).
+std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope) {
+    std::vector<uint8_t> bytes(envelope.ByteSizeLong());
+    if (!envelope.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()))) {
+        spdlog::error("failed to serialize an Envelope of {} bytes", bytes.size());
+        bytes.clear();
+    }
+    return bytes;
+}
+
+// mavsdk::Telemetry::FixType has more granularity than karshipta.v1.GpsFixType; collapse
+// the extra values (NoGps, FixDgps, RtkFloat) onto their nearest proto equivalent.
+karshipta::v1::GpsFixType to_proto_fix_type(const mavsdk::Telemetry::FixType fix_type) {
+    switch (fix_type) {
+        case mavsdk::Telemetry::FixType::NoGps:
+        case mavsdk::Telemetry::FixType::NoFix:
+            return karshipta::v1::GPS_FIX_TYPE_NO_FIX;
+        case mavsdk::Telemetry::FixType::Fix2D:
+            return karshipta::v1::GPS_FIX_TYPE_FIX_2D;
+        case mavsdk::Telemetry::FixType::Fix3D:
+        case mavsdk::Telemetry::FixType::FixDgps:
+            return karshipta::v1::GPS_FIX_TYPE_FIX_3D;
+        case mavsdk::Telemetry::FixType::RtkFloat:
+        case mavsdk::Telemetry::FixType::RtkFixed:
+            return karshipta::v1::GPS_FIX_TYPE_RTK;
+        default:
+            return karshipta::v1::GPS_FIX_TYPE_UNSPECIFIED;
+    }
+}
+
+// mavsdk::Telemetry::FlightMode has more granularity than karshipta.v1.FlightMode; modes
+// with no proto equivalent (Ready, FollowMe, Altctl, Acro, Stabilized, Rattitude) map to
+// FLIGHT_MODE_UNKNOWN rather than UNSPECIFIED, since a mode IS active, it just isn't one
+// the schema names yet.
+karshipta::v1::FlightMode to_proto_flight_mode(const mavsdk::Telemetry::FlightMode flight_mode) {
+    switch (flight_mode) {
+        case mavsdk::Telemetry::FlightMode::Manual:
+            return karshipta::v1::FLIGHT_MODE_MANUAL;
+        case mavsdk::Telemetry::FlightMode::Hold:
+            return karshipta::v1::FLIGHT_MODE_HOLD;
+        case mavsdk::Telemetry::FlightMode::Mission:
+            return karshipta::v1::FLIGHT_MODE_MISSION;
+        case mavsdk::Telemetry::FlightMode::ReturnToLaunch:
+            return karshipta::v1::FLIGHT_MODE_RETURN;
+        case mavsdk::Telemetry::FlightMode::Takeoff:
+            return karshipta::v1::FLIGHT_MODE_TAKEOFF;
+        case mavsdk::Telemetry::FlightMode::Land:
+            return karshipta::v1::FLIGHT_MODE_LAND;
+        case mavsdk::Telemetry::FlightMode::Offboard:
+            return karshipta::v1::FLIGHT_MODE_OFFBOARD;
+        case mavsdk::Telemetry::FlightMode::Posctl:
+            return karshipta::v1::FLIGHT_MODE_POSITION;
+        default:
+            return karshipta::v1::FLIGHT_MODE_UNKNOWN;
+    }
+}
+
+karshipta::v1::VehicleState build_vehicle_state(const std::string& vehicle_id,
+                                                 const VehicleConnection& connection,
+                                                 const TelemetryInfo& telemetry) {
+    karshipta::v1::VehicleState state;
+    state.set_vehicle_id(vehicle_id);
+    state.set_timestamp_ms(unix_epoch_ms());
+
+    const auto position = telemetry.get_position();
+    auto* proto_position = state.mutable_position();
+    proto_position->set_latitude_deg(position.latitude_deg);
+    proto_position->set_longitude_deg(position.longitude_deg);
+    proto_position->set_altitude_msl_m(position.absolute_altitude_m);
+    proto_position->set_altitude_rel_m(position.relative_altitude_m);
+
+    const auto velocity = telemetry.get_velocity_ned();
+    auto* proto_velocity = state.mutable_velocity();
+    proto_velocity->set_north_m_s(velocity.north_m_s);
+    proto_velocity->set_east_m_s(velocity.east_m_s);
+    proto_velocity->set_down_m_s(velocity.down_m_s);
+
+    state.set_heading_deg(telemetry.get_heading_deg());
+
+    const auto battery = telemetry.get_battery();
+    auto* proto_battery = state.mutable_battery();
+    proto_battery->set_voltage_v(battery.voltage_v);
+    proto_battery->set_remaining_pct(battery.remaining_percent);
+
+    const auto gps = telemetry.get_gps_info();
+    auto* proto_gps = state.mutable_gps();
+    proto_gps->set_fix_type(to_proto_fix_type(gps.fix_type));
+    proto_gps->set_num_satellites(static_cast<uint32_t>(gps.num_satellites));
+    // Gps.hdop stays unset: MAVSDK's GpsInfo does not carry it (RawGps does;
+    // schema gap tracked for a later milestone).
+    proto_gps->set_hdop(telemetry.get_raw_gps().hdop);
+
+    state.set_flight_mode(to_proto_flight_mode(telemetry.get_flight_mode()));
+    state.set_armed(telemetry.is_armed());
+    state.set_in_air(telemetry.is_in_air());
+    state.set_health_ok(telemetry.is_health_ok());
+    state.set_connected(connection.is_connected());
+
+    return state;
+}
+
+// Blocking query against the Info plugin; only called once per client connect
+// per vehicle, so a fresh plugin instance per call is cheap and needs no
+// lifecycle management (unlike TelemetryInfo's persistent subscriptions).
+std::string query_firmware_version(const std::shared_ptr<mavsdk::System>& system) {
+    const mavsdk::Info info(system);
+    const auto [result, version] = info.get_version();
+    if (result != mavsdk::Info::Result::Success) {
+        spdlog::warn("could not query firmware version: result={}", static_cast<int>(result));
+        return {};
+    }
+    return std::to_string(version.flight_sw_major) + "." + std::to_string(version.flight_sw_minor) +
+           "." + std::to_string(version.flight_sw_patch) +
+           (version.flight_sw_git_hash.empty() ? "" : " (" + version.flight_sw_git_hash + ")");
+}
 
 // Runs fn at scope exit, success or failure, so busy-flag cleanup cannot be
 // skipped by an early return or an exception thrown in an unlocked window.
@@ -44,8 +184,15 @@ karshipta::v1::CommandAck make_rejected_ack(const karshipta::v1::Command& comman
 
 }  // namespace
 
-VehicleManager::VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp)
-    : mavsdk_(std::move(mavsdk)), transport_(tp) {}
+VehicleManager::VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
+                                std::filesystem::path persistence_path)
+    : mavsdk_(std::move(mavsdk)), transport_(tp), persistence_path_(std::move(persistence_path)) {}
+
+std::unique_ptr<VehicleManager> VehicleManager::create(Transport& tp,
+                                                         std::filesystem::path persistence_path) {
+    return std::make_unique<VehicleManager>(VehicleConnection::create_shared_core(), tp,
+                                             std::move(persistence_path));
+}
 
 VehicleManager::~VehicleManager() {
     // See the header comment: force_stop() in particular runs for up to
@@ -72,11 +219,17 @@ const ManagedVehicle* VehicleManager::find_locked(const std::string& vehicle_id)
 
 std::unique_ptr<CommandExecutor> VehicleManager::make_executor(ManagedVehicle& vehicle) {
     return std::make_unique<CommandExecutor>(
-        *vehicle.actions, *vehicle.telemetry,
-        [this](const karshipta::v1::CommandAck& ack) { broadcast_command_ack(ack); });
+        *vehicle.actions, *vehicle.telemetry, [this](const karshipta::v1::CommandAck& ack) {
+            broadcast_command_ack(ack);
+            // rejected commands are events a human should see (gateway rule 5)
+            if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
+                broadcast_rejection_event(ack);
+            }
+        });
 }
 
-std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig& cfg) {
+std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig& cfg,
+                                                              bool should_persist) {
     if (cfg.vehicle_id.empty()) {
         return "vehicle_id is empty";
     }
@@ -89,7 +242,7 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
     // identities and must not collide with each other.
     if (cfg.system_id != 0) {
         for (const auto& [id, vehicle] : managed_vehicles_) {
-            if (vehicle.system_id == cfg.system_id) {
+            if (vehicle.config.system_id == cfg.system_id) {
                 return "system_id " + std::to_string(cfg.system_id) +
                        " already bound to vehicle_id '" + id + "'";
             }
@@ -112,7 +265,7 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
     auto actions = std::make_unique<VehicleActions>(*connection);
 
     ManagedVehicle managed{
-        .system_id = cfg.system_id,
+        .config = cfg,
         .connection = std::move(connection),
         .telemetry = std::move(telemetry),
         .actions = std::move(actions),
@@ -125,6 +278,10 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
     managed_vehicles_.emplace(cfg.vehicle_id, std::move(managed));
     spdlog::info("vehicle '{}' registered (system_id={}, total={})", cfg.vehicle_id, cfg.system_id,
                  managed_vehicles_.size());
+
+    if (should_persist) {
+        persist_locked();
+    }
     return std::nullopt;
 }
 
@@ -195,10 +352,18 @@ void VehicleManager::dispatch_command(const karshipta::v1::Command& command) {
 void VehicleManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
     karshipta::v1::Envelope envelope;
     *envelope.mutable_command_ack() = ack;
-    std::vector<uint8_t> bytes(envelope.ByteSizeLong());
-    if (envelope.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()))) {
-        transport_.broadcast(bytes);
-    }
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
+void VehicleManager::broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_vehicle_id(ack.vehicle_id());
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code("COMMAND_REJECTED");
+    event->set_message(ack.message());
+    transport_.broadcast(serialize_envelope(envelope));
 }
 
 bool VehicleManager::start(const std::string& vehicle_id) {
@@ -232,6 +397,163 @@ void VehicleManager::start_all() {
     // map while calling a locking method would self-deadlock.
     for (const auto& vehicle_id : list_vehicle_ids()) {
         start(vehicle_id);
+    }
+}
+
+void VehicleManager::persist_locked() const {
+    if (persistence_path_.empty()) {
+        return;
+    }
+    YAML::Node root;
+    YAML::Node vehicles(YAML::NodeType::Sequence);
+    for (const auto& [id, vehicle] : managed_vehicles_) {
+        YAML::Node entry;
+        entry["vehicle_id"] = vehicle.config.vehicle_id;
+        entry["connection_url"] = vehicle.config.connection_url;
+        entry["mavlink_system_id"] = vehicle.config.system_id;
+        entry["name"] = vehicle.config.name;
+        entry["type"] = karshipta::v1::VehicleType_Name(vehicle.config.type);
+        vehicles.push_back(entry);
+    }
+    root["vehicles"] = vehicles;
+
+    // gateway/config/ is a tracked directory (see .gitkeep); this is internal
+    // machinery, not an operator-managed path, so no runtime mkdir here.
+    std::ofstream out(persistence_path_, std::ios::trunc);
+    if (!out) {
+        spdlog::error("failed to open '{}' for writing persisted fleet state",
+                      persistence_path_.string());
+        return;
+    }
+    out << root;
+    if (!out) {
+        spdlog::error("failed to write persisted fleet state to '{}'", persistence_path_.string());
+    }
+}
+
+std::size_t VehicleManager::load_persisted() {
+    if (persistence_path_.empty()) {
+        return 0;
+    }
+    std::error_code exists_error;
+    if (!std::filesystem::exists(persistence_path_, exists_error) || exists_error) {
+        return 0;
+    }
+
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(persistence_path_.string());
+    } catch (const YAML::Exception& parse_error) {
+        spdlog::error("failed to parse persisted fleet state '{}': {}", persistence_path_.string(),
+                      parse_error.what());
+        return 0;
+    }
+
+    const YAML::Node vehicles = root["vehicles"];
+    if (!vehicles || !vehicles.IsSequence()) {
+        return 0;
+    }
+
+    std::size_t loaded = 0;
+    for (const auto& entry : vehicles) {
+        try {
+            VehicleConfig cfg;
+            cfg.vehicle_id = entry["vehicle_id"].as<std::string>();
+            cfg.connection_url = entry["connection_url"].as<std::string>();
+            cfg.system_id = entry["mavlink_system_id"].as<unsigned int>();
+            cfg.name = entry["name"] ? entry["name"].as<std::string>() : std::string{};
+            const std::string type_name = entry["type"] ? entry["type"].as<std::string>() : std::string{};
+            if (!type_name.empty() && !karshipta::v1::VehicleType_Parse(type_name, &cfg.type)) {
+                spdlog::warn("persisted vehicle '{}' has unknown type '{}', defaulting to unspecified",
+                             cfg.vehicle_id, type_name);
+            }
+            // should_persist=false: reconstructing entries already on disk
+            // must not rewrite the file once per entry while loading it.
+            if (const auto error = add_vehicle_impl(cfg, /*should_persist=*/false)) {
+                spdlog::warn("skipping persisted vehicle '{}': {}", cfg.vehicle_id, *error);
+                continue;
+            }
+            ++loaded;
+        } catch (const YAML::Exception& entry_error) {
+            spdlog::warn("skipping malformed persisted vehicle entry: {}", entry_error.what());
+        }
+    }
+    spdlog::info("loaded {} vehicle(s) from '{}'", loaded, persistence_path_.string());
+    return loaded;
+}
+
+std::size_t VehicleManager::restore_and_start() {
+    const std::size_t loaded = load_persisted();
+    start_all();
+    return loaded;
+}
+
+void VehicleManager::start_publishing(std::chrono::milliseconds interval) {
+    publish_worker_ = std::jthread(
+        [this, interval](std::stop_token stop_token) { run_publish_loop(interval, stop_token); });
+}
+
+void VehicleManager::run_publish_loop(std::chrono::milliseconds interval, std::stop_token stop_token) {
+    while (!stop_token.stop_requested()) {
+        std::vector<std::vector<uint8_t>> frames;
+        {
+            // Cheap in-memory work only (TelemetryInfo's getters are cached
+            // reads, not MAVSDK round-trips): safe to build every frame while
+            // holding the lock. The broadcast itself is not, so it happens
+            // after releasing it below.
+            std::lock_guard lock(vehicles_mutex_);
+            frames.reserve(managed_vehicles_.size());
+            for (const auto& [id, vehicle] : managed_vehicles_) {
+                karshipta::v1::Envelope envelope;
+                *envelope.mutable_vehicle_state() =
+                    build_vehicle_state(id, *vehicle.connection, *vehicle.telemetry);
+                frames.push_back(serialize_envelope(envelope));
+            }
+        }
+        for (const auto& frame : frames) {
+            transport_.broadcast(frame);
+        }
+        std::this_thread::sleep_for(interval);
+    }
+}
+
+void VehicleManager::send_vehicle_info(Transport::ClientId client) const {
+    struct Snapshot {
+        std::string vehicle_id;
+        std::shared_ptr<mavsdk::System> system;
+        karshipta::v1::VehicleType type;
+    };
+    // Snapshot cheap values under the lock, then release it before the
+    // per-vehicle work below: query_firmware_version() is a blocking MAVSDK
+    // round-trip, not cached state, and transport_.send() is a blocking
+    // socket write - neither may run while vehicles_mutex_ is held, or every
+    // other VehicleManager call stalls behind one client connect.
+    std::vector<Snapshot> snapshots;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        snapshots.reserve(managed_vehicles_.size());
+        for (const auto& [id, vehicle] : managed_vehicles_) {
+            snapshots.push_back({id, vehicle.connection->get_system(), vehicle.config.type});
+        }
+    }
+    for (const auto& snapshot : snapshots) {
+        if (!snapshot.system) {
+            spdlog::warn(
+                "client {} connected but vehicle '{}' has no discovered system yet, skipping "
+                "VehicleInfo",
+                client, snapshot.vehicle_id);
+            continue;
+        }
+        karshipta::v1::VehicleInfo info;
+        info.set_vehicle_id(snapshot.vehicle_id);
+        info.set_type(snapshot.type);
+        info.set_autopilot(kAutopilotName);
+        info.set_mavlink_system_id(snapshot.system->get_system_id());
+        info.set_firmware_version(query_firmware_version(snapshot.system));
+
+        karshipta::v1::Envelope envelope;
+        *envelope.mutable_vehicle_info() = info;
+        transport_.send(client, serialize_envelope(envelope));
     }
 }
 
@@ -513,6 +835,7 @@ std::optional<std::string> VehicleManager::remove_vehicle_impl(const std::string
     std::lock_guard lock(vehicles_mutex_);
     stop_worker(*vehicle);
     managed_vehicles_.erase(vehicle_id);
+    persist_locked();
     spdlog::info("vehicle_id '{}' removed (total={})", vehicle_id, managed_vehicles_.size());
     return std::nullopt;
 }
@@ -538,12 +861,12 @@ karshipta::v1::VehicleConfigAck VehicleManager::handle_add_vehicle(
     ack.set_request_id(request.request_id());
     ack.set_vehicle_id(request.vehicle_id());
 
-    // request.name() and request.type() are not stored yet: nothing consumes
-    // them until the console renders fleet config (C4).
     const VehicleConfig cfg{
         .vehicle_id = request.vehicle_id(),
         .connection_url = request.connection_url(),
         .system_id = request.mavlink_system_id(),
+        .type = request.type(),
+        .name = request.name(),
     };
 
     std::optional<std::string> error;
@@ -601,7 +924,10 @@ void VehicleManager::run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token
             // Only false if stop_token was cancelled during the retry itself.
             break;
         }
-        spdlog::info("vehicle connected (system_id={})", vehicle.system_id);
+        spdlog::info("vehicle connected (system_id={})", vehicle.config.system_id);
+        // PX4 forgets requested stream rates across a link drop, so this is
+        // re-requested on every reconnect, not just the first.
+        vehicle.telemetry->set_telemetry_rate(kTelemetryRateHz);
 
         while (vehicle.connection->is_connected() && !stop_token.stop_requested()) {
             std::this_thread::sleep_for(kReconnectPollInterval);
@@ -610,6 +936,6 @@ void VehicleManager::run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token
         if (stop_token.stop_requested()) {
             break;
         }
-        spdlog::warn("vehicle link lost (system_id={}), reconnecting", vehicle.system_id);
+        spdlog::warn("vehicle link lost (system_id={}), reconnecting", vehicle.config.system_id);
     }
 }

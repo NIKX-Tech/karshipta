@@ -19,4 +19,5 @@ target_link_libraries(vehicle
         PRIVATE
             karshipta_warnings
             transport
+            yaml-cpp::yaml-cpp
 )

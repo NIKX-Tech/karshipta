@@ -61,6 +61,27 @@ if(NOT ixwebsocket_FOUND)
   endif()
 endif()
 
+# yaml-cpp: vcpkg/Homebrew installs provide a CMake config; when absent (Linux
+# CI, bare dev machines) fall back to a pinned FetchContent build. Used by
+# VehicleManager to persist the fleet to disk (crash recovery).
+find_package(yaml-cpp CONFIG QUIET)
+if(NOT yaml-cpp_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(
+    yaml-cpp
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.zip
+  )
+  # yaml-cpp 0.8.0's own CMakeLists.txt declares cmake_minimum_required()
+  # below what CMake 4.x still accepts; this only relaxes the floor, it
+  # doesn't force old policy behavior on anything that asks for newer.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+  FetchContent_MakeAvailable(yaml-cpp)
+  unset(CMAKE_POLICY_VERSION_MINIMUM)
+  if(NOT TARGET yaml-cpp::yaml-cpp)
+    add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
+  endif()
+endif()
+
 # proto/karshipta/v1/*.proto is the single source of truth (root CLAUDE.md); protoc
 # regenerates the C++ bindings into gen/ at configure time so `gateway/gen/` never
 # needs to be hand-edited or committed (see repo .gitignore).
@@ -111,6 +132,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   set(KARSHIPTA_TEST_SOURCES
     tests/vehicle/vehicle_connection_test.cpp
     tests/vehicle/command_executor_test.cpp
+    tests/vehicle/vehicle_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
   )
 

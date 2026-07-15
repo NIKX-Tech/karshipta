@@ -4,7 +4,10 @@
 
 #ifndef KARSHIPTA_GATEWAY_VEHICLE_MANAGER_H
 #define KARSHIPTA_GATEWAY_VEHICLE_MANAGER_H
+#include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,10 +30,17 @@ struct VehicleConfig {
     // autopilot on the endpoint" (fleet.proto AddVehicle.mavlink_system_id),
     // which is only safe when vehicles connect one at a time.
     unsigned int system_id;
+    karshipta::v1::VehicleType type = karshipta::v1::VEHICLE_TYPE_UNSPECIFIED;
+    // Display name; empty means the console should fall back to vehicle_id
+    // (matches fleet.proto AddVehicle.name's comment).
+    std::string name;
 };
 
 struct ManagedVehicle {
-    unsigned int system_id;
+    // The config this vehicle was built from (persistence and VehicleInfo both
+    // read this instead of asking VehicleConnection, so neither needs a live
+    // connection to answer). config.system_id replaces a standalone field.
+    VehicleConfig config;
     std::unique_ptr<VehicleConnection> connection;
     std::unique_ptr<TelemetryInfo> telemetry;
     std::unique_ptr<VehicleActions> actions;
@@ -65,7 +75,23 @@ struct VehicleStatus {
 // pointer or reference into the internal map ever escapes the lock.
 class VehicleManager {
 public:
-    VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp);
+    // Default publish interval for start_publishing(): BRIEF.md M2's ~5Hz
+    // per-vehicle VehicleState target.
+    static constexpr std::chrono::milliseconds kDefaultPublishInterval{200};
+
+    // persistence_path: where add_vehicle_impl()/remove_vehicle_impl() persist
+    // the fleet after every successful mutation, and where load_persisted()
+    // reads from. An empty path (the default) disables persistence entirely,
+    // so tests stay disk-I/O-free unless they opt in.
+    VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
+                   std::filesystem::path persistence_path = {});
+
+    // Builds the shared Mavsdk core itself (VehicleConnection::create_shared_core())
+    // so callers never need to name VehicleConnection just to construct a
+    // VehicleManager. The one entry point main.cpp (or any future consumer)
+    // should use.
+    static std::unique_ptr<VehicleManager> create(Transport& tp,
+                                                    std::filesystem::path persistence_path = {});
     // Blocks until no vehicle is mid-transition (busy) before letting
     // managed_vehicles_ destruct: force_stop() in particular spends up to
     // kForceStopLandingTimeoutS unlocked, holding a raw ManagedVehicle*, and
@@ -115,6 +141,33 @@ public:
 
     // Calls start() for every currently registered vehicle.
     void start_all();
+
+    // Reads persistence_path (set at construction), registering each entry via
+    // add_vehicle_impl() without re-persisting what's already on disk. Returns
+    // 0 without error if no path was set or the file doesn't exist (first
+    // run). A malformed entry is logged and skipped; the rest still load.
+    std::size_t load_persisted();
+
+    // load_persisted() followed by start_all(): the crash-recovery entry
+    // point. Call once at boot, before serving any client, so a vehicle that
+    // was mid-flight when the gateway last exited starts reconnecting
+    // immediately instead of being forgotten. Returns how many vehicles were
+    // loaded (not how many started; start() failures are logged individually).
+    std::size_t restore_and_start();
+
+    // Launches the shared telemetry-publish worker: every interval, broadcasts
+    // one VehicleState per currently registered vehicle (connected=false for
+    // one that's linked-down, never silently skipped). Independent of
+    // start()/start_all()/restore_and_start(); call in either order. Call
+    // once; a second call is a logic error (jthread already joinable).
+    void start_publishing(std::chrono::milliseconds interval = kDefaultPublishInterval);
+
+    // Sends one VehicleInfo to exactly this client for every registered
+    // vehicle whose System has been discovered (link never established yet is
+    // skipped for that vehicle only, logged, not fatal to the rest). Wire this
+    // to Transport::on_connect so a client that connects after boot still
+    // learns about the fleet.
+    void send_vehicle_info(Transport::ClientId client) const;
 
     // Takes the vehicle offline safely: rejects if unknown, mid-transition,
     // not running, airborne, or link-down-after-discovery (telemetry cannot
@@ -173,6 +226,9 @@ public:
 private:
     std::shared_ptr<mavsdk::Mavsdk> mavsdk_;
     Transport& transport_;
+    // Empty disables persistence. Set once at construction, never mutated
+    // after, so it's safe to read from any thread without vehicles_mutex_.
+    std::filesystem::path persistence_path_;
     // Guards managed_vehicles_ (structure and every element's executor/busy/
     // reconnect_worker members). Mutable so const query methods can lock.
     // Lock order: vehicles_mutex_ before any VehicleConnection/TelemetryInfo/
@@ -182,6 +238,13 @@ private:
     // ~VehicleManager() waits on this until no vehicle is busy.
     mutable std::condition_variable busy_cv_;
     std::map<std::string, ManagedVehicle> managed_vehicles_;
+    // Shared across the whole fleet, unlike reconnect_worker (one per
+    // vehicle): the publish tick is cheap in-memory work for every vehicle
+    // back to back, not I/O-bound work that benefits from its own thread per
+    // vehicle. Declared last (after managed_vehicles_) so it stops and joins
+    // before managed_vehicles_ tears down; it reads managed_vehicles_ on
+    // every tick.
+    std::jthread publish_worker_;
 
     // Lookup while holding vehicles_mutex_. The returned pointer is only
     // valid under the lock, or between lock windows of a transition that has
@@ -192,8 +255,21 @@ private:
     // Reason-returning cores (nullopt = success) shared by the bool public
     // methods (which log) and the handle_* wire entry points (which put the
     // reason in the ack). Both take vehicles_mutex_ themselves.
-    [[nodiscard]] std::optional<std::string> add_vehicle_impl(const VehicleConfig& cfg);
+    // should_persist=false is only for load_persisted(), which is
+    // reconstructing entries already on disk and must not rewrite the file
+    // once per entry while doing so.
+    [[nodiscard]] std::optional<std::string> add_vehicle_impl(const VehicleConfig& cfg,
+                                                                bool should_persist = true);
     [[nodiscard]] std::optional<std::string> remove_vehicle_impl(const std::string& vehicle_id);
+
+    // Writes every managed vehicle's config to persistence_path_ as YAML.
+    // Caller must hold vehicles_mutex_. No-op if persistence_path_ is empty.
+    // Write failure is logged, not thrown or rolled back: the in-memory
+    // mutation that triggered this already succeeded.
+    void persist_locked() const;
+
+    // Body of publish_worker_, run on start_publishing()'s jthread.
+    void run_publish_loop(std::chrono::milliseconds interval, std::stop_token stop_token);
 
     // Builds the CommandExecutor wired to broadcast its acks; shared by
     // add_vehicle_impl() and every path that restores a retired executor.
@@ -219,10 +295,18 @@ private:
     // executor worker threads and from under vehicles_mutex_.
     void broadcast_command_ack(const karshipta::v1::CommandAck& ack) const;
 
+    // Wraps a REJECTED ack into a WARNING Event and broadcasts it (gateway
+    // rule 5: rejections are events a human should see). Caller checks
+    // ack.status() first; takes no lock, same as broadcast_command_ack.
+    void broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const;
+
     // Body of vehicle.reconnect_worker, run on start()'s jthread. Connects,
+    // requests the telemetry stream rate (PX4 forgets this across a link
+    // drop, so it's re-requested on every reconnect, not just the first),
     // waits while connected, and on drop connects again, until stop_token is
-    // cancelled. Touches only vehicle.connection and vehicle.system_id, so it
-    // never needs vehicles_mutex_ (joining under the lock cannot deadlock).
+    // cancelled. Touches only vehicle.connection, vehicle.telemetry, and
+    // vehicle.config, so it never needs vehicles_mutex_ (joining under the
+    // lock cannot deadlock).
     void run_reconnect_loop(ManagedVehicle& vehicle, std::stop_token stop_token);
 
     // No-op (returns true) if vehicle isn't armed; otherwise attempts to
