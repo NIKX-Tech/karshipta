@@ -1,8 +1,8 @@
 #include "vehicle_actions.h"
 
-#include <sstream>
-
 #include <spdlog/spdlog.h>
+
+#include <sstream>
 
 // MAVSDK only offers operator<< for Action::Result, and fmt::streamed needs
 // fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one stringstream keeps the
@@ -26,7 +26,7 @@ bool VehicleActions::ensure_action() const {
 }
 
 mavsdk::Action::Result VehicleActions::log_result(const std::string& label,
-                                                   const mavsdk::Action::Result result) {
+                                                  const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
@@ -84,13 +84,12 @@ mavsdk::Action::Result VehicleActions::hold() const {
 }
 
 mavsdk::Action::Result VehicleActions::goto_location(const double latitude_deg,
-                                                       const double longitude_deg,
-                                                       const float absolute_altitude_m,
-                                                       const float yaw_deg) const {
+                                                     const double longitude_deg,
+                                                     const float absolute_altitude_m,
+                                                     const float yaw_deg) const {
     if (!ensure_action()) return mavsdk::Action::Result::Failed;
-    return log_result(
-        "goto location",
-        action_->goto_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg));
+    return log_result("goto location", action_->goto_location(latitude_deg, longitude_deg,
+                                                              absolute_altitude_m, yaw_deg));
 }
 
 mavsdk::Action::Result VehicleActions::kill() const {

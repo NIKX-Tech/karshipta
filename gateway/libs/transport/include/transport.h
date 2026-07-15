@@ -11,7 +11,7 @@
 // a future Gateway/VehicleManager) must talk to Transport only and must never
 // see WebSocket or relay types.
 class Transport {
-public:
+   public:
     // Identifies one connected client, scoped to a single Transport instance.
     // Passed to send() to target a specific client and to the connect/
     // disconnect callbacks to say which client changed state.

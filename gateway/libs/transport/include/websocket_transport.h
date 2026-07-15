@@ -1,13 +1,13 @@
 #ifndef KARSHIPTA_GATEWAY_WEBSOCKET_TRANSPORT_H
 #define KARSHIPTA_GATEWAY_WEBSOCKET_TRANSPORT_H
 
-#include "transport.h"
-
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+
+#include "transport.h"
 
 namespace ix {
 class WebSocketServer;
@@ -19,7 +19,7 @@ class WebSocket;
 // transport, not the relay transport that replaces it in M4. Callers only see
 // Transport; no ix:: type crosses that boundary.
 class WebsocketTransport final : public Transport {
-public:
+   public:
     // host/port to listen on, e.g. ("0.0.0.0", 8765) for ws://localhost:8765.
     WebsocketTransport(std::string host, uint16_t port);
     // Stops the server if still running, so no client callback can fire
@@ -44,7 +44,7 @@ public:
     void on_connect(ConnectCallback callback) override;
     void on_disconnect(DisconnectCallback callback) override;
 
-private:
+   private:
     std::string host_;
     uint16_t port_;
     std::unique_ptr<ix::WebSocketServer> server_;

@@ -1,12 +1,14 @@
 #ifndef KARSHIPTA_GATEWAY_VEHICLE_ACTIONS_H
 #define KARSHIPTA_GATEWAY_VEHICLE_ACTIONS_H
 
-#include "vehicle_connection.h"
 #include <mavsdk/plugins/action/action.h>
+
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+
+#include "vehicle_connection.h"
 
 // Wraps MAVSDK's Action plugin against exactly one connected vehicle. Scoped
 // to precisely the commands proto/karshipta/v1/command.proto's Command.action
@@ -14,7 +16,7 @@
 // ReturnToLaunchCommand, GotoCommand); nothing here exists ahead of a schema
 // field for it.
 class VehicleActions {
-public:
+   public:
     // Binds this wrapper to a connection; does not create the Action plugin yet
     // (that happens lazily in ensure_action() on first use).
     explicit VehicleActions(VehicleConnection& connection);
@@ -50,8 +52,8 @@ public:
     // Implements GotoCommand. Commands the vehicle to GotoCommand.target
     // (WGS84 lat/lon, AMSL altitude in meters); yaw_deg is NED yaw in degrees.
     [[nodiscard]] mavsdk::Action::Result goto_location(double latitude_deg, double longitude_deg,
-                                                        float absolute_altitude_m,
-                                                        float yaw_deg) const;
+                                                       float absolute_altitude_m,
+                                                       float yaw_deg) const;
     // Implements DisarmCommand{force: true}. Disarms immediately regardless of
     // landed state; the vehicle will fall out of the sky if used while
     // flying. The M3 executor must gate this on the force flag and must never
@@ -61,7 +63,7 @@ public:
     // missions/repositioning. Ephemeral, not stored on the vehicle.
     [[nodiscard]] mavsdk::Action::Result set_current_speed(float speed_m_s) const;
 
-private:
+   private:
     // The connection this action wrapper sends commands through. Must outlive this object.
     VehicleConnection& connection_;
     // Owned copy of the Mavsdk core, grabbed in ensure_action(). Keeps the core alive
@@ -85,7 +87,7 @@ private:
     // Result through unchanged, so the caller (eventually the M3 CommandAck
     // path) keeps the reason a bool would have erased.
     static mavsdk::Action::Result log_result(const std::string& label,
-                                              mavsdk::Action::Result result);
+                                             mavsdk::Action::Result result);
 };
 
 #endif  // KARSHIPTA_GATEWAY_VEHICLE_ACTIONS_H
