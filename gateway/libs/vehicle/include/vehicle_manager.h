@@ -353,6 +353,15 @@ private:
     // broadcasts it. Takes no lock, same as broadcast_command_ack.
     void broadcast_mission_download(const karshipta::v1::Mission& mission) const;
 
+    // Wraps a successful AddVehicle/RemoveVehicle into an INFO Event and
+    // broadcasts it, so every connected console (not just the one that made
+    // the request) learns the fleet changed. Only called from
+    // handle_add_vehicle()/handle_remove_vehicle() on their accepted path;
+    // a rejection is answered by the VehicleConfigAck alone, since nothing
+    // about the fleet actually changed for other consoles to learn about.
+    // Takes no lock, same as broadcast_command_ack.
+    void broadcast_fleet_event(const std::string& vehicle_id, bool added) const;
+
     // Body of vehicle.reconnect_worker, run on start()'s jthread. Connects,
     // requests the telemetry stream rate (PX4 forgets this across a link
     // drop, so it's re-requested on every reconnect, not just the first),
