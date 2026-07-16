@@ -51,11 +51,22 @@ Expect:
 
 ```
 [info] connected to udp://:14540 (system_id=1)
-[info] websocket server listening on ws://0.0.0.0:8765
+[info] websocket server listening on ws://127.0.0.1:8765
 ```
 
 Leave this running too. It publishes one vehicle, `sitl-1`, at
 `ws://localhost:8765`.
+
+The gateway binds to loopback only by default (`gateway/config/gateway.yaml`),
+so it is not reachable from another machine on your network. If the console
+runs on a different machine than the gateway, do not widen this bind:
+cross-machine access is meant to go through the relay transport (see
+`gateway/docs/relay-transport.md`), which is still scaffold-only as of M4.
+If you understand the risk and need a bare-LAN bind anyway (no
+authentication exists yet: anyone who can reach the address can command
+every connected vehicle), set `websocket.allow_lan_bind: true` and
+`websocket.host` to a reachable address in `gateway/config/gateway.yaml`;
+the gateway logs a loud warning on every startup while that is on.
 
 To watch the wire without the console, use the tiny Python client instead of
 or alongside it: `gateway/tools/ws_client.py` (setup steps in its docstring).

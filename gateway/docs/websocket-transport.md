@@ -64,12 +64,49 @@ to tell which one is active.
 
 | Member | Behavior |
 |---|---|
-| `WebsocketTransport(std::string host, uint16_t port)` | Configures the listen address; does not start listening yet. |
+| `WebsocketTransport(std::string host, uint16_t port)` | Configures the listen address; does not start listening yet. Applies no safe-bind policy: prefer `from_config()` at call sites. |
+| `WebsocketTransport::from_config(config_path)` | Static factory: loads `websocket.host`/`websocket.port`/`websocket.allow_lan_bind` from a YAML file, enforcing the safe-bind policy below. |
 | `~WebsocketTransport()` | Calls `stop()` if still running. |
 | `void start() override` | Constructs the `ix::WebSocketServer`, registers the internal message-dispatch callback, and calls `listenAndStart()`. Logs and returns without setting `running_` if the bind fails. |
 | `void stop() override` | Stops the server, clears the client maps, and calls `ix::uninitNetSystem()`. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_`; no-op if not found. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current `shared_ptr<ix::WebSocket>` list under the lock, then sends outside it. |
+| `const std::string& host() const` / `uint16_t port() const` | Read-only accessors for the address this instance was built with. |
+
+## Design: safe-bind config and the LAN escape hatch
+
+The gateway has no authentication (gateway hardening issue #16): whoever can
+open a WebSocket to `host:port` can command every connected vehicle.
+`WebsocketTransport::from_config()` exists so that fact drives a safe
+default instead of an opt-in one, loading `gateway/config/gateway.yaml`:
+
+```yaml
+websocket:
+  host: 127.0.0.1
+  port: 8765
+  allow_lan_bind: false
+```
+
+- A missing config file, or `websocket` section, falls back to
+  `(127.0.0.1, 8765)`.
+- A `host` that is not exactly `127.0.0.1`, `localhost`, or `::1` (this
+  includes `0.0.0.0`, and any specific LAN address) is treated as a wider
+  bind and gated by `allow_lan_bind`:
+  - `allow_lan_bind: false` (the default): the requested host is **ignored**
+    and the transport binds to `127.0.0.1` anyway, with a logged warning
+    explaining why and how to opt in.
+  - `allow_lan_bind: true`: the requested host is honored, but every startup
+    logs a loud `SECURITY:`-prefixed warning that the resulting server is
+    unauthenticated and reachable from other machines.
+- **Cross-machine access is meant to go through `RelayTransport` instead**
+  (`gateway/docs/relay-transport.md`), not a LAN-exposed plain websocket.
+  `allow_lan_bind` exists for cases (LAN testing, a trusted isolated
+  network) where that is not yet practical, not as the recommended path.
+
+This policy lives in `from_config()`, not the plain constructor: the
+constructor still binds wherever it is told, unconditionally, since tests
+construct `WebsocketTransport` directly against `127.0.0.1` on ephemeral
+ports and should not go through config-file loading to do it.
 
 ## Design: mapping IXWebSocket connections to `ClientId`
 
@@ -171,6 +208,16 @@ server + real IXWebSocket client on loopback ports, deadline-guarded):
   two clients; a client's binary frame reaches `on_receive` intact.
 - `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety.
 
+`WebsocketTransportFromConfig` covers the safe-bind policy above:
+
+- `MissingFileDefaultsToLoopback`: no config file resolves to
+  `(127.0.0.1, 8765)`.
+- `LoadsHostAndPortFromFile`: an explicit loopback host/port round-trips.
+- `LanBindWithoutEscapeHatchFallsBackToLoopback`: `host: 0.0.0.0` with
+  `allow_lan_bind` left off (or `false`) is overridden back to `127.0.0.1`.
+- `LanBindWithEscapeHatchIsHonored`: `host: 0.0.0.0` with
+  `allow_lan_bind: true` is honored as configured.
+
 ## Manual verification
 
 Build and run the gateway (`gateway/CLAUDE.local.md` has the full command
@@ -185,8 +232,11 @@ cmake --build gateway/build
 With a vehicle connected, the log includes:
 
 ```
-[info] websocket server listening on ws://0.0.0.0:8765
+[info] websocket server listening on ws://127.0.0.1:8765
 ```
+
+(`gateway/config/gateway.yaml`'s tracked defaults; see the safe-bind design
+section above for what changes if you edit `websocket.host`.)
 
 Connecting any WebSocket client to `ws://localhost:8765` logs, on that
 client's connection:
