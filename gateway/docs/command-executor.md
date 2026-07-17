@@ -4,17 +4,18 @@
 
 ## Overview
 
-`CommandExecutor` closes the command loop (BRIEF.md M3): decoded `Command`
-messages go in, `VehicleActions` calls happen on a worker thread, and every
-command is answered with a `CommandAck`. It never touches the wire itself;
-`main.cpp` decodes Envelopes and hands them to `VehicleManager::
-dispatch_command`, which routes to the right vehicle's `CommandExecutor` and
-turns its acks back into Envelopes through the `Transport`.
+`CommandExecutor` closes the command loop (BRIEF.md M3/M5): decoded `Command`
+messages go in, `VehicleActions`/`VehicleMission` calls happen on a worker
+thread, and every command is answered with a `CommandAck`. It never touches
+the wire itself; `main.cpp` decodes Envelopes and hands them to
+`VehicleManager::dispatch_command`, which routes to the right vehicle's
+`CommandExecutor` and turns its acks back into Envelopes through the
+`Transport`.
 
 ## Responsibilities
 
-- Execute exactly the schema's command set through `VehicleActions`, mapping
-  each `Command.action` case to its MAVSDK call.
+- Execute exactly the schema's command set through `VehicleActions` and
+  `VehicleMission`, mapping each `Command.action` case to its MAVSDK call.
 - Answer every command: ACCEPTED when it enters the queue, then SUCCESS or
   REJECTED with a human-readable reason (gateway rule 5). Commands still
   queued at shutdown are rejected with "gateway shutting down", never dropped.
@@ -28,8 +29,10 @@ turns its acks back into Envelopes through the `Transport`.
 - **Vehicle routing.** `VehicleManager::dispatch_command` owns routing by
   `vehicle_id` across the fleet; `main.cpp` never touches `CommandExecutor`
   directly (see `vehicle-manager.md`).
-- **Missions.** `start_mission`/`pause_mission` reject with a pointer to M5
-  (issue #17) until the Mission plugin lands.
+- **Everything about a mission except starting/pausing it.** Upload, progress,
+  `repeat_count` looping, RTL-item translation, and interrupt tracking all
+  belong to `VehicleMission` (see `vehicle-mission.md`); `CommandExecutor`
+  only calls its `start()`/`pause()`.
 - **Event envelopes.** `VehicleManager::make_executor`'s ack callback
   publishes a WARNING `Event` for every rejection; the executor only reports
   acks.
@@ -40,13 +43,21 @@ turns its acks back into Envelopes through the `Transport`.
 |---|---|
 | `enqueue()` on a command with an action | ACCEPTED ("queued") |
 | `enqueue()` on a command without an action | REJECTED ("command has no action"), nothing queued |
-| MAVSDK call returns Success | SUCCESS |
-| MAVSDK call returns anything else | REJECTED with `VehicleActions::result_name()` text |
+| MAVSDK call returns Success | SUCCESS, message blank except `pause_mission` (see below) |
+| MAVSDK call returns anything else | REJECTED with `VehicleActions::result_name()` or `VehicleMission::result_name()` text, whichever plugin was called |
 | shutdown with commands still queued | REJECTED ("gateway shutting down") |
 
 SUCCESS means the autopilot accepted the command, not that the maneuver
 finished; progress is visible through the telemetry stream (mode, altitude,
-armed), which is how the console already renders it.
+armed) and, for missions, `VehicleMission::get_progress()`.
+
+`pause_mission`'s SUCCESS message is `"pause"` or `"hold"` (never blank) so
+the console can tell which of the two actually ran, since one command can
+resolve to either depending on flight mode (see Command mapping below).
+`dispatch()` normalizes every branch into `{bool, string}` for exactly this
+reason: it can no longer assume a single MAVSDK `Result` enum, since
+`pause_mission` alone can produce either `mavsdk::Mission::Result` or
+`mavsdk::Action::Result` depending on which branch runs.
 
 ## Command mapping
 
@@ -60,6 +71,12 @@ armed), which is how the console already renders it.
   `altitude_msl_m` from the console means "keep the current altitude": the
   executor reads current MSL from `TelemetryInfo::get_position()`, adding
   `altitude_rel_m` above home when the target carries one.
+- `start_mission` -> always `VehicleMission::start()`.
+- `pause_mission` -> `VehicleMission::pause()` (mission-aware, keeps the
+  mission resumable) when `TelemetryInfo::get_flight_mode() ==
+  mavsdk::Telemetry::FlightMode::Mission`; `VehicleActions::hold()` (manual
+  hold, unrelated to any mission) for every other flight mode, including
+  never-connected (`Unknown`).
 
 ## Threading
 
@@ -79,7 +96,10 @@ vehicle (no autopilot, no Docker):
 - `EveryActionKindAnswersAcceptedThenTerminal`: arm, disarm, force disarm,
   takeoff, land, rtl, goto each get ACCEPTED first and a reasoned REJECTED
   after; no hang, no crash.
-- `MissionCommandsRejectWithM5Pointer`.
+- `StartMissionFailsWithoutConnection`.
+- `PauseMissionFallsBackToHoldOutsideMissionFlightModeAndFailsWithoutConnection`:
+  not connected means flight mode is `Unknown`, never `Mission`, so this
+  exercises the `hold()` branch, not `Mission::pause_mission()`.
 - `CommandWithoutActionIsRejectedWithoutQueueing`: exactly one ack.
 - `AckEchoesCommandAndVehicleIds`.
 
