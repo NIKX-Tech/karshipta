@@ -19,6 +19,8 @@
 #include <karshipta/v1/fleet.pb.h>
 #include <vehicle_connection.h>
 #include <vehicle_actions.h>
+#include <vehicle_mission.h>
+#include <mission_importer.h>
 #include <telemetry.h>
 #include <command_executor.h>
 #include <transport.h>
@@ -44,6 +46,16 @@ struct ManagedVehicle {
     std::unique_ptr<VehicleConnection> connection;
     std::unique_ptr<TelemetryInfo> telemetry;
     std::unique_ptr<VehicleActions> actions;
+    // Owns mission upload/download/start/pause/progress for this vehicle
+    // (BRIEF.md M5). Built before executor (which holds a reference to it)
+    // and after actions/telemetry, matching the same by-reference build
+    // order as the rest of this quartet.
+    std::unique_ptr<VehicleMission> mission;
+    // Converts a customer-uploaded QGC/WPL mission file into a Mission that
+    // can be handed to `mission`'s enqueue_upload(). Only needs `connection`,
+    // so its position relative to `mission`/`executor` doesn't matter for
+    // build order, unlike the rest of this quartet.
+    std::unique_ptr<MissionImporter> mission_importer;
     // Null while the vehicle is stopped or a transition is quiescing it;
     // dispatch_command() rejects commands in that window. Written only under
     // VehicleManager::vehicles_mutex_.
@@ -99,7 +111,8 @@ public:
     // from under it. Once every transition has quiesced, managed_vehicles_
     // destroys each ManagedVehicle's members in reverse declaration order:
     // reconnect_worker stops and joins first, then the executor (rejecting
-    // whatever it still queued), then actions/telemetry/connection. This does
+    // whatever it still queued), then mission/actions/telemetry/connection.
+    // This does
     // NOT proactively RTL vehicles that were never told to stop; graceful
     // shutdown of a still-flying, never-force_stop()ped fleet needs main.cpp
     // to call force_stop_all() before dropping the VehicleManager, which
@@ -133,6 +146,28 @@ public:
     // ACCEPTED ack's broadcast (a blocking socket write that must not stall
     // every other vehicle's manager calls behind one slow client).
     void dispatch_command(const karshipta::v1::Command& command);
+
+    // Routes mission to the VehicleMission of the vehicle named
+    // mission.vehicle_id() (Envelope.mission_upload, console-editor-authored,
+    // not a Command). Broadcasts a WARNING Event (gateway rule 5) if that
+    // vehicle is unknown or stopped; the upload's own success/failure
+    // surfaces later, via the publish tick polling take_upload_result().
+    void handle_mission_upload(const karshipta::v1::Mission& mission);
+
+    // Converts upload via the vehicle's MissionImporter, then routes the
+    // result through handle_mission_upload() exactly like a console-editor
+    // mission. Broadcasts a WARNING Event immediately if the vehicle is
+    // unknown/stopped or the conversion itself fails; MissionImporter::import()
+    // is local parsing, not a MAVLink round trip, so this runs synchronously
+    // rather than being queued.
+    void handle_mission_file_upload(const karshipta::v1::MissionFileUpload& upload);
+
+    // Queues a mission-download request on the vehicle named
+    // request.vehicle_id(). Broadcasts a WARNING Event if that vehicle is
+    // unknown or stopped; the result (a mission_download Envelope, or a
+    // WARNING Event on failure) surfaces later, via the publish tick polling
+    // take_download_result().
+    void handle_mission_download_request(const karshipta::v1::MissionDownloadRequest& request);
 
     // Launches reconnect_worker for the vehicle with this id, recreating its
     // CommandExecutor if a previous stop() retired it. Returns false if
@@ -305,6 +340,18 @@ private:
     // false. Called from run_reconnect_loop, which already runs unlocked, so
     // this takes no lock either, same as broadcast_command_ack.
     void broadcast_link_event(const std::string& vehicle_id, bool connected) const;
+
+    // Wraps a WARNING Event with the given code/message and broadcasts it.
+    // Shared by every mission-related rejection path (unknown/stopped
+    // vehicle, MissionImporter failure, upload failure, download failure) so
+    // each of them isn't hand-rolling the same Envelope/Event construction.
+    // Takes no lock, same as broadcast_command_ack.
+    void broadcast_mission_event(const std::string& vehicle_id, const std::string& code,
+                                 const std::string& message) const;
+
+    // Wraps a downloaded Mission into an Envelope.mission_download and
+    // broadcasts it. Takes no lock, same as broadcast_command_ack.
+    void broadcast_mission_download(const karshipta::v1::Mission& mission) const;
 
     // Body of vehicle.reconnect_worker, run on start()'s jthread. Connects,
     // requests the telemetry stream rate (PX4 forgets this across a link

@@ -226,7 +226,8 @@ const ManagedVehicle* VehicleManager::find_locked(const std::string& vehicle_id)
 
 std::unique_ptr<CommandExecutor> VehicleManager::make_executor(ManagedVehicle& vehicle) {
     return std::make_unique<CommandExecutor>(
-        *vehicle.actions, *vehicle.telemetry, [this](const karshipta::v1::CommandAck& ack) {
+        *vehicle.actions, *vehicle.telemetry, *vehicle.mission,
+        [this](const karshipta::v1::CommandAck& ack) {
             broadcast_command_ack(ack);
             // rejected commands are events a human should see (gateway rule 5)
             if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
@@ -260,22 +261,26 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
                   cfg.vehicle_id, cfg.system_id, cfg.connection_url);
 
     // Each object below binds to the previous one by reference, so they must be
-    // built in this order: connection first, then telemetry/actions off of it,
-    // then the executor off of those. None of this connects to the vehicle yet
-    // (VehicleConnection's constructor only stores state); that happens when
-    // start() launches the reconnect worker.
+    // built in this order: connection first, then telemetry/actions/mission off
+    // of it, then the executor off of those. None of this connects to the
+    // vehicle yet (VehicleConnection's constructor only stores state); that
+    // happens when start() launches the reconnect worker.
     const std::optional<uint32_t> expected_system_id =
         cfg.system_id == 0 ? std::nullopt : std::optional<uint32_t>{cfg.system_id};
     auto connection =
         std::make_unique<VehicleConnection>(mavsdk_, cfg.connection_url, expected_system_id);
     auto telemetry = std::make_unique<TelemetryInfo>(*connection);
     auto actions = std::make_unique<VehicleActions>(*connection);
+    auto mission = std::make_unique<VehicleMission>(*connection);
+    auto mission_importer = std::make_unique<MissionImporter>(*connection);
 
     ManagedVehicle managed{
         .config = cfg,
         .connection = std::move(connection),
         .telemetry = std::move(telemetry),
         .actions = std::move(actions),
+        .mission = std::move(mission),
+        .mission_importer = std::move(mission_importer),
         // Explicit even though these match ManagedVehicle's own default
         // member initializers (nullptr, false, not-joinable): gcc/clang's
         // -Wmissing-field-initializers (part of -Wextra) flags a designated
@@ -362,6 +367,95 @@ void VehicleManager::dispatch_command(const karshipta::v1::Command& command) {
     clear_busy_and_notify(command.vehicle_id());
 }
 
+void VehicleManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
+    std::optional<std::string> rejection_reason;
+    VehicleMission* target = nullptr;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        auto* vehicle = find_locked(mission.vehicle_id());
+        if (vehicle == nullptr) {
+            rejection_reason = "unknown vehicle_id: " + mission.vehicle_id();
+        } else if (vehicle->executor == nullptr) {
+            rejection_reason = "vehicle is stopped";
+        } else if (vehicle->busy) {
+            rejection_reason = "vehicle is busy, retry shortly";
+        } else {
+            vehicle->busy = true;
+            target = vehicle->mission.get();
+        }
+    }
+    if (rejection_reason) {
+        spdlog::warn("mission upload rejected: {}", *rejection_reason);
+        broadcast_mission_event(mission.vehicle_id(), "MISSION_UPLOAD_REJECTED", *rejection_reason);
+        return;
+    }
+    target->enqueue_upload(mission);
+    clear_busy_and_notify(mission.vehicle_id());
+}
+
+void VehicleManager::handle_mission_file_upload(const karshipta::v1::MissionFileUpload& upload) {
+    std::optional<std::string> rejection_reason;
+    MissionImporter* importer = nullptr;
+    VehicleMission* target = nullptr;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        auto* vehicle = find_locked(upload.vehicle_id());
+        if (vehicle == nullptr) {
+            rejection_reason = "unknown vehicle_id: " + upload.vehicle_id();
+        } else if (vehicle->executor == nullptr) {
+            rejection_reason = "vehicle is stopped";
+        } else if (vehicle->busy) {
+            rejection_reason = "vehicle is busy, retry shortly";
+        } else {
+            vehicle->busy = true;
+            importer = vehicle->mission_importer.get();
+            target = vehicle->mission.get();
+        }
+    }
+    if (rejection_reason) {
+        spdlog::warn("mission file upload rejected: {}", *rejection_reason);
+        broadcast_mission_event(upload.vehicle_id(), "MISSION_UPLOAD_REJECTED", *rejection_reason);
+        return;
+    }
+
+    auto [mission, reason] = importer->import(upload);
+    if (!mission) {
+        spdlog::warn("mission file import rejected for {}: {}", upload.vehicle_id(), reason);
+        broadcast_mission_event(upload.vehicle_id(), "MISSION_IMPORT_REJECTED", reason);
+        clear_busy_and_notify(upload.vehicle_id());
+        return;
+    }
+    target->enqueue_upload(std::move(*mission));
+    clear_busy_and_notify(upload.vehicle_id());
+}
+
+void VehicleManager::handle_mission_download_request(
+    const karshipta::v1::MissionDownloadRequest& request) {
+    std::optional<std::string> rejection_reason;
+    VehicleMission* target = nullptr;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        auto* vehicle = find_locked(request.vehicle_id());
+        if (vehicle == nullptr) {
+            rejection_reason = "unknown vehicle_id: " + request.vehicle_id();
+        } else if (vehicle->executor == nullptr) {
+            rejection_reason = "vehicle is stopped";
+        } else if (vehicle->busy) {
+            rejection_reason = "vehicle is busy, retry shortly";
+        } else {
+            vehicle->busy = true;
+            target = vehicle->mission.get();
+        }
+    }
+    if (rejection_reason) {
+        spdlog::warn("mission download rejected: {}", *rejection_reason);
+        broadcast_mission_event(request.vehicle_id(), "MISSION_DOWNLOAD_REJECTED", *rejection_reason);
+        return;
+    }
+    target->enqueue_download();
+    clear_busy_and_notify(request.vehicle_id());
+}
+
 void VehicleManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
     karshipta::v1::Envelope envelope;
     *envelope.mutable_command_ack() = ack;
@@ -393,6 +487,24 @@ void VehicleManager::broadcast_link_event(const std::string& vehicle_id, bool co
         event->set_code("LINK_LOST");
         event->set_message("vehicle link lost, reconnecting");
     }
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
+void VehicleManager::broadcast_mission_event(const std::string& vehicle_id, const std::string& code,
+                                             const std::string& message) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_vehicle_id(vehicle_id);
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code(code);
+    event->set_message(message);
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
+void VehicleManager::broadcast_mission_download(const karshipta::v1::Mission& mission) const {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_mission_download() = mission;
     transport_.broadcast(serialize_envelope(envelope));
 }
 
@@ -526,22 +638,101 @@ void VehicleManager::start_publishing(std::chrono::milliseconds interval) {
 void VehicleManager::run_publish_loop(std::chrono::milliseconds interval, std::stop_token stop_token) {
     while (!stop_token.stop_requested()) {
         std::vector<std::vector<uint8_t>> frames;
+        // Deferred so broadcast_mission_event()/broadcast_mission_download()
+        // (blocking socket writes) never run while vehicles_mutex_ is held,
+        // same rule as everywhere else in this file. mission set means
+        // "broadcast this download"; otherwise code/message carry an event.
+        struct DeferredMissionBroadcast {
+            std::string vehicle_id;
+            std::optional<karshipta::v1::Mission> mission;
+            std::string code;
+            std::string message;
+        };
+        std::vector<DeferredMissionBroadcast> deferred_mission_broadcasts;
+        // vehicle_id + executor to enqueue a synthetic RTL command on, once
+        // unlocked; mirrors dispatch_command's busy-then-unlocked-enqueue
+        // pattern so a concurrent remove_vehicle() can't destroy the executor
+        // out from under this deferred call.
+        std::vector<std::pair<std::string, CommandExecutor*>> pending_rtl;
         {
-            // Cheap in-memory work only (TelemetryInfo's getters are cached
-            // reads, not MAVSDK round-trips): safe to build every frame while
-            // holding the lock. The broadcast itself is not, so it happens
-            // after releasing it below.
+            // Cheap in-memory work only (TelemetryInfo's/VehicleMission's
+            // getters are cached reads, not MAVSDK round-trips): safe to
+            // build every frame while holding the lock. The broadcast itself
+            // is not, so it happens after releasing it below.
             std::lock_guard lock(vehicles_mutex_);
             frames.reserve(managed_vehicles_.size());
-            for (const auto& [id, vehicle] : managed_vehicles_) {
-                karshipta::v1::Envelope envelope;
-                *envelope.mutable_vehicle_state() =
+            for (auto& [id, vehicle] : managed_vehicles_) {
+                karshipta::v1::Envelope state_envelope;
+                *state_envelope.mutable_vehicle_state() =
                     build_vehicle_state(id, *vehicle.connection, *vehicle.telemetry);
-                frames.push_back(serialize_envelope(envelope));
+                frames.push_back(serialize_envelope(state_envelope));
+
+                if (!vehicle.mission) continue;  // always built by add_vehicle_impl; defensive only
+
+                // Only once something has actually been uploaded (get_progress()'s
+                // own documented default), so vehicles with no mission don't
+                // spam empty progress frames every tick.
+                const auto progress = vehicle.mission->get_progress();
+                if (!progress.mission_id().empty()) {
+                    karshipta::v1::Envelope progress_envelope;
+                    *progress_envelope.mutable_mission_progress() = progress;
+                    frames.push_back(serialize_envelope(progress_envelope));
+                }
+
+                if (vehicle.mission->take_pending_return_to_launch()) {
+                    if (vehicle.executor != nullptr && !vehicle.busy) {
+                        vehicle.busy = true;
+                        pending_rtl.emplace_back(id, vehicle.executor.get());
+                    } else {
+                        // Narrow race (vehicle mid-transition exactly when its
+                        // final pass completed): the flag is already consumed
+                        // by take_pending_return_to_launch() and cannot be
+                        // retried. Logged so it's at least observable.
+                        spdlog::warn(
+                            "vehicle '{}' mission finished pending return-to-launch, but the "
+                            "vehicle is busy or stopped; return-to-launch not sent this cycle",
+                            id);
+                    }
+                }
+
+                if (const auto upload_result = vehicle.mission->take_upload_result()) {
+                    if (upload_result->result != mavsdk::Mission::Result::Success) {
+                        deferred_mission_broadcasts.push_back(
+                            {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
+                             VehicleMission::result_name(upload_result->result)});
+                    }
+                }
+
+                if (auto download_result = vehicle.mission->take_download_result()) {
+                    if (download_result->mission) {
+                        deferred_mission_broadcasts.push_back(
+                            {id, std::move(download_result->mission), "", ""});
+                    } else {
+                        deferred_mission_broadcasts.push_back(
+                            {id, std::nullopt, "MISSION_DOWNLOAD_REJECTED", download_result->message});
+                    }
+                }
             }
         }
         for (const auto& frame : frames) {
             transport_.broadcast(frame);
+        }
+        for (auto& [vehicle_id, executor] : pending_rtl) {
+            karshipta::v1::Command rtl;
+            rtl.set_command_id("gateway-mission-rtl-" + vehicle_id + "-" +
+                                std::to_string(unix_epoch_ms()));
+            rtl.set_vehicle_id(vehicle_id);
+            rtl.set_timestamp_ms(unix_epoch_ms());
+            rtl.mutable_rtl();
+            executor->enqueue(rtl);
+            clear_busy_and_notify(vehicle_id);
+        }
+        for (auto& broadcast : deferred_mission_broadcasts) {
+            if (broadcast.mission) {
+                broadcast_mission_download(*broadcast.mission);
+            } else {
+                broadcast_mission_event(broadcast.vehicle_id, broadcast.code, broadcast.message);
+            }
         }
         std::this_thread::sleep_for(interval);
     }

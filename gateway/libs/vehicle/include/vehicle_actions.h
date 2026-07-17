@@ -45,9 +45,12 @@ class VehicleActions {
     [[nodiscard]] mavsdk::Action::Result land() const;
     // Implements ReturnToLaunchCommand. Flies back to the home position and lands.
     [[nodiscard]] mavsdk::Action::Result return_to_launch() const;
-    // Backs PauseMissionCommand once the M3 mission executor exists: holds
-    // (loiters) at the current GPS position and altitude. PX4-specific flight
-    // mode; not guaranteed on other autopilots.
+    // Manual hold: loiters at the current GPS position and altitude,
+    // independent of any mission. Backs PauseMissionCommand only when the
+    // vehicle isn't currently flying an uploaded mission (CommandExecutor
+    // checks flight mode and calls Mission::pause_mission() instead when it
+    // is, which is mission-aware and keeps the mission resumable; this is not
+    // that). PX4-specific flight mode; not guaranteed on other autopilots.
     [[nodiscard]] mavsdk::Action::Result hold() const;
     // Implements GotoCommand. Commands the vehicle to GotoCommand.target
     // (WGS84 lat/lon, AMSL altitude in meters); yaw_deg is NED yaw in degrees.
