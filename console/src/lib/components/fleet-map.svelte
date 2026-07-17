@@ -1,6 +1,7 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { VehicleOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import type { ViewportBounds } from '$lib/geozones/types';
@@ -276,7 +277,8 @@
 	$effect(() => {
 		if (!map) return;
 		for (const vehicleId of fleet.vehicleIds) {
-			const state = fleet.vehicles[vehicleId]?.state;
+			const vehicle = fleet.vehicles[vehicleId];
+			const state = vehicle?.state;
 			if (!state?.position) continue;
 			let handle = markers[vehicleId];
 			if (!handle) {
@@ -306,6 +308,11 @@
 			const selected = fleet.selectedVehicleId === vehicleId;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
+			// No autopilot behind this vehicle at all (see vehicle-card.svelte);
+			// muted grey instead of the amber accent, distinct from a lost link
+			// (opacity below) which is about connectivity, not what the vehicle is.
+			const synthetic = vehicle?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC;
+			handle.arrowPath.setAttribute('fill', synthetic ? '#8b98a5' : '#f5a623');
 			handle.label.classList.toggle('border-selected', selected);
 			handle.label.classList.toggle('border-edge', !selected);
 			// link lost: fade the marker so a stale last-known position doesn't

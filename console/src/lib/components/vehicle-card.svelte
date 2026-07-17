@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { flightModeToJSON } from '$lib/gen/karshipta/v1/common';
+	import { flightModeToJSON, VehicleOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet, isConfigTerminal, type Vehicle } from '$lib/fleet-store.svelte';
 
 	interface Props {
@@ -22,6 +22,11 @@
 	);
 	const batteryPct = $derived(state?.battery?.remainingPct);
 	const connected = $derived(state?.connected ?? false);
+	// No autopilot behind this vehicle at all (demo math standing in for
+	// one), distinct from SITL (a real autopilot binary, just not attached
+	// to hardware): only synthetic vehicles get the muted "not real"
+	// treatment here.
+	const synthetic = $derived(vehicle.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC);
 	const selected = $derived(fleet.selectedVehicleId === vehicleId);
 	const removable = $derived(!effectiveReadonly && !state?.armed && !state?.inAir);
 	const removePending = $derived(
@@ -57,7 +62,7 @@
 	}}
 	class="cursor-pointer rounded border px-3 py-2 {selected
 		? 'border-selected bg-panel'
-		: 'border-edge bg-panel/90 hover:border-fg-muted'} {state && !connected
+		: 'border-edge bg-panel/90 hover:border-fg-muted'} {(state && !connected) || synthetic
 		? 'opacity-50 grayscale'
 		: ''}"
 >

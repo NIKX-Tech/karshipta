@@ -1,4 +1,10 @@
-import { FlightMode, GpsFixType, Severity, VehicleType } from '$lib/gen/karshipta/v1/common';
+import {
+	FlightMode,
+	GpsFixType,
+	Severity,
+	VehicleOrigin,
+	VehicleType
+} from '$lib/gen/karshipta/v1/common';
 import {
 	CommandStatus,
 	MissionAction,
@@ -178,7 +184,8 @@ export class FakeGateway implements DemoEngine {
 					type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
 					autopilot: 'PX4',
 					firmwareVersion: 'demo-fake',
-					mavlinkSystemId: 0
+					mavlinkSystemId: 0,
+					origin: VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC
 				}
 			}
 		});

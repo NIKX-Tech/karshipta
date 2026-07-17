@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { flightModeToJSON, gpsFixTypeToJSON } from '$lib/gen/karshipta/v1/common';
+	import { flightModeToJSON, gpsFixTypeToJSON, VehicleOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import CommandPanel from '$lib/components/command-panel.svelte';
 	import MissionPanel from '$lib/components/mission-panel.svelte';
@@ -29,6 +29,9 @@
 	const vehicle = $derived(fleet.vehicles[vehicleId]);
 	const info = $derived(vehicle?.info);
 	const state = $derived(vehicle?.state);
+	// See vehicle-card.svelte: no autopilot behind this vehicle at all, not
+	// SITL (a real autopilot binary flying simulated physics).
+	const synthetic = $derived(info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC);
 
 	const modeLabel = $derived(
 		state ? flightModeToJSON(state.flightMode).replace(FLIGHT_MODE_PREFIX, '') : 'UNKNOWN'
@@ -42,11 +45,21 @@
 </script>
 
 <section
-	class="border-edge bg-panel flex h-full w-72 flex-col gap-3 overflow-y-auto border-l p-3"
+	class="border-edge bg-panel flex h-full w-72 flex-col gap-3 overflow-y-auto border-l p-3 {synthetic
+		? 'saturate-50'
+		: ''}"
 	aria-label="Vehicle detail {vehicleId}"
 >
 	<header class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
+		{#if synthetic}
+			<span
+				class="text-fg-muted text-[10px] font-medium tracking-widest"
+				title="No autopilot behind this vehicle; demo telemetry standing in for one"
+			>
+				SIM
+			</span>
+		{/if}
 		{#if state?.armed}
 			<span class="text-armed text-[10px] font-medium tracking-widest">ARMED</span>
 		{/if}
