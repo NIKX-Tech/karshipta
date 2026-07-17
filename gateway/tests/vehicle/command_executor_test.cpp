@@ -11,6 +11,7 @@
 #include "telemetry.h"
 #include "vehicle_actions.h"
 #include "vehicle_connection.h"
+#include "vehicle_mission.h"
 
 namespace {
 
@@ -64,7 +65,8 @@ protected:
           vehicle_(core_, "udpin://127.0.0.1:24990"),
           actions_(vehicle_),
           telemetry_(vehicle_),
-          executor_(actions_, telemetry_, [this](const karshipta::v1::CommandAck& ack) {
+          mission_(vehicle_),
+          executor_(actions_, telemetry_, mission_, [this](const karshipta::v1::CommandAck& ack) {
               collector_.add(ack);
           }) {}
 
@@ -90,6 +92,7 @@ protected:
     VehicleConnection vehicle_;
     VehicleActions actions_;
     TelemetryInfo telemetry_;
+    VehicleMission mission_;
     AckCollector collector_;
     CommandExecutor executor_;
 };
@@ -135,13 +138,26 @@ TEST_F(CommandExecutorTest, EveryActionKindAnswersAcceptedThenTerminal) {
     expect_accepted_then_rejected("cmd-goto");
 }
 
-TEST_F(CommandExecutorTest, MissionCommandsRejectWithM5Pointer) {
+TEST_F(CommandExecutorTest, StartMissionFailsWithoutConnection) {
     auto start = make_command("cmd-start-mission");
     start.mutable_start_mission();
     executor_.enqueue(start);
     ASSERT_TRUE(collector_.wait_terminal("cmd-start-mission"));
     const auto acks = collector_.for_command("cmd-start-mission");
-    EXPECT_NE(acks.back().message().find("M5"), std::string::npos);
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_FALSE(acks.back().message().empty());
+}
+
+// Not connected means flight_mode() is Unknown (never Mission), so this
+// exercises the manual-hold branch, not Mission::pause_mission().
+TEST_F(CommandExecutorTest, PauseMissionFallsBackToHoldOutsideMissionFlightModeAndFailsWithoutConnection) {
+    auto pause = make_command("cmd-pause-mission");
+    pause.mutable_pause_mission();
+    executor_.enqueue(pause);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-pause-mission"));
+    const auto acks = collector_.for_command("cmd-pause-mission");
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_FALSE(acks.back().message().empty());
 }
 
 TEST_F(CommandExecutorTest, CommandWithoutActionIsRejectedWithoutQueueing) {

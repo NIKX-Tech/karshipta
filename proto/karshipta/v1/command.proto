@@ -85,3 +85,21 @@ message MissionProgress {
   uint32 total_items = 4;
   bool finished = 5;
 }
+
+// ---------- Mission file import / download ----------
+
+enum MissionFileFormat {
+  MISSION_FILE_FORMAT_UNSPECIFIED = 0;
+  MISSION_FILE_FORMAT_QGC_PLAN = 1;
+  MISSION_FILE_FORMAT_MISSION_PLANNER_WPL = 2;
+}
+
+message MissionFileUpload {
+  string vehicle_id = 1;
+  MissionFileFormat format = 2;
+  string raw_content = 3;       // file contents, not a path
+}
+
+message MissionDownloadRequest {
+  string vehicle_id = 1;
+}

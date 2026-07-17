@@ -8,8 +8,9 @@ import "karshipta/v1/fleet.proto";
 
 // Every WebSocket frame is exactly one binary-encoded Envelope.
 // Gateway -> console: vehicle_info, vehicle_state, event, command_ack,
-//                     mission_progress, vehicle_config_ack.
-// Console -> gateway: command, mission_upload, add_vehicle, remove_vehicle.
+//                     mission_progress, vehicle_config_ack, mission_download.
+// Console -> gateway: command, mission_upload, add_vehicle, remove_vehicle,
+//                     mission_file_upload, mission_download_request.
 message Envelope {
   oneof payload {
     // downstream (gateway to console)
@@ -19,11 +20,14 @@ message Envelope {
     CommandAck command_ack = 4;
     MissionProgress mission_progress = 5;
     VehicleConfigAck vehicle_config_ack = 6;
+    Mission mission_download = 14;         // response to mission_download_request
 
     // upstream (console to gateway)
     Command command = 10;
     Mission mission_upload = 11;
     AddVehicle add_vehicle = 12;
     RemoveVehicle remove_vehicle = 13;
+    MissionFileUpload mission_file_upload = 15;
+    MissionDownloadRequest mission_download_request = 16;
   }
 }

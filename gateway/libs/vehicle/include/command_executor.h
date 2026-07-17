@@ -12,9 +12,12 @@
 
 #include "telemetry.h"
 #include "vehicle_actions.h"
+#include "vehicle_mission.h"
 
 // Consumes decoded Command messages and executes them through VehicleActions
-// on its own worker thread (BRIEF.md M3). Transport threads only enqueue:
+// (and, for StartMissionCommand/PauseMissionCommand, VehicleMission's
+// start()/pause()) on its own worker thread (BRIEF.md M3/M5). Transport
+// threads only enqueue:
 // MAVSDK Action calls block for seconds and must never stall frame delivery.
 // Every command is answered: ACCEPTED when it enters the queue, then SUCCESS
 // or REJECTED with a human-readable reason (gateway rule 5); commands still
@@ -26,7 +29,8 @@ class CommandExecutor {
     // callback must be thread-safe, which Transport::broadcast is.
     using AckCallback = std::function<void(const karshipta::v1::CommandAck&)>;
 
-    CommandExecutor(VehicleActions& actions, TelemetryInfo& telemetry, AckCallback on_ack);
+    CommandExecutor(VehicleActions& actions, TelemetryInfo& telemetry, VehicleMission& mission,
+                    AckCallback on_ack);
     // worker_ is the last member, so it stops and joins before anything the
     // worker uses is destroyed; run() rejects whatever is still queued.
     ~CommandExecutor() = default;
@@ -45,12 +49,22 @@ class CommandExecutor {
     void execute(const karshipta::v1::Command& command);
     void send_ack(const karshipta::v1::Command& command, karshipta::v1::CommandStatus status,
                   const std::string& message);
-    // Maps one action to its VehicleActions call; returns the result plus the
-    // reason to report when it failed.
-    std::pair<mavsdk::Action::Result, std::string> dispatch(const karshipta::v1::Command& command);
+    // Maps one action to its VehicleActions/VehicleMission call; returns
+    // whether it succeeded plus the ack message (blank on success for every
+    // command except pause, which reports which of hold/mission-pause
+    // actually ran; the real MAVSDK failure reason on rejection).
+    std::pair<bool, std::string> dispatch(const karshipta::v1::Command& command);
+    // Implements StartMissionCommand: always Mission::start_mission().
+    [[nodiscard]] std::pair<bool, std::string> dispatch_start_mission() const;
+    // Implements PauseMissionCommand: Mission::pause_mission() (mission-aware,
+    // keeps the mission resumable) when the vehicle is currently flying the
+    // uploaded mission, otherwise VehicleActions::hold() (manual hold,
+    // unrelated to any mission) for every other flight mode.
+    [[nodiscard]] std::pair<bool, std::string> dispatch_pause() const;
 
     VehicleActions& actions_;
     TelemetryInfo& telemetry_;
+    VehicleMission& mission_;
     AckCallback on_ack_;
 
     std::mutex mutex_;
