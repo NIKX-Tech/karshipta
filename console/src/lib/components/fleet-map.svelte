@@ -1,6 +1,7 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { VehicleOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import type { ViewportBounds } from '$lib/geozones/types';
@@ -8,9 +9,18 @@
 	interface Props {
 		centerLat: number;
 		centerLon: number;
+		/**
+		 * Fires on every map click alongside whatever the map already does
+		 * with it (goto targeting, waypoint placement) - a generic escape
+		 * hatch for a consuming app's own click-to-place flows (e.g. picking
+		 * a spawn point for a new vehicle) rather than a store-level concept
+		 * like fleet.gotoArming, which is specifically about commanding an
+		 * already-selected vehicle. The caller decides whether it cares.
+		 */
+		onMapClick?: (latitudeDeg: number, longitudeDeg: number) => void;
 	}
 
-	const { centerLat, centerLon }: Props = $props();
+	const { centerLat, centerLon, onMapClick }: Props = $props();
 
 	const INITIAL_ZOOM = 15;
 
@@ -126,6 +136,7 @@
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
 			}
+			onMapClick?.(event.lngLat.lat, event.lngLat.lng);
 		});
 		created.on('move', () => {
 			bearingDeg = created.getBearing();
@@ -276,7 +287,8 @@
 	$effect(() => {
 		if (!map) return;
 		for (const vehicleId of fleet.vehicleIds) {
-			const state = fleet.vehicles[vehicleId]?.state;
+			const vehicle = fleet.vehicles[vehicleId];
+			const state = vehicle?.state;
 			if (!state?.position) continue;
 			let handle = markers[vehicleId];
 			if (!handle) {
@@ -306,6 +318,11 @@
 			const selected = fleet.selectedVehicleId === vehicleId;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
+			// No autopilot behind this vehicle at all (see vehicle-card.svelte);
+			// muted grey instead of the amber accent, distinct from a lost link
+			// (opacity below) which is about connectivity, not what the vehicle is.
+			const synthetic = vehicle?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC;
+			handle.arrowPath.setAttribute('fill', synthetic ? '#8b98a5' : '#f5a623');
 			handle.label.classList.toggle('border-selected', selected);
 			handle.label.classList.toggle('border-edge', !selected);
 			// link lost: fade the marker so a stale last-known position doesn't

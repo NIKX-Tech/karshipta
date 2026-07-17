@@ -25,6 +25,9 @@ export {
 	Severity,
 	severityFromJSON,
 	severityToJSON,
+	VehicleOrigin,
+	vehicleOriginFromJSON,
+	vehicleOriginToJSON,
 	type GeoPoint,
 	type VelocityNed
 } from './gen/karshipta/v1/common';

@@ -56,3 +56,19 @@ enum Severity {
   SEVERITY_CRITICAL = 3;
   SEVERITY_EMERGENCY = 4;
 }
+
+// What is actually producing this vehicle's telemetry. Distinct from a
+// gateway's own local/remote transport concern (that's about how the data
+// reaches a console, not what generated it): SITL is a real autopilot
+// binary flying simulated physics (a legitimate, common self-hosted setup,
+// see the console's "Add simulated vehicle" onboarding flow), while
+// SYNTHETIC means no autopilot exists at all, only demo math standing in
+// for one (the OSS console's own FakeGateway, or a hosted demo fleet).
+// Conflating those two into one "is this simulated" boolean would be
+// inaccurate, so this is an enum instead.
+enum VehicleOrigin {
+  VEHICLE_ORIGIN_UNSPECIFIED = 0;
+  VEHICLE_ORIGIN_HARDWARE = 1;
+  VEHICLE_ORIGIN_SITL = 2;
+  VEHICLE_ORIGIN_SYNTHETIC = 3;
+}

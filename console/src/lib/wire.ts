@@ -15,7 +15,8 @@ export {
 	VehicleType,
 	FlightMode,
 	GpsFixType,
-	Severity
+	Severity,
+	VehicleOrigin
 } from './gen/karshipta/v1/common';
 export { Envelope } from './gen/karshipta/v1/envelope';
 export {
