@@ -2,6 +2,8 @@ add_library(vehicle
         src/vehicle_connection.cpp
         src/telemetry.cpp
         src/vehicle_actions.cpp
+        src/vehicle_mission.cpp
+        src/mission_importer.cpp
         src/command_executor.cpp
         src/vehicle_manager.cpp
 )
