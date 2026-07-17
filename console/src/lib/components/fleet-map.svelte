@@ -9,9 +9,18 @@
 	interface Props {
 		centerLat: number;
 		centerLon: number;
+		/**
+		 * Fires on every map click alongside whatever the map already does
+		 * with it (goto targeting, waypoint placement) - a generic escape
+		 * hatch for a consuming app's own click-to-place flows (e.g. picking
+		 * a spawn point for a new vehicle) rather than a store-level concept
+		 * like fleet.gotoArming, which is specifically about commanding an
+		 * already-selected vehicle. The caller decides whether it cares.
+		 */
+		onMapClick?: (latitudeDeg: number, longitudeDeg: number) => void;
 	}
 
-	const { centerLat, centerLon }: Props = $props();
+	const { centerLat, centerLon, onMapClick }: Props = $props();
 
 	const INITIAL_ZOOM = 15;
 
@@ -127,6 +136,7 @@
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
 			}
+			onMapClick?.(event.lngLat.lat, event.lngLat.lng);
 		});
 		created.on('move', () => {
 			bearingDeg = created.getBearing();
