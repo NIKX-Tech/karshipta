@@ -304,7 +304,15 @@
 			// heading is relative to true north; subtract the camera bearing so
 			// the arrow stays correct when the operator rotates the map
 			handle.arrow.style.rotate = `${state.headingDeg - bearingDeg}deg`;
-			handle.label.textContent = `${vehicleId} \u00b7 ${state.position.altitudeRelM.toFixed(0)} m`;
+			const selected = fleet.selectedVehicleId === vehicleId;
+			// Unselected: just the id, so the map stays scannable with many
+			// vehicles on it. Altitude only earns its place once a vehicle is
+			// actually picked - it's already in VehicleDetail's own readout,
+			// this is a "yes, this is the one I selected" confirmation, not a
+			// second source of truth for it.
+			handle.label.textContent = selected
+				? `${vehicleId} \u00b7 ${state.position.altitudeRelM.toFixed(0)} m`
+				: vehicleId;
 			// lift the body above the ground anchor by the projected altitude:
 			// vertical world axis maps to screen-vertical, scaled by sin(pitch)
 			const pxPerMeter =
@@ -315,14 +323,14 @@
 			handle.body.style.top = `${-liftPx}px`;
 			handle.stem.style.top = `${-liftPx}px`;
 			handle.stem.style.height = `${Math.max(0, liftPx - 8)}px`;
-			const selected = fleet.selectedVehicleId === vehicleId;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
-			// No autopilot behind this vehicle at all (see vehicle-card.svelte);
-			// muted grey instead of the amber accent, distinct from a lost link
-			// (opacity below) which is about connectivity, not what the vehicle is.
+			// No autopilot behind this vehicle at all (see vehicle-card.svelte): a
+			// distinct hue, not a desaturated one, so it doesn't read as
+			// disabled/degraded - that's what the opacity fade below already
+			// means (link lost), and the two must not look like the same thing.
 			const synthetic = vehicle?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC;
-			handle.arrowPath.setAttribute('fill', synthetic ? '#8b98a5' : '#f5a623');
+			handle.arrowPath.setAttribute('fill', synthetic ? '#a78bfa' : '#f5a623');
 			handle.label.classList.toggle('border-selected', selected);
 			handle.label.classList.toggle('border-edge', !selected);
 			// link lost: fade the marker so a stale last-known position doesn't
