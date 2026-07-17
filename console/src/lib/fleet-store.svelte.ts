@@ -382,6 +382,12 @@ class FleetStore {
 			case 'missionProgress':
 				this.missionProgress[payload.missionProgress.vehicleId] = payload.missionProgress;
 				break;
+			case 'missionDownload':
+				// Response to mission_download_request: the mission currently on the
+				// vehicle. Same slot as an upload, since both represent "what's on the
+				// vehicle now". No console UI sends mission_download_request yet.
+				this.uploadedMissions[payload.missionDownload.vehicleId] = payload.missionDownload;
+				break;
 			case 'vehicleConfigAck': {
 				const ack = payload.vehicleConfigAck;
 				const tracker = this.vehicleConfigRequests[ack.requestId];
@@ -403,6 +409,8 @@ class FleetStore {
 			case 'missionUpload':
 			case 'addVehicle':
 			case 'removeVehicle':
+			case 'missionFileUpload':
+			case 'missionDownloadRequest':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			default: {

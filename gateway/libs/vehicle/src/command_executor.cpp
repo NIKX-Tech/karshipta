@@ -12,6 +12,25 @@ namespace {
 // real request.
 constexpr float kNoSpeedRequested = 0.0f;
 
+// Normalizes a MAVSDK Result into {success, message}: blank message on
+// success unless the caller supplies one (only PauseMissionCommand's
+// hold/pause distinction needs that), the real failure reason otherwise.
+std::pair<bool, std::string> action_outcome(const mavsdk::Action::Result result,
+                                             std::string success_message = "") {
+    if (result == mavsdk::Action::Result::Success) {
+        return {true, std::move(success_message)};
+    }
+    return {false, VehicleActions::result_name(result)};
+}
+
+std::pair<bool, std::string> mission_outcome(const mavsdk::Mission::Result result,
+                                              std::string success_message = "") {
+    if (result == mavsdk::Mission::Result::Success) {
+        return {true, std::move(success_message)};
+    }
+    return {false, VehicleMission::result_name(result)};
+}
+
 const char* action_case_name(const karshipta::v1::Command& command) {
     switch (command.action_case()) {
         case karshipta::v1::Command::kArm:
@@ -38,9 +57,10 @@ const char* action_case_name(const karshipta::v1::Command& command) {
 }  // namespace
 
 CommandExecutor::CommandExecutor(VehicleActions& actions, TelemetryInfo& telemetry,
-                                 AckCallback on_ack)
+                                 VehicleMission& mission, AckCallback on_ack)
     : actions_(actions),
       telemetry_(telemetry),
+      mission_(mission),
       on_ack_(std::move(on_ack)),
       worker_([this](const std::stop_token& stop_token) { run(stop_token); }) {}
 
@@ -87,58 +107,46 @@ void CommandExecutor::run(const std::stop_token& stop_token) {
 void CommandExecutor::execute(const karshipta::v1::Command& command) {
     spdlog::info("executing {} for {} (command_id={})", action_case_name(command),
                  command.vehicle_id(), command.command_id());
-    const auto [result, failure_reason] = dispatch(command);
-    if (result == mavsdk::Action::Result::Success) {
-        send_ack(command, karshipta::v1::COMMAND_STATUS_SUCCESS, "");
-    } else {
-        send_ack(command, karshipta::v1::COMMAND_STATUS_REJECTED, failure_reason);
-    }
+    const auto [success, message] = dispatch(command);
+    send_ack(command,
+             success ? karshipta::v1::COMMAND_STATUS_SUCCESS : karshipta::v1::COMMAND_STATUS_REJECTED,
+             message);
 }
 
-std::pair<mavsdk::Action::Result, std::string> CommandExecutor::dispatch(
-    const karshipta::v1::Command& command) {
+std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Command& command) {
     using Result = mavsdk::Action::Result;
 
     const auto describe = [](const Result result) { return VehicleActions::result_name(result); };
 
     switch (command.action_case()) {
-        case karshipta::v1::Command::kArm: {
-            const auto result = actions_.arm();
-            return {result, describe(result)};
-        }
-        case karshipta::v1::Command::kDisarm: {
+        case karshipta::v1::Command::kArm:
+            return action_outcome(actions_.arm());
+        case karshipta::v1::Command::kDisarm:
             // force means "stop the motors no matter what": MAVSDK kill(). The
             // console gates this behind its own confirmation dialog.
-            const auto result = command.disarm().force() ? actions_.kill() : actions_.disarm();
-            return {result, describe(result)};
-        }
+            return action_outcome(command.disarm().force() ? actions_.kill() : actions_.disarm());
         case karshipta::v1::Command::kTakeoff: {
             if (command.takeoff().altitude_rel_m() > 0.0f) {
                 const auto set_result =
                     actions_.set_takeoff_altitude(command.takeoff().altitude_rel_m());
                 if (set_result != Result::Success) {
-                    return {set_result, "setting takeoff altitude failed: " + describe(set_result)};
+                    return {false, "setting takeoff altitude failed: " + describe(set_result)};
                 }
             }
-            const auto result = actions_.takeoff();
-            return {result, describe(result)};
+            return action_outcome(actions_.takeoff());
         }
-        case karshipta::v1::Command::kLand: {
-            const auto result = actions_.land();
-            return {result, describe(result)};
-        }
-        case karshipta::v1::Command::kRtl: {
-            const auto result = actions_.return_to_launch();
-            return {result, describe(result)};
-        }
+        case karshipta::v1::Command::kLand:
+            return action_outcome(actions_.land());
+        case karshipta::v1::Command::kRtl:
+            return action_outcome(actions_.return_to_launch());
         case karshipta::v1::Command::kGoto: {
             if (!command.goto_().has_target()) {
-                return {Result::Unknown, "goto has no target"};
+                return {false, "goto has no target"};
             }
             if (command.goto_().speed_m_s() > kNoSpeedRequested) {
                 const auto speed_result = actions_.set_current_speed(command.goto_().speed_m_s());
                 if (speed_result != Result::Success) {
-                    return {speed_result, "setting speed failed: " + describe(speed_result)};
+                    return {false, "setting speed failed: " + describe(speed_result)};
                 }
             }
             const auto& target = command.goto_().target();
@@ -153,19 +161,29 @@ std::pair<mavsdk::Action::Result, std::string> CommandExecutor::dispatch(
                               target.altitude_rel_m()
                         : position.absolute_altitude_m;
             }
-            const auto result = actions_.goto_location(
+            return action_outcome(actions_.goto_location(
                 target.latitude_deg(), target.longitude_deg(), altitude_msl_m,
-                std::numeric_limits<float>::quiet_NaN());  // NaN keeps the current yaw
-            return {result, describe(result)};
+                std::numeric_limits<float>::quiet_NaN()));  // NaN keeps the current yaw
         }
         case karshipta::v1::Command::kStartMission:
+            return dispatch_start_mission();
         case karshipta::v1::Command::kPauseMission:
-            return {mavsdk::Action::Result::Unknown,
-                    "missions are not supported yet (gateway M5, issue #17)"};
+            return dispatch_pause();
         case karshipta::v1::Command::ACTION_NOT_SET:
             break;
     }
-    return {mavsdk::Action::Result::Unknown, "command has no action"};
+    return {false, "command has no action"};
+}
+
+std::pair<bool, std::string> CommandExecutor::dispatch_start_mission() const {
+    return mission_outcome(mission_.start());
+}
+
+std::pair<bool, std::string> CommandExecutor::dispatch_pause() const {
+    if (telemetry_.get_flight_mode() == mavsdk::Telemetry::FlightMode::Mission) {
+        return mission_outcome(mission_.pause(), "pause");
+    }
+    return action_outcome(actions_.hold(), "hold");
 }
 
 void CommandExecutor::send_ack(const karshipta::v1::Command& command,

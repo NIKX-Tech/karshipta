@@ -2,6 +2,7 @@
 
 `libs/vehicle/include/vehicle_manager.h`, `libs/vehicle/src/vehicle_manager.cpp`
 
+
 ## Overview
 
 `VehicleManager` owns the fleet: one `ManagedVehicle` (a `VehicleConnection` +
@@ -58,6 +59,9 @@ and fleet persistence are all facade methods on this class.
 | `static unique_ptr<VehicleManager> create(Transport&, filesystem::path persistence_path = {})` | Builds the shared `Mavsdk` core itself. The entry point every consumer outside this library should use. |
 | `add_vehicle(const VehicleConfig&)` | Builds the object graph and registers it; does not connect. Rejects an empty or already-registered `vehicle_id`, or a nonzero `system_id` already bound elsewhere. |
 | `dispatch_command(const Command&)` | Routes to the vehicle's `CommandExecutor`; synthesizes a REJECTED `CommandAck` for unknown/stopped/busy vehicles. |
+| `handle_mission_upload(const Mission&)` | Routes to the vehicle's `VehicleMission::enqueue_upload()`; broadcasts a WARNING `Event` for unknown/stopped/busy vehicles (no `CommandAck`-shaped ack exists for missions). |
+| `handle_mission_file_upload(const MissionFileUpload&)` | Converts via the vehicle's `MissionImporter::import()` (synchronous - local parsing, not a MAVLink round trip), then routes through `handle_mission_upload()`'s same path on success; a WARNING `Event` on either the vehicle lookup or the import itself failing. |
+| `handle_mission_download_request(const MissionDownloadRequest&)` | Routes to the vehicle's `VehicleMission::enqueue_download()`; broadcasts a WARNING `Event` for unknown/stopped/busy vehicles. Result surfaces later via the publish tick. |
 | `start(vehicle_id)` / `start_all()` | Launches (or relaunches) a vehicle's `reconnect_worker`. |
 | `stop(vehicle_id)` / `stop_all()` | Takes a vehicle offline; rejects airborne or link-down (state unknown). |
 | `force_stop(vehicle_id)` / `force_stop_all()` | Operator override: commands RTL, supervises landing, then disarms and stops. |
@@ -114,6 +118,15 @@ generated `fleet_state.yaml` itself is gitignored.
   every other `VehicleManager` call behind one slow client for the whole
   tick, the same hazard `dispatch_command`'s ack path and
   `send_vehicle_info`'s blocking firmware query are equally careful to avoid.
+- The same tick also polls each vehicle's `VehicleMission` (BRIEF.md M5):
+  `get_progress()` into a `mission_progress` frame (only once something has
+  actually been uploaded), `take_pending_return_to_launch()` (deferred into
+  an unlocked synthetic `ReturnToLaunchCommand` enqueue, using the same
+  busy-then-unlocked pattern as `dispatch_command`, since a concurrent
+  `remove_vehicle` could otherwise destroy the executor mid-call),
+  `take_upload_result()`/`take_download_result()` (deferred into
+  `broadcast_mission_event()`/`broadcast_mission_download()` calls after the
+  lock releases, for the same blocking-socket-write reason).
 - Both worker types are declared after `managed_vehicles_` (`publish_worker_`
   last of all), so C++'s reverse-declaration-order destruction stops and
   joins every thread before the vehicles they read are torn down. The

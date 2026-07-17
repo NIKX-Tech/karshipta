@@ -132,6 +132,8 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   set(KARSHIPTA_TEST_SOURCES
     tests/vehicle/vehicle_connection_test.cpp
     tests/vehicle/command_executor_test.cpp
+    tests/vehicle/vehicle_mission_test.cpp
+    tests/vehicle/mission_importer_test.cpp
     tests/vehicle/vehicle_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
     tests/transport/relay_transport_test.cpp

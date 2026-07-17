@@ -63,7 +63,13 @@ int main() {
                 break;
             }
             case karshipta::v1::Envelope::kMissionUpload:
-                spdlog::warn("mission upload from client {} ignored: missions land in M5", client);
+                vehicle_manager->handle_mission_upload(envelope.mission_upload());
+                break;
+            case karshipta::v1::Envelope::kMissionFileUpload:
+                vehicle_manager->handle_mission_file_upload(envelope.mission_file_upload());
+                break;
+            case karshipta::v1::Envelope::kMissionDownloadRequest:
+                vehicle_manager->handle_mission_download_request(envelope.mission_download_request());
                 break;
             default:
                 spdlog::warn("unexpected downstream payload kind {} from client {}",

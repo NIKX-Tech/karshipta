@@ -175,6 +175,51 @@ TEST_F(VehicleManagerTest, DispatchCommandRejectsUnknownVehicleWithReason) {
     EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
 }
 
+TEST_F(VehicleManagerTest, HandleMissionUploadRejectsUnknownVehicleWithEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::Mission mission;
+    mission.set_mission_id("mission-1");
+    mission.set_vehicle_id("does-not-exist");
+    manager.handle_mission_upload(mission);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_event());
+    const auto& event = envelopes.front().event();
+    EXPECT_EQ(event.code(), "MISSION_UPLOAD_REJECTED");
+    EXPECT_EQ(event.vehicle_id(), "does-not-exist");
+    EXPECT_NE(event.message().find("does-not-exist"), std::string::npos);
+}
+
+TEST_F(VehicleManagerTest, HandleMissionFileUploadRejectsUnknownVehicleWithEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::MissionFileUpload upload;
+    upload.set_vehicle_id("does-not-exist");
+    upload.set_format(karshipta::v1::MISSION_FILE_FORMAT_QGC_PLAN);
+    upload.set_raw_content("{}");
+    manager.handle_mission_file_upload(upload);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_event());
+    EXPECT_EQ(envelopes.front().event().code(), "MISSION_UPLOAD_REJECTED");
+}
+
+TEST_F(VehicleManagerTest, HandleMissionDownloadRequestRejectsUnknownVehicleWithEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::MissionDownloadRequest request;
+    request.set_vehicle_id("does-not-exist");
+    manager.handle_mission_download_request(request);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_event());
+    EXPECT_EQ(envelopes.front().event().code(), "MISSION_DOWNLOAD_REJECTED");
+}
+
 TEST_F(VehicleManagerTest, RemoveVehicleRemovesNeverStartedVehicle) {
     auto manager = make_manager();
     ASSERT_TRUE(manager.add_vehicle(make_config("alpha-1", "udpin://127.0.0.1:24991")));
