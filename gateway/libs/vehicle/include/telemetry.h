@@ -71,9 +71,13 @@ class TelemetryInfo {
     // Guards telemetry_/mavsdk_keepalive_ construction in ensure_telemetry(), plus
     // position_handle_/flight_mode_handle_/battery_handle_ (set by subscribe_*(),
     // cleared by unsubscribe_*() and the destructor). Mirrors VehicleActions::init_mutex_.
-    // Not held by the frequently-polled getters (get_position(), is_armed(), ...): once
-    // telemetry_ is published under the lock, reading it from those is safe without
-    // taking the lock on every tick.
+    // The frequently-polled getters (get_position(), is_armed(), ...) all call
+    // ensure_telemetry() first, which takes this lock on every call, including the
+    // fast path where telemetry_ already exists: cheap and uncontended, not skipped.
+    // What is not guarded is the telemetry_->foo() call itself in those getters, which
+    // runs after ensure_telemetry() has released the lock; that is safe only because
+    // telemetry_ is constructed once and never reassigned or cleared while another
+    // thread can still observe it.
     mutable std::mutex mutex_;
     // Owned copy of the Mavsdk core, grabbed in ensure_telemetry(). Keeps the core alive
     // for as long as `telemetry_` exists, independent of `connection_`'s own lifetime.

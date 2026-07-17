@@ -144,11 +144,14 @@ is a real possibility once `VehicleManager` drives telemetry setup/teardown
 alongside the command executor.
 
 The frequently-polled one-shot getters (`get_position()`, `is_armed()`,
-`get_battery()`, ...) deliberately do **not** take `mutex_`: once
-`telemetry_` is published by `ensure_telemetry()`, the pointer itself never
-changes again for the lifetime of the object (no rebind-on-reconnect, see
-above), so reading it on every telemetry tick is safe without serializing
-against the comparatively rare setup/teardown calls.
+`get_battery()`, ...) all call `ensure_telemetry()` first, which takes
+`mutex_` on every call, including the fast path where `telemetry_` already
+exists. What is not guarded is the getter's own `telemetry_->foo()` call,
+which runs after `ensure_telemetry()` releases the lock: safe because once
+`telemetry_` is published, the pointer itself never changes again for the
+lifetime of the object (no rebind-on-reconnect, see above), so dereferencing
+it outside the lock does not race with the comparatively rare setup/teardown
+calls.
 
 ## RAII and ownership rules
 
@@ -179,9 +182,10 @@ explicit TelemetryInfo(VehicleConnection& connection);
   `VehicleConnection` disconnects and reconnects.
 - **Safe for concurrent calls to `subscribe_*()`/`unsubscribe_*()`/the
   destructor** from different threads (guarded by `mutex_`, see Thread
-  safety above). The one-shot getters are not guarded by the same mutex and
-  rely on `telemetry_` being published before any concurrent reader can
-  observe it.
+  safety above). The one-shot getters take the same `mutex_` via
+  `ensure_telemetry()` on every call; only the subsequent `telemetry_->foo()`
+  read runs unguarded, relying on `telemetry_` being published before any
+  concurrent reader can observe it.
 
 ## Automated tests
 
