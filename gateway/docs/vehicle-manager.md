@@ -2,6 +2,7 @@
 
 `libs/vehicle/include/vehicle_manager.h`, `libs/vehicle/src/vehicle_manager.cpp`
 
+
 ## Overview
 
 `VehicleManager` owns the fleet: one `ManagedVehicle` (a `VehicleConnection` +
