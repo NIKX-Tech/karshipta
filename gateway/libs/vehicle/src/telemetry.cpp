@@ -48,6 +48,7 @@ const char* flight_mode_name(const mavsdk::Telemetry::FlightMode mode) {
 TelemetryInfo::TelemetryInfo(VehicleConnection& connection) : connection_(connection) {}
 
 TelemetryInfo::~TelemetryInfo() {
+    std::lock_guard lock(mutex_);
     if (!telemetry_) return;
     if (position_handle_) telemetry_->unsubscribe_position(*position_handle_);
     if (flight_mode_handle_) telemetry_->unsubscribe_flight_mode(*flight_mode_handle_);
@@ -55,6 +56,7 @@ TelemetryInfo::~TelemetryInfo() {
 }
 
 bool TelemetryInfo::ensure_telemetry() const {
+    std::lock_guard lock(mutex_);
     if (telemetry_) return true;
     if (!connection_.is_connected()) return false;
     mavsdk_keepalive_ = connection_.get_mavsdk();
@@ -81,6 +83,7 @@ void TelemetryInfo::subscribe_position() {
         spdlog::error("subscribe to position failed: telemetry not available");
         return;
     }
+    std::lock_guard lock(mutex_);
     position_handle_ =
         telemetry_->subscribe_position([](const mavsdk::Telemetry::Position& position) {
             spdlog::info("altitude={:.1f}m latitude={:.6f} longitude={:.6f}",
@@ -91,7 +94,9 @@ void TelemetryInfo::subscribe_position() {
 }
 
 void TelemetryInfo::unsubscribe_position() {
-    if (!ensure_telemetry() || !position_handle_) return;
+    if (!ensure_telemetry()) return;
+    std::lock_guard lock(mutex_);
+    if (!position_handle_) return;
     telemetry_->unsubscribe_position(*position_handle_);
     position_handle_.reset();
     spdlog::info("unsubscribed from position");
@@ -101,6 +106,7 @@ void TelemetryInfo::subscribe_flight_mode() {
     if (!ensure_telemetry()) return;
 
     last_flight_mode_ = mavsdk::Telemetry::FlightMode::Unknown;
+    std::lock_guard lock(mutex_);
     flight_mode_handle_ =
         telemetry_->subscribe_flight_mode([this](mavsdk::Telemetry::FlightMode flight_mode) {
             if (last_flight_mode_.exchange(flight_mode) != flight_mode) {
@@ -111,7 +117,9 @@ void TelemetryInfo::subscribe_flight_mode() {
 }
 
 void TelemetryInfo::unsubscribe_flight_mode() {
-    if (!ensure_telemetry() || !flight_mode_handle_) return;
+    if (!ensure_telemetry()) return;
+    std::lock_guard lock(mutex_);
+    if (!flight_mode_handle_) return;
     telemetry_->unsubscribe_flight_mode(*flight_mode_handle_);
     flight_mode_handle_.reset();
     spdlog::info("unsubscribed from flight mode");
@@ -122,6 +130,7 @@ void TelemetryInfo::subscribe_battery() {
         spdlog::error("subscribe to battery failed: telemetry not available");
         return;
     }
+    std::lock_guard lock(mutex_);
     battery_handle_ = telemetry_->subscribe_battery([](const mavsdk::Telemetry::Battery& battery) {
         spdlog::info("battery remaining={:.0f}% voltage={:.2f}V", battery.remaining_percent,
                      battery.voltage_v);
@@ -130,7 +139,9 @@ void TelemetryInfo::subscribe_battery() {
 }
 
 void TelemetryInfo::unsubscribe_battery() {
-    if (!ensure_telemetry() || !battery_handle_) return;
+    if (!ensure_telemetry()) return;
+    std::lock_guard lock(mutex_);
+    if (!battery_handle_) return;
     telemetry_->unsubscribe_battery(*battery_handle_);
     battery_handle_.reset();
     spdlog::info("unsubscribed from battery");

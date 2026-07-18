@@ -71,10 +71,11 @@ telemetry.subscribe_position();   // ensure_telemetry() lazily builds
 
 Every public method funnels through `ensure_telemetry() const`, which:
 
-1. Returns `true` immediately if `telemetry_` already exists.
-2. Returns `false` if `connection_.is_connected()` is false (nothing to bind
+1. Locks `mutex_` for its whole body (see Thread safety below).
+2. Returns `true` immediately if `telemetry_` already exists.
+3. Returns `false` if `connection_.is_connected()` is false (nothing to bind
    to yet); callers log an error and return without touching MAVSDK.
-3. Otherwise takes a `shared_ptr<Mavsdk>` from `connection_.get_mavsdk()`
+4. Otherwise takes a `shared_ptr<Mavsdk>` from `connection_.get_mavsdk()`
    (kept in `mavsdk_keepalive_`) and constructs `telemetry_` against
    `connection_.get_system()`.
 
@@ -133,11 +134,24 @@ The only piece of state it touches, `last_flight_mode_`, is
 mutable std::atomic<mavsdk::Telemetry::FlightMode> last_flight_mode_;
 ```
 
-Everything else on `TelemetryInfo` (`telemetry_`, `mavsdk_keepalive_`, the
-handle members) is written only from `ensure_telemetry()` and the
-`subscribe_*()`/`unsubscribe_*()` pairs, which callers are expected to
-invoke from a single thread, consistent with `VehicleConnection` not being
-thread-safe either (see its docs' Constraints section).
+`telemetry_`/`mavsdk_keepalive_` (written once, lazily, by
+`ensure_telemetry()`) and `position_handle_`/`flight_mode_handle_`/
+`battery_handle_` (written by the `subscribe_*()`/`unsubscribe_*()` pairs
+and read by `~TelemetryInfo()`) are guarded by `mutex_`, mirroring
+`VehicleActions::init_mutex_`. This makes it safe for `subscribe_*()`,
+`unsubscribe_*()`, and the destructor to run from different threads, which
+is a real possibility once `VehicleManager` drives telemetry setup/teardown
+alongside the command executor.
+
+The frequently-polled one-shot getters (`get_position()`, `is_armed()`,
+`get_battery()`, ...) all call `ensure_telemetry()` first, which takes
+`mutex_` on every call, including the fast path where `telemetry_` already
+exists. What is not guarded is the getter's own `telemetry_->foo()` call,
+which runs after `ensure_telemetry()` releases the lock: safe because once
+`telemetry_` is published, the pointer itself never changes again for the
+lifetime of the object (no rebind-on-reconnect, see above), so dereferencing
+it outside the lock does not race with the comparatively rare setup/teardown
+calls.
 
 ## RAII and ownership rules
 
@@ -166,10 +180,12 @@ explicit TelemetryInfo(VehicleConnection& connection);
 - **Does not rebind across reconnects.** Once `telemetry_` is constructed
   against a `System`, it stays bound to that `System` even if the owning
   `VehicleConnection` disconnects and reconnects.
-- **Not thread-safe** for concurrent calls to its own methods (subscribe/
-  unsubscribe pairs, `ensure_telemetry()`). MAVSDK's own callback delivery
-  runs on its internal threads regardless; only `last_flight_mode_` is
-  built to tolerate that.
+- **Safe for concurrent calls to `subscribe_*()`/`unsubscribe_*()`/the
+  destructor** from different threads (guarded by `mutex_`, see Thread
+  safety above). The one-shot getters take the same `mutex_` via
+  `ensure_telemetry()` on every call; only the subsequent `telemetry_->foo()`
+  read runs unguarded, relying on `telemetry_` being published before any
+  concurrent reader can observe it.
 
 ## Automated tests
 
