@@ -18,11 +18,22 @@
 		 * already-selected vehicle. The caller decides whether it cares.
 		 */
 		onMapClick?: (latitudeDeg: number, longitudeDeg: number) => void;
+		/**
+		 * Owner identity for the selected vehicle's badge - a plain callback,
+		 * not a store-level concept, since "who owns this" only exists for a
+		 * multi-tenant consuming app (see karshipta-cloud); the single-operator
+		 * OSS console has no such notion and simply never passes this.
+		 */
+		ownerFor?: (vehicleId: string) => { username: string; photoUrl: string | null } | undefined;
 	}
 
-	const { centerLat, centerLon, onMapClick }: Props = $props();
+	const { centerLat, centerLon, onMapClick, ownerFor }: Props = $props();
 
-	const INITIAL_ZOOM = 15;
+	// City-scale, not street-block: the first thing a viewer needs is "where
+	// in the world is this", not individual streets. z15 (the old value)
+	// only shows a few blocks - unreadable as a city, and the point of
+	// landing on the map is immediately losing your bearings.
+	const INITIAL_ZOOM = 11;
 
 	interface MarkerHandle {
 		marker: maplibregl.Marker;
@@ -30,7 +41,13 @@
 		stem: HTMLElement;
 		arrow: SVGSVGElement;
 		arrowPath: SVGPathElement;
-		label: HTMLElement;
+		badge: HTMLElement;
+		connectivityDot: HTMLElement;
+		nameEl: HTMLElement;
+		telemetryEl: HTMLElement;
+		ownerRow: HTMLElement;
+		ownerAvatar: HTMLElement;
+		ownerNameEl: HTMLElement;
 	}
 
 	const EARTH_CIRCUMFERENCE_M = 40_075_016.686;
@@ -64,6 +81,10 @@
 		element.setAttribute('tabindex', '0');
 		element.setAttribute('aria-label', `Vehicle ${vehicleId}`);
 		element.className = 'relative h-0 w-0 cursor-pointer';
+		// The badge (name/telemetry/owner) only ever renders for the selected
+		// vehicle - see the sync effect below - so it starts hidden. Unselected
+		// markers show only the ground dot and arrow; a map with several
+		// vehicles on it stays scannable instead of turning into a wall of text.
 		element.innerHTML = `
 			<span class="bg-accent/50 absolute -top-0.5 -left-0.5 h-1 w-1 rounded-full" data-part="ground"></span>
 			<span class="bg-edge absolute left-0 w-px" data-part="stem"></span>
@@ -71,19 +92,41 @@
 				<svg width="30" height="30" viewBox="0 0 34 34" class="-translate-x-1/2 -translate-y-1/2">
 					<path d="M17 3 L27 29 L17 22 L7 29 Z" fill="#f5a623" stroke="#0a0e12" stroke-width="1.5" stroke-linejoin="round" />
 				</svg>
-				<span class="border-edge bg-panel/90 text-fg absolute top-3 left-0 -translate-x-1/2 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"></span>
+				<div class="border-edge bg-panel/90 text-fg absolute top-3 left-0 hidden -translate-x-1/2 flex-col gap-0.5 rounded-sm border px-2 py-1 font-mono text-[10px] whitespace-nowrap" data-part="badge">
+					<div class="flex items-center gap-1.5" data-part="name-row">
+						<span class="h-1.5 w-1.5 shrink-0 rounded-full" data-part="connectivity"></span>
+						<span data-part="name"></span>
+					</div>
+					<div data-part="telemetry"></div>
+					<div class="hidden items-center gap-1.5" data-part="owner-row">
+						<span class="border-edge h-3.5 w-3.5 shrink-0 rounded-full border bg-cover bg-center" data-part="owner-avatar"></span>
+						<span class="text-fg-muted" data-part="owner-name"></span>
+					</div>
+				</div>
 			</div>`;
 		const body = element.querySelector<HTMLElement>('[data-part="body"]');
 		const stem = element.querySelector<HTMLElement>('[data-part="stem"]');
 		const arrow = element.querySelector('svg');
 		const arrowPath = element.querySelector('path');
-		const label = body?.querySelector<HTMLElement>('span.border-edge') ?? null;
+		const badge = body?.querySelector<HTMLElement>('[data-part="badge"]') ?? null;
+		const connectivityDot = badge?.querySelector<HTMLElement>('[data-part="connectivity"]') ?? null;
+		const nameEl = badge?.querySelector<HTMLElement>('[data-part="name"]') ?? null;
+		const telemetryEl = badge?.querySelector<HTMLElement>('[data-part="telemetry"]') ?? null;
+		const ownerRow = badge?.querySelector<HTMLElement>('[data-part="owner-row"]') ?? null;
+		const ownerAvatar = badge?.querySelector<HTMLElement>('[data-part="owner-avatar"]') ?? null;
+		const ownerNameEl = badge?.querySelector<HTMLElement>('[data-part="owner-name"]') ?? null;
 		if (
 			!body ||
 			!stem ||
 			!(arrow instanceof SVGSVGElement) ||
 			!(arrowPath instanceof SVGPathElement) ||
-			!label
+			!badge ||
+			!connectivityDot ||
+			!nameEl ||
+			!telemetryEl ||
+			!ownerRow ||
+			!ownerAvatar ||
+			!ownerNameEl
 		) {
 			throw new Error('fleet-map: marker template is missing its parts');
 		}
@@ -99,7 +142,20 @@
 				toggleSelect(event);
 			}
 		});
-		return { element, body, stem, arrow, arrowPath, label };
+		return {
+			element,
+			body,
+			stem,
+			arrow,
+			arrowPath,
+			badge,
+			connectivityDot,
+			nameEl,
+			telemetryEl,
+			ownerRow,
+			ownerAvatar,
+			ownerNameEl
+		};
 	}
 
 	$effect(() => {
@@ -224,6 +280,31 @@
 		};
 	});
 
+	// Pan to a vehicle once when it's selected (sidebar click, marker click,
+	// or a /pilots/[username] deep link), not continuously - lastFocusedId
+	// guards against re-panning on every subsequent telemetry tick for the
+	// same selection, which would fight the operator's own camera control.
+	// Reading state.position here (not untracked) is deliberate: a deep
+	// link can select a vehicle before its telemetry has arrived, and this
+	// needs to re-fire once position actually shows up for it.
+	let lastFocusedVehicleId: string | undefined;
+	$effect(() => {
+		const selectedId = fleet.selectedVehicleId;
+		const activeMap = map;
+		if (!selectedId || !activeMap) {
+			lastFocusedVehicleId = undefined;
+			return;
+		}
+		if (lastFocusedVehicleId === selectedId) return;
+		const position = fleet.vehicles[selectedId]?.state?.position;
+		if (!position) return;
+		lastFocusedVehicleId = selectedId;
+		activeMap.easeTo({
+			center: [position.longitudeDeg, position.latitudeDeg],
+			duration: 600
+		});
+	});
+
 	// crosshair cursor while goto targeting or waypoint planning is active
 	$effect(() => {
 		if (!map) return;
@@ -292,12 +373,12 @@
 			if (!state?.position) continue;
 			let handle = markers[vehicleId];
 			if (!handle) {
-				const { element, body, stem, arrow, arrowPath, label } = markerElement(vehicleId);
+				const { element, ...parts } = markerElement(vehicleId);
 				// setLngLat must precede addTo: adding projects the position
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg])
 					.addTo(map);
-				handle = { marker, body, stem, arrow, arrowPath, label };
+				handle = { marker, ...parts };
 				markers[vehicleId] = handle;
 			}
 			handle.marker.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg]);
@@ -305,14 +386,31 @@
 			// the arrow stays correct when the operator rotates the map
 			handle.arrow.style.rotate = `${state.headingDeg - bearingDeg}deg`;
 			const selected = fleet.selectedVehicleId === vehicleId;
-			// Unselected: just the id, so the map stays scannable with many
-			// vehicles on it. Altitude only earns its place once a vehicle is
-			// actually picked - it's already in VehicleDetail's own readout,
-			// this is a "yes, this is the one I selected" confirmation, not a
-			// second source of truth for it.
-			handle.label.textContent = selected
-				? `${vehicleId} \u00b7 ${state.position.altitudeRelM.toFixed(0)} m`
-				: vehicleId;
+			// Unselected: no badge at all, so the map stays scannable with
+			// several vehicles on it - just the arrow and ground position.
+			// The full badge (name, connectivity, altitude, battery, owner)
+			// only earns its place once a vehicle is actually picked.
+			handle.badge.classList.toggle('hidden', !selected);
+			handle.badge.classList.toggle('flex', selected);
+			if (selected) {
+				handle.nameEl.textContent = vehicleId;
+				handle.connectivityDot.classList.toggle('bg-accent', state.connected);
+				handle.connectivityDot.classList.toggle('animate-pulse', state.connected);
+				handle.connectivityDot.classList.toggle('bg-critical', !state.connected);
+				const batteryPct = state.battery?.remainingPct;
+				const batteryLabel =
+					batteryPct === undefined || batteryPct < 0 ? '?' : `${batteryPct.toFixed(0)}%`;
+				handle.telemetryEl.textContent = `${state.position.altitudeRelM.toFixed(0)} m \u00b7 ${batteryLabel}`;
+				const owner = ownerFor?.(vehicleId);
+				handle.ownerRow.classList.toggle('hidden', !owner);
+				handle.ownerRow.classList.toggle('flex', !!owner);
+				if (owner) {
+					handle.ownerNameEl.textContent = `@${owner.username}`;
+					handle.ownerAvatar.style.backgroundImage = owner.photoUrl
+						? `url(${JSON.stringify(owner.photoUrl)})`
+						: '';
+				}
+			}
 			// lift the body above the ground anchor by the projected altitude:
 			// vertical world axis maps to screen-vertical, scaled by sin(pitch)
 			const pxPerMeter =
@@ -331,8 +429,8 @@
 			// means (link lost), and the two must not look like the same thing.
 			const synthetic = vehicle?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC;
 			handle.arrowPath.setAttribute('fill', synthetic ? '#a78bfa' : '#f5a623');
-			handle.label.classList.toggle('border-selected', selected);
-			handle.label.classList.toggle('border-edge', !selected);
+			handle.badge.classList.toggle('border-selected', selected);
+			handle.badge.classList.toggle('border-edge', !selected);
 			// link lost: fade the marker so a stale last-known position doesn't
 			// read as live
 			handle.body.style.opacity = state.connected ? '1' : '0.4';
