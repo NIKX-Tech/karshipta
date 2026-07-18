@@ -24,8 +24,9 @@
 	const connected = $derived(state?.connected ?? false);
 	// No autopilot behind this vehicle at all (demo math standing in for
 	// one), distinct from SITL (a real autopilot binary, just not attached
-	// to hardware): only synthetic vehicles get the muted "not real"
-	// treatment here.
+	// to hardware): a violet accent + "SIM" label, not the same fade used
+	// for a lost link below - this needs to read as "a working demo," not
+	// "something's wrong with it".
 	const synthetic = $derived(vehicle.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC);
 	const selected = $derived(fleet.selectedVehicleId === vehicleId);
 	const removable = $derived(!effectiveReadonly && !state?.armed && !state?.inAir);
@@ -62,7 +63,9 @@
 	}}
 	class="cursor-pointer rounded border px-3 py-2 {selected
 		? 'border-selected bg-panel'
-		: 'border-edge bg-panel/90 hover:border-fg-muted'} {(state && !connected) || synthetic
+		: synthetic
+			? 'border-synthetic/40 bg-panel/90 hover:border-synthetic'
+			: 'border-edge bg-panel/90 hover:border-fg-muted'} {state && !connected
 		? 'opacity-50 grayscale'
 		: ''}"
 >
@@ -70,6 +73,14 @@
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
 		{#if vehicle.source === 'demo'}
 			<span class="text-fg-muted text-[9px] font-medium tracking-widest">DEMO</span>
+		{/if}
+		{#if synthetic}
+			<span
+				class="text-synthetic text-[9px] font-medium tracking-widest"
+				title="No autopilot behind this vehicle; demo telemetry standing in for one"
+			>
+				SIM
+			</span>
 		{/if}
 		{#if state?.armed}
 			<span class="text-armed text-[9px] font-medium tracking-widest">ARMED</span>

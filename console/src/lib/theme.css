@@ -1,9 +1,10 @@
 /*
  * Karshipta brand system tokens. Dark instrumentation look, one signature
  * accent. Functional colors carry meaning only, never decoration: armed
- * green, critical red, selected blue. Amber is the brand accent (logo
- * mark, active states, live-telemetry pulse). Part of the console-core
- * package: any app consuming it shares these tokens, not a copy.
+ * green, critical red, selected blue, synthetic violet. Amber is the brand
+ * accent (logo mark, active states, live-telemetry pulse). Part of the
+ * console-core package: any app consuming it shares these tokens, not a
+ * copy.
  */
 @theme {
 	--color-ink: #0a0e12;
@@ -15,6 +16,11 @@
 	--color-armed: #2ecc71;
 	--color-critical: #e74c3c;
 	--color-selected: #3b9eff;
+	/* No autopilot behind a vehicle at all (demo/synthetic telemetry): a
+	 * distinct hue on purpose, not a desaturated one, so it never reads as
+	 * disabled/degraded (that's what fading/graying already means, for a
+	 * lost link). */
+	--color-synthetic: #a78bfa;
 
 	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
 	--font-display: 'Space Grotesk Variable', 'Inter Variable', ui-sans-serif, sans-serif;

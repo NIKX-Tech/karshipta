@@ -45,16 +45,14 @@
 </script>
 
 <section
-	class="border-edge bg-panel flex h-full w-72 flex-col gap-3 overflow-y-auto border-l p-3 {synthetic
-		? 'saturate-50'
-		: ''}"
+	class="border-edge bg-panel flex h-full w-72 flex-col gap-3 overflow-y-auto border-l p-3"
 	aria-label="Vehicle detail {vehicleId}"
 >
 	<header class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{vehicleId}</h2>
 		{#if synthetic}
 			<span
-				class="text-fg-muted text-[10px] font-medium tracking-widest"
+				class="text-synthetic text-[10px] font-medium tracking-widest"
 				title="No autopilot behind this vehicle; demo telemetry standing in for one"
 			>
 				SIM
