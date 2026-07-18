@@ -45,6 +45,13 @@ public:
         disconnect_callback_ = std::move(callback);
     }
 
+    // reject_viewer_envelope() itself does not consult role() (the caller
+    // already knows the sender is a viewer); nothing in this file's tests
+    // needs a non-default role, so this is always kOperator.
+    [[nodiscard]] ClientRole role(ClientId /*client*/) const override {
+        return ClientRole::kOperator;
+    }
+
     // Every Envelope broadcast so far, parsed. Skips frames that fail to
     // parse (there should be none; VehicleManager only ever broadcasts
     // envelopes it just serialized itself).
@@ -477,4 +484,101 @@ TEST_F(VehicleManagerTest, HandleRemoveVehicleRejectsWhileAirborne) {
     EXPECT_EQ(remove_ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
     EXPECT_NE(remove_ack.message().find("air"), std::string::npos) << remove_ack.message();
     EXPECT_EQ(manager.list_vehicle_ids().size(), 1u);  // still registered, not removed
+}
+
+TEST_F(VehicleManagerTest, RejectViewerEnvelopeRejectsCommandWithAckAndEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::Command command;
+    command.set_command_id("cmd-viewer-1");
+    command.set_vehicle_id("alpha-1");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_command() = command;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 2u);
+    ASSERT_TRUE(envelopes[0].has_command_ack());
+    const auto& ack = envelopes[0].command_ack();
+    EXPECT_EQ(ack.command_id(), "cmd-viewer-1");
+    EXPECT_EQ(ack.vehicle_id(), "alpha-1");
+    EXPECT_EQ(ack.status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_EQ(ack.message(), "read-only session");
+
+    ASSERT_TRUE(envelopes[1].has_event());
+    const auto& event = envelopes[1].event();
+    EXPECT_EQ(event.vehicle_id(), "alpha-1");
+    EXPECT_EQ(event.severity(), karshipta::v1::SEVERITY_WARNING);
+    EXPECT_EQ(event.message(), "read-only session");
+}
+
+TEST_F(VehicleManagerTest, RejectViewerEnvelopeRejectsAddVehicleWithAck) {
+    auto manager = make_manager();
+
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_add_vehicle() = make_add_request("req-viewer", "alpha-2", "udpin://127.0.0.1:24993");
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_vehicle_config_ack());
+    const auto& ack = envelopes.front().vehicle_config_ack();
+    EXPECT_EQ(ack.request_id(), "req-viewer");
+    EXPECT_EQ(ack.vehicle_id(), "alpha-2");
+    EXPECT_EQ(ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
+    EXPECT_EQ(ack.message(), "read-only session");
+    EXPECT_TRUE(manager.list_vehicle_ids().empty());  // never reached add_vehicle_impl
+}
+
+TEST_F(VehicleManagerTest, RejectViewerEnvelopeRejectsRemoveVehicleWithAck) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_vehicle(make_config("alpha-1", "udpin://127.0.0.1:24991")));
+
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_remove_vehicle() = make_remove_request("req-viewer", "alpha-1");
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_vehicle_config_ack());
+    EXPECT_EQ(envelopes.front().vehicle_config_ack().status(),
+              karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
+    EXPECT_EQ(envelopes.front().vehicle_config_ack().message(), "read-only session");
+    EXPECT_EQ(manager.list_vehicle_ids().size(), 1u);  // never reached remove_vehicle_impl
+}
+
+TEST_F(VehicleManagerTest, RejectViewerEnvelopeRejectsMissionUploadWithEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::Mission mission;
+    mission.set_mission_id("mission-viewer");
+    mission.set_vehicle_id("alpha-1");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_mission_upload() = mission;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto event = find_event(transport_.broadcast_envelopes(), "MISSION_UPLOAD_REJECTED");
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->vehicle_id(), "alpha-1");
+    EXPECT_EQ(event->message(), "read-only session");
+}
+
+TEST_F(VehicleManagerTest, RejectViewerEnvelopeRejectsMissionDownloadRequestWithEvent) {
+    auto manager = make_manager();
+
+    karshipta::v1::MissionDownloadRequest request;
+    request.set_vehicle_id("alpha-1");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_mission_download_request() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto event = find_event(transport_.broadcast_envelopes(), "MISSION_DOWNLOAD_REJECTED");
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->vehicle_id(), "alpha-1");
+    EXPECT_EQ(event->message(), "read-only session");
 }

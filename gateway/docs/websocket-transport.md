@@ -28,6 +28,10 @@ to tell which one is active.
   `on_disconnect`) with that `ClientId`, never an `ix::` type.
 - Be safe to call from multiple threads for `send`/`broadcast`: IXWebSocket
   delivers each connection's events on its own thread from an internal pool.
+- Mark each connection's `ClientRole` (operator or viewer, gateway issue #20)
+  once at connect time and report it back via `role()`. Deciding what to *do*
+  with that role (rejecting a viewer's upstream envelopes) is not this
+  class's job - see `VehicleManager::reject_viewer_envelope`.
 
 ## Explicitly out of scope
 
@@ -51,11 +55,13 @@ to tell which one is active.
 | `using ReceiveCallback = std::function<void(ClientId, const std::vector<uint8_t>&)>` | Fired once per received binary frame. |
 | `using ConnectCallback = std::function<void(ClientId)>` | Fired when a client connects. |
 | `using DisconnectCallback = std::function<void(ClientId)>` | Fired when a client disconnects. |
+| `enum class ClientRole { kOperator, kViewer }` | Whether a connection may send state-changing envelopes or is read-only (gateway issue #20). Decided once, at connect time. |
 | `virtual void start()` | Starts listening (or, for a relay transport, connecting out). Idempotent. |
 | `virtual void stop()` | Stops and drops every client. Idempotent. |
 | `virtual bool is_running() const` | |
 | `virtual void send(ClientId, const std::vector<uint8_t>&)` | Sends to one client. No-op if that client is no longer connected. |
 | `virtual void broadcast(const std::vector<uint8_t>&)` | Sends to every currently connected client. |
+| `virtual ClientRole role(ClientId) const` | The role a currently-connected client was marked with. `kViewer` (the unprivileged default) for an unknown/disconnected client. |
 | `virtual void on_receive(ReceiveCallback)` | Replaces the current receive callback. |
 | `virtual void on_connect(ConnectCallback)` | Replaces the current connect callback. |
 | `virtual void on_disconnect(DisconnectCallback)` | Replaces the current disconnect callback. |
@@ -71,6 +77,7 @@ to tell which one is active.
 | `void stop() override` | Stops the server, clears the client maps, and calls `ix::uninitNetSystem()`. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_`; no-op if not found. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current `shared_ptr<ix::WebSocket>` list under the lock, then sends outside it. |
+| `ClientRole role(ClientId) const override` | Looks up `client_roles_` under `clients_mutex_`; `kViewer` if the id is not currently connected. |
 | `const std::string& host() const` / `uint16_t port() const` | Read-only accessors for the address this instance was built with. |
 
 ## Design: safe-bind config and the LAN escape hatch
@@ -142,6 +149,34 @@ own set cannot free the socket while a send against it is in flight.
 `Message` events are dropped unless `msg->binary` is true; text frames are
 logged and ignored, since the wire protocol is binary Envelope frames only.
 
+## Design: marking a connection as a viewer
+
+Gateway issue #20 (read-only viewer mode, console half tracked separately as
+issue #19) needed a way to mark a connection at the transport boundary,
+deliberately kept simple since the enforcement point (`VehicleManager`, see
+that class's docs) is what actually matters, not the marking mechanism:
+`WebsocketTransport` reads a `role=viewer` query parameter off the
+connection's URI (e.g. `ws://host:port/?role=viewer`), available on the
+`Open` message as `msg->openInfo.uri`. Anything else, including no query
+string at all, is `kOperator` - existing consoles that predate viewer mode
+carry no query parameter and must not lose command access. The parse
+(`parse_role_from_uri`) is deliberately minimal: exact `role=viewer` pair
+match only, no percent-decoding or multi-value handling, since this is a
+same-origin console setting, not a public-facing form.
+
+The role is stored in `client_roles_` (`ClientId -> ClientRole`) alongside
+`clients_`/`client_ids_`, set on `Open` and erased on `Close`, so `role()`
+only needs `clients_mutex_`, no extra synchronization. `role()` returns
+`kViewer` for an id it doesn't recognize: the fail-safe default is to treat
+an untracked connection as unprivileged, not to grant it operator access
+(this differs from the no-query-string default above, which is a
+backward-compatibility default for a real, just-connected client, not a
+security fallback for one that's gone missing).
+
+`RelayTransport::role()` always returns `kOperator`: relayly pairing has no
+per-peer role concept yet (see `relay-transport.md`), so there is nothing to
+mark a peer viewer with.
+
 ## Thread safety
 
 IXWebSocket runs each connection's callback on its own thread from an
@@ -207,6 +242,10 @@ server + real IXWebSocket client on loopback ports, deadline-guarded):
 - `BroadcastReachesEveryClientAndReceiveRoundTrips`: `broadcast()` reaches
   two clients; a client's binary frame reaches `on_receive` intact.
 - `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety.
+- `RoleDefaultsToOperatorWithNoQueryParam` / `RoleIsViewerWhenQueryParamRequestsIt`:
+  a plain connection reads `kOperator`; one whose URL carries `?role=viewer`
+  reads `kViewer`. `RoleIsViewerForUnknownClient`: an id nothing ever
+  connected with reads `kViewer`, the fail-safe default.
 
 `WebsocketTransportFromConfig` covers the safe-bind policy above:
 

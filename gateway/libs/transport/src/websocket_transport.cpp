@@ -21,6 +21,31 @@ bool is_loopback_host(const std::string& host) {
     return host == "127.0.0.1" || host == "localhost" || host == "::1";
 }
 
+// Reads the role=viewer query parameter off a connection URI (e.g.
+// "/?role=viewer"), gateway issue #20. Deliberately minimal: exact key/value
+// match only, no percent-decoding or multi-value handling, since this is a
+// same-origin operator/console setting, not a public-facing form. Anything
+// other than an exact "role=viewer" pair, including no query string at all,
+// keeps the connection an operator: existing consoles that predate viewer
+// mode carry no query parameter and must not lose command access.
+Transport::ClientRole parse_role_from_uri(const std::string& uri) {
+    const auto query_pos = uri.find('?');
+    if (query_pos == std::string::npos) return Transport::ClientRole::kOperator;
+
+    const std::string query = uri.substr(query_pos + 1);
+    std::size_t start = 0;
+    while (start <= query.size()) {
+        const auto amp_pos = query.find('&', start);
+        const std::string pair = query.substr(start, amp_pos == std::string::npos
+                                                           ? std::string::npos
+                                                           : amp_pos - start);
+        if (pair == "role=viewer") return Transport::ClientRole::kViewer;
+        if (amp_pos == std::string::npos) break;
+        start = amp_pos + 1;
+    }
+    return Transport::ClientRole::kOperator;
+}
+
 }  // namespace
 
 WebsocketTransport::WebsocketTransport(std::string host, const uint16_t port)
@@ -106,13 +131,16 @@ void WebsocketTransport::start() {
                         break;
                     }
                     const ClientId id = next_client_id_.fetch_add(1);
+                    const ClientRole role = parse_role_from_uri(msg->openInfo.uri);
                     {
                         std::lock_guard lock(clients_mutex_);
                         clients_[id] = shared_socket;
                         client_ids_[&web_socket] = id;
+                        client_roles_[id] = role;
                     }
-                    spdlog::info("client {} connected from {}", id,
-                                 connection_state->getRemoteIp());
+                    spdlog::info("client {} connected from {} as {}", id,
+                                 connection_state->getRemoteIp(),
+                                 role == ClientRole::kViewer ? "viewer" : "operator");
                     if (on_connect_) on_connect_(id);
                     break;
                 }
@@ -127,6 +155,7 @@ void WebsocketTransport::start() {
                             found = true;
                             clients_.erase(id);
                             client_ids_.erase(it);
+                            client_roles_.erase(id);
                         }
                     }
                     if (found) {
@@ -180,6 +209,7 @@ void WebsocketTransport::stop() {
         std::lock_guard lock(clients_mutex_);
         clients_.clear();
         client_ids_.clear();
+        client_roles_.clear();
     }
     ix::uninitNetSystem();
     running_ = false;
@@ -213,6 +243,12 @@ void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
     for (const auto& web_socket : targets) {
         web_socket->sendBinary(payload);
     }
+}
+
+Transport::ClientRole WebsocketTransport::role(const ClientId client) const {
+    std::lock_guard lock(clients_mutex_);
+    const auto it = client_roles_.find(client);
+    return it == client_roles_.end() ? ClientRole::kViewer : it->second;
 }
 
 void WebsocketTransport::on_receive(ReceiveCallback callback) {

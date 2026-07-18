@@ -46,7 +46,75 @@ std::unique_ptr<ix::WebSocket> make_client(uint16_t port) {
     return client;
 }
 
+std::unique_ptr<ix::WebSocket> make_client_with_query(uint16_t port, const std::string& query) {
+    auto client = std::make_unique<ix::WebSocket>();
+    client->setUrl("ws://" + std::string(kHost) + ":" + std::to_string(port) + "/?" + query);
+    client->disableAutomaticReconnection();
+    return client;
+}
+
 }  // namespace
+
+TEST(WebsocketTransport, RoleDefaultsToOperatorWithNoQueryParam) {
+    constexpr uint16_t port = 28771;
+    WebsocketTransport transport(kHost, port);
+
+    std::atomic<Transport::ClientId> connected_id{0};
+    Signal connected;
+    transport.on_connect([&](const Transport::ClientId client) {
+        connected_id = client;
+        connected.notify();
+    });
+    transport.start();
+
+    auto client = make_client(port);
+    // ix::WebSocket invokes its message callback unconditionally, including
+    // for the Close message stop() itself generates; an unset callback is a
+    // default-constructed std::function, so leaving this unset makes stop()
+    // throw std::bad_function_call on IXWebSocket's own thread and abort the
+    // process (every other client in this file sets one for the same reason).
+    client->setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+    client->start();
+    ASSERT_TRUE(connected.wait());
+
+    EXPECT_EQ(transport.role(connected_id), Transport::ClientRole::kOperator);
+
+    client->stop();
+    transport.stop();
+}
+
+TEST(WebsocketTransport, RoleIsViewerWhenQueryParamRequestsIt) {
+    constexpr uint16_t port = 28772;
+    WebsocketTransport transport(kHost, port);
+
+    std::atomic<Transport::ClientId> connected_id{0};
+    Signal connected;
+    transport.on_connect([&](const Transport::ClientId client) {
+        connected_id = client;
+        connected.notify();
+    });
+    transport.start();
+
+    auto client = make_client_with_query(port, "role=viewer");
+    client->setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+    client->start();
+    ASSERT_TRUE(connected.wait());
+
+    EXPECT_EQ(transport.role(connected_id), Transport::ClientRole::kViewer);
+
+    client->stop();
+    transport.stop();
+}
+
+TEST(WebsocketTransport, RoleIsViewerForUnknownClient) {
+    constexpr uint16_t port = 28773;
+    WebsocketTransport transport(kHost, port);
+    transport.start();
+
+    EXPECT_EQ(transport.role(/*client=*/999), Transport::ClientRole::kViewer);
+
+    transport.stop();
+}
 
 TEST(WebsocketTransport, ConnectDeliversFrameAndDisconnectMatchesId) {
     constexpr uint16_t port = 28765;

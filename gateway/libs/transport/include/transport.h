@@ -17,6 +17,16 @@ class Transport {
     // disconnect callbacks to say which client changed state.
     using ClientId = uint64_t;
 
+    // Whether a connection may send state-changing envelopes (kOperator) or
+    // is restricted to receiving telemetry only (kViewer, gateway issue #20:
+    // read-only viewer mode). Decided once, at the transport boundary, when
+    // the connection is established (see WebsocketTransport's query-param
+    // handling); fixed for the connection's lifetime. Enforcement lives
+    // above this interface (see VehicleManager::reject_viewer_envelope), not
+    // in Transport itself: Transport only reports the role, it does not act
+    // on it.
+    enum class ClientRole { kOperator, kViewer };
+
     // Fired once per binary frame received from a client. `bytes` is a
     // serialized Envelope; Transport never parses it, only carries it.
     using ReceiveCallback = std::function<void(ClientId client, const std::vector<uint8_t>& bytes)>;
@@ -39,6 +49,12 @@ class Transport {
     virtual void send(ClientId client, const std::vector<uint8_t>& bytes) = 0;
     // Sends bytes to every currently connected client.
     virtual void broadcast(const std::vector<uint8_t>& bytes) = 0;
+
+    // The role a currently-connected client was marked with at connect time.
+    // Returns kViewer for a client that is not (or no longer) known: the
+    // safe default is to treat an untracked connection as unprivileged, not
+    // to grant it operator access.
+    [[nodiscard]] virtual ClientRole role(ClientId client) const = 0;
 
     // Registers the callback invoked for every received frame. Only one
     // callback at a time, and registration must happen before start():

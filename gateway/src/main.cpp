@@ -43,6 +43,13 @@ int main() {
             spdlog::warn("undecodable {} byte frame from client {}", bytes.size(), client);
             return;
         }
+        // Read-only viewer mode (gateway issue #20): a viewer's envelope
+        // never reaches dispatch_command/handle_*, only the reasoned
+        // rejection path.
+        if (transport->role(client) == Transport::ClientRole::kViewer) {
+            vehicle_manager->reject_viewer_envelope(client, envelope);
+            return;
+        }
         switch (envelope.payload_case()) {
             case karshipta::v1::Envelope::kCommand:
                 vehicle_manager->dispatch_command(envelope.command());

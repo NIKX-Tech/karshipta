@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <mavsdk/mavsdk.h>
+#include <karshipta/v1/envelope.pb.h>
 #include <karshipta/v1/fleet.pb.h>
 #include <vehicle_connection.h>
 #include <vehicle_actions.h>
@@ -168,6 +169,19 @@ public:
     // WARNING Event on failure) surfaces later, via the publish tick polling
     // take_download_result().
     void handle_mission_download_request(const karshipta::v1::MissionDownloadRequest& request);
+
+    // Rejects an upstream envelope from a connection Transport marked
+    // ClientRole::kViewer (gateway issue #20: read-only viewer mode). Never
+    // forwards the payload; answers instead with the same reasoned
+    // ack/event a normal precondition failure would produce (a REJECTED
+    // CommandAck/VehicleConfigAck for kinds that carry one, a WARNING Event
+    // for the mission-upload/download family, which has none), always with
+    // message "read-only session". `client` is only used for the log line;
+    // callers still route the switch on the envelope's payload kind, this
+    // just supplies the read-only-specific rejection body. Call this
+    // instead of dispatch_command()/handle_add_vehicle()/etc., not after
+    // them: a viewer's envelope must never reach MAVSDK.
+    void reject_viewer_envelope(Transport::ClientId client, const karshipta::v1::Envelope& envelope);
 
     // Launches reconnect_worker for the vehicle with this id, recreating its
     // CommandExecutor if a previous stop() retired it. Returns false if
