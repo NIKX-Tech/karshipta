@@ -3,11 +3,79 @@
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <spdlog/spdlog.h>
+#include <yaml-cpp/yaml.h>
 
 #include <cassert>
+#include <filesystem>
+
+namespace {
+
+constexpr auto kDefaultHost = "127.0.0.1";
+constexpr uint16_t kDefaultPort = 8765;
+
+// Deliberately exact-match only (not a CIDR/subnet check): the values a
+// config file is expected to spell out for "this machine only" are exactly
+// these three. Anything else, including 0.0.0.0, is treated as a wider bind
+// subject to the allow_lan_bind escape hatch.
+bool is_loopback_host(const std::string& host) {
+    return host == "127.0.0.1" || host == "localhost" || host == "::1";
+}
+
+}  // namespace
 
 WebsocketTransport::WebsocketTransport(std::string host, const uint16_t port)
     : host_(std::move(host)), port_(port) {}
+
+std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
+    const std::string& config_path) {
+    std::string host = kDefaultHost;
+    uint16_t port = kDefaultPort;
+    bool allow_lan_bind = false;
+
+    std::error_code exists_error;
+    if (!std::filesystem::exists(config_path, exists_error) || exists_error) {
+        spdlog::info(
+            "gateway config '{}' not found; binding to the safe default {}:{}", config_path,
+            kDefaultHost, kDefaultPort);
+    } else {
+        try {
+            const YAML::Node root = YAML::LoadFile(config_path);
+            if (const YAML::Node websocket = root["websocket"]; websocket) {
+                if (websocket["host"]) host = websocket["host"].as<std::string>();
+                if (websocket["port"]) port = websocket["port"].as<uint16_t>();
+                if (websocket["allow_lan_bind"])
+                    allow_lan_bind = websocket["allow_lan_bind"].as<bool>();
+            }
+        } catch (const YAML::Exception& parse_error) {
+            spdlog::error(
+                "failed to parse gateway config '{}': {}; binding to the safe default {}:{}",
+                config_path, parse_error.what(), kDefaultHost, kDefaultPort);
+            host = kDefaultHost;
+            port = kDefaultPort;
+            allow_lan_bind = false;
+        }
+    }
+
+    if (!is_loopback_host(host) && !allow_lan_bind) {
+        spdlog::warn(
+            "gateway config '{}' requests websocket.host='{}', but websocket.allow_lan_bind is "
+            "off; forcing 127.0.0.1 instead. Cross-machine access is meant to go through the "
+            "relay transport, not a LAN-exposed plain websocket (see "
+            "gateway/docs/relay-transport.md); set websocket.allow_lan_bind: true if you really "
+            "need a bare LAN bind.",
+            config_path, host);
+        host = kDefaultHost;
+    } else if (!is_loopback_host(host) && allow_lan_bind) {
+        spdlog::warn(
+            "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
+            "network with NO AUTHENTICATION. Anyone who can reach this address can command "
+            "every connected vehicle. Only do this on a trusted, isolated network; prefer the "
+            "relay transport for cross-machine access.",
+            host, port);
+    }
+
+    return std::make_unique<WebsocketTransport>(std::move(host), port);
+}
 
 WebsocketTransport::~WebsocketTransport() { stop(); }
 

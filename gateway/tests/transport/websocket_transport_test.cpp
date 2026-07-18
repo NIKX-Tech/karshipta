@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -141,4 +143,69 @@ TEST(WebsocketTransport, StopIsIdempotentAndStartAfterStopWorks) {
     transport.start();
     EXPECT_TRUE(transport.is_running());
     transport.stop();
+}
+
+TEST(WebsocketTransportFromConfig, MissingFileDefaultsToLoopback) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "karshipta_gateway_test_missing_config.yaml";
+    std::filesystem::remove(path);
+
+    const auto transport = WebsocketTransport::from_config(path.string());
+
+    EXPECT_EQ(transport->host(), "127.0.0.1");
+    EXPECT_EQ(transport->port(), 8765);
+}
+
+TEST(WebsocketTransportFromConfig, LoadsHostAndPortFromFile) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "karshipta_gateway_test_loopback_config.yaml";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "websocket:\n";
+        out << "  host: 127.0.0.1\n";
+        out << "  port: 9999\n";
+    }
+
+    const auto transport = WebsocketTransport::from_config(path.string());
+
+    EXPECT_EQ(transport->host(), "127.0.0.1");
+    EXPECT_EQ(transport->port(), 9999);
+
+    std::filesystem::remove(path);
+}
+
+TEST(WebsocketTransportFromConfig, LanBindWithoutEscapeHatchFallsBackToLoopback) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "karshipta_gateway_test_lan_no_hatch.yaml";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "websocket:\n";
+        out << "  host: 0.0.0.0\n";
+        out << "  port: 8765\n";
+    }
+
+    const auto transport = WebsocketTransport::from_config(path.string());
+
+    EXPECT_EQ(transport->host(), "127.0.0.1");
+
+    std::filesystem::remove(path);
+}
+
+TEST(WebsocketTransportFromConfig, LanBindWithEscapeHatchIsHonored) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "karshipta_gateway_test_lan_with_hatch.yaml";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "websocket:\n";
+        out << "  host: 0.0.0.0\n";
+        out << "  port: 8765\n";
+        out << "  allow_lan_bind: true\n";
+    }
+
+    const auto transport = WebsocketTransport::from_config(path.string());
+
+    EXPECT_EQ(transport->host(), "0.0.0.0");
+    EXPECT_EQ(transport->port(), 8765);
+
+    std::filesystem::remove(path);
 }

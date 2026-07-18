@@ -12,12 +12,11 @@
 #include "websocket_transport.h"
 
 namespace {
-constexpr auto kWebSocketHost = "0.0.0.0";
-constexpr uint16_t kWebSocketPort = 8765;
-// Internal machinery, not an operator-managed path: gateway/config/ is a
-// tracked directory (see .gitkeep). Relative to the repo root, matching how
-// the binary is documented to be run (docs/quickstart-windows.md, gateway/
-// CLAUDE.local.md).
+// Both relative to the repo root, matching how the binary is documented to
+// be run (docs/quickstart-windows.md, gateway/CLAUDE.local.md).
+// gateway/config/ is a tracked directory (see .gitkeep).
+constexpr auto kNetworkConfigPath = "gateway/config/gateway.yaml";
+// Generated state, not operator-managed; gitignored (gateway/.gitignore).
 constexpr auto kPersistencePath = "gateway/config/fleet_state.yaml";
 
 std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope) {
@@ -31,13 +30,13 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
 }  // namespace
 
 int main() {
-    WebsocketTransport transport(kWebSocketHost, kWebSocketPort);
-    auto vehicle_manager = VehicleManager::create(transport, kPersistencePath);
+    auto transport = WebsocketTransport::from_config(kNetworkConfigPath);
+    auto vehicle_manager = VehicleManager::create(*transport, kPersistencePath);
 
-    transport.on_connect(
+    transport->on_connect(
         [&vehicle_manager](const Transport::ClientId client) { vehicle_manager->send_vehicle_info(client); });
 
-    transport.on_receive([&vehicle_manager, &transport](const Transport::ClientId client,
+    transport->on_receive([&vehicle_manager, &transport](const Transport::ClientId client,
                                                           const std::vector<uint8_t>& bytes) {
         karshipta::v1::Envelope envelope;
         if (!envelope.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
@@ -52,14 +51,14 @@ int main() {
                 const auto ack = vehicle_manager->handle_add_vehicle(envelope.add_vehicle());
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_vehicle_config_ack() = ack;
-                transport.broadcast(serialize_envelope(ack_envelope));
+                transport->broadcast(serialize_envelope(ack_envelope));
                 break;
             }
             case karshipta::v1::Envelope::kRemoveVehicle: {
                 const auto ack = vehicle_manager->handle_remove_vehicle(envelope.remove_vehicle());
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_vehicle_config_ack() = ack;
-                transport.broadcast(serialize_envelope(ack_envelope));
+                transport->broadcast(serialize_envelope(ack_envelope));
                 break;
             }
             case karshipta::v1::Envelope::kMissionUpload:
@@ -77,7 +76,7 @@ int main() {
                 break;
         }
     });
-    transport.start();
+    transport->start();
 
     if (vehicle_manager->restore_and_start() == 0) {
         // First run, nothing persisted yet: seed the same default SITL
