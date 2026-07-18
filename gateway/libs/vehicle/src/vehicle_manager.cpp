@@ -1069,11 +1069,24 @@ std::optional<std::string> VehicleManager::remove_vehicle_impl(const std::string
         return *error;
     }
 
-    std::lock_guard lock(vehicles_mutex_);
-    stop_worker(*vehicle);
-    managed_vehicles_.erase(vehicle_id);
-    persist_locked();
-    spdlog::info("vehicle_id '{}' removed (total={})", vehicle_id, managed_vehicles_.size());
+    // extract(), not erase(): erase() would destroy the ManagedVehicle (and
+    // therefore run VehicleConnection::~VehicleConnection() -> mavsdk's
+    // remove_connection(), TelemetryInfo::~TelemetryInfo()'s unsubscribe, and
+    // VehicleMission::~VehicleMission()'s own worker join) right here, under
+    // vehicles_mutex_. None of those calls are bounded or interruptible, so
+    // one slow teardown would stall every other vehicle's dispatch_command,
+    // the publish tick, and add/remove requests behind this lock. extract()
+    // only relocates the node out of the map (same out-of-lock-destruction
+    // idea as retired_executor above); `node` actually destructs once it goes
+    // out of scope below, after the lock has already been released.
+    std::map<std::string, ManagedVehicle>::node_type node;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        stop_worker(*vehicle);
+        node = managed_vehicles_.extract(vehicle_id);
+        persist_locked();
+        spdlog::info("vehicle_id '{}' removed (total={})", vehicle_id, managed_vehicles_.size());
+    }
     return std::nullopt;
 }
 
