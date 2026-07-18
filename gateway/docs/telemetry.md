@@ -189,11 +189,22 @@ explicit TelemetryInfo(VehicleConnection& connection);
 
 ## Automated tests
 
-None yet. `gateway/tests/vehicle/vehicle_connection_test.cpp` covers
-`VehicleConnection`; there is no `telemetry_test.cpp`. Coverage worth adding
-against the same fake-autopilot pattern used there: subscribe/unsubscribe
-does not leave a dangling handle, and the destructor unsubscribes an active
-position subscription.
+`gateway/tests/vehicle/telemetry_test.cpp` (GoogleTest, no SITL/Docker
+container needed):
+
+- `SubscribeAndUnsubscribeAreNoOpsWithoutConnection`,
+  `GettersReturnSafeDefaultsWithoutConnection`,
+  `DestructorSafeWithoutConnection`: against a never-connected
+  `VehicleConnection`, every `subscribe_*()`/`unsubscribe_*()` and getter
+  fails fast with a safe default rather than touching MAVSDK or hanging.
+- `SubscribeThenUnsubscribeTwiceDoesNotLeaveDanglingHandle`,
+  `DestructorUnsubscribesActivePositionSubscription`: against a real
+  connection (a heartbeat-only fake autopilot, same pattern as
+  `vehicle_connection_test.cpp`'s `make_fake_autopilot`), subscribing then
+  unsubscribing twice does not touch MAVSDK's `unsubscribe_position()` with a
+  stale handle, and the destructor safely unsubscribes every still-active
+  subscription. Neither test exercises the actual data path (no telemetry is
+  published by the fake), only subscribe/unsubscribe/destructor safety.
 
 ## Manual verification
 
