@@ -131,6 +131,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   # Stacked milestone branches append their own test sources to this list.
   set(KARSHIPTA_TEST_SOURCES
     tests/vehicle/vehicle_connection_test.cpp
+    tests/vehicle/telemetry_test.cpp
     tests/vehicle/command_executor_test.cpp
     tests/vehicle/vehicle_mission_test.cpp
     tests/vehicle/mission_importer_test.cpp

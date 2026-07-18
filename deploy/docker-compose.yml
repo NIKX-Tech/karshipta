@@ -31,6 +31,11 @@ services:
   #   ports:
   #     - "8765:8765"
   #   depends_on: [sitl-1, sitl-2, sitl-3]
+  #   Note for M6: the gateway defaults websocket.host to 127.0.0.1
+  #   (see gateway/docs/websocket-transport.md). Bound that way inside a
+  #   container, this port mapping will not reach it. ./gateway-config.yaml
+  #   needs websocket.allow_lan_bind: true, or the bind needs to move to the
+  #   docker network interface instead of the host loopback.
 
   # console:
   #   build: ../console
