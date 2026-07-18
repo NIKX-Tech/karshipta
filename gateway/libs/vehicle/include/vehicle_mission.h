@@ -99,6 +99,22 @@ class VehicleMission {
     // repeat-pass bookkeeping untouched so a later start() resumes the same
     // pass rather than restarting the count.
     [[nodiscard]] mavsdk::Mission::Result pause() const;
+    // Async counterpart to start() (gateway issue #69). MAVSDK documents
+    // start_mission()/pause_mission() as blocking with no cancel
+    // counterpart, unlike upload_mission()/download_mission(); the fix here
+    // is to never block inside them at all rather than add a way to
+    // interrupt them after the fact. Fires start_mission_async() and
+    // returns immediately; `callback` runs on whatever thread MAVSDK's own
+    // I/O invokes it from, not the caller's, and must not assume anything
+    // about this object's lifetime (mirrors handle_progress()'s existing
+    // start_mission_async() re-trigger, which captures nothing risky for
+    // the same reason). Same immediate-NoSystem behavior as start() when no
+    // mission plugin exists yet.
+    void start_async(mavsdk::Mission::ResultCallback callback) const;
+    // Async counterpart to pause(). Same non-blocking rationale and
+    // callback-lifetime caveat as start_async(); still HOLD mode, not a
+    // stop, same as pause().
+    void pause_async(mavsdk::Mission::ResultCallback callback) const;
 
     // Non-blocking cached read of the latest subscribe_mission_progress()
     // update, translated to the wire shape. Meant to be polled by

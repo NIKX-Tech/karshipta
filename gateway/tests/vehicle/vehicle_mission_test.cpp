@@ -143,6 +143,21 @@ TEST_F(VehicleMissionTest, StartAndPauseFailWithoutConnection) {
     EXPECT_EQ(mission_.pause(), mavsdk::Mission::Result::NoSystem);
 }
 
+// ensure_mission() fails synchronously (never connected), so start_async()/
+// pause_async() invoke the callback before returning, on the caller's own
+// thread, same as any other never-connected VehicleMission path here.
+TEST_F(VehicleMissionTest, StartAsyncAndPauseAsyncFailWithoutConnection) {
+    std::optional<mavsdk::Mission::Result> start_result;
+    mission_.start_async([&](const mavsdk::Mission::Result result) { start_result = result; });
+    ASSERT_TRUE(start_result.has_value());
+    EXPECT_EQ(*start_result, mavsdk::Mission::Result::NoSystem);
+
+    std::optional<mavsdk::Mission::Result> pause_result;
+    mission_.pause_async([&](const mavsdk::Mission::Result result) { pause_result = result; });
+    ASSERT_TRUE(pause_result.has_value());
+    EXPECT_EQ(*pause_result, mavsdk::Mission::Result::NoSystem);
+}
+
 TEST_F(VehicleMissionTest, NotifyInterruptedFalseWhenNothingUploaded) {
     EXPECT_FALSE(mission_.notify_interrupted());
 }

@@ -105,6 +105,28 @@ mavsdk::Mission::Result VehicleMission::pause() const {
     return log_result("pause mission", mission_->pause_mission());
 }
 
+void VehicleMission::start_async(mavsdk::Mission::ResultCallback callback) const {
+    if (!ensure_mission()) {
+        callback(mavsdk::Mission::Result::NoSystem);
+        return;
+    }
+    mission_->start_mission_async(
+        [callback = std::move(callback)](const mavsdk::Mission::Result result) {
+            callback(log_result("start mission", result));
+        });
+}
+
+void VehicleMission::pause_async(mavsdk::Mission::ResultCallback callback) const {
+    if (!ensure_mission()) {
+        callback(mavsdk::Mission::Result::NoSystem);
+        return;
+    }
+    mission_->pause_mission_async(
+        [callback = std::move(callback)](const mavsdk::Mission::Result result) {
+            callback(log_result("pause mission", result));
+        });
+}
+
 void VehicleMission::enqueue_upload(karshipta::v1::Mission mission) {
     {
         std::lock_guard lock(queue_mutex_);

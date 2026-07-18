@@ -44,8 +44,9 @@ to poll, the same way it already polls `TelemetryInfo`.
   `VehicleMission` never references `VehicleActions`.
 - **Dispatching `StartMissionCommand`/`PauseMissionCommand`, or deciding
   between a mission-aware pause and a manual hold.** `CommandExecutor`'s
-  job; it calls `start()`/`pause()` directly, synchronously, from its own
-  worker thread. `VehicleMission` never references `CommandExecutor`.
+  job; it calls `start_async()`/`pause_async()` from its own worker thread
+  and waits for their result itself (gateway issue #69). `VehicleMission`
+  never references `CommandExecutor`.
 - **`MissionRaw` and mission file import (QGC/Mission Planner).**
   `MissionImporter`'s job (`gateway/docs/mission-importer.md`); this class
   only ever executes an already-valid proto `Mission`, however it was
@@ -63,8 +64,10 @@ to poll, the same way it already polls `TelemetryInfo`.
 | `static std::string result_name(mavsdk::Mission::Result)` | Human-readable text for a `Mission::Result`. |
 | `void enqueue_upload(karshipta::v1::Mission)` | Non-blocking. Queues an upload job for the worker thread. Outcome (success or a rejection reason) is read later via `take_upload_result()`. |
 | `void enqueue_download()` | Non-blocking. Queues a request to download the mission currently on the vehicle. Outcome is read later via `take_download_result()`. Does not touch repeat-pass/interrupted/pending-RTL state. |
-| `mavsdk::Mission::Result start() const` | Implements `StartMissionCommand`. Blocking but fast; a mission must already be uploaded. |
-| `mavsdk::Mission::Result pause() const` | Implements the mission-aware branch of `PauseMissionCommand`. Blocking but fast. |
+| `mavsdk::Mission::Result start() const` | Blocking counterpart of `start_async()` (kept for direct callers/tests; `CommandExecutor` does not use it, see issue #69 below). A mission must already be uploaded. |
+| `mavsdk::Mission::Result pause() const` | Blocking counterpart of `pause_async()`, same rationale. |
+| `void start_async(mavsdk::Mission::ResultCallback) const` | Implements `StartMissionCommand` (gateway issue #69). Non-blocking: fires `start_mission_async()` and returns immediately; `callback` runs on whichever thread MAVSDK invokes it from, not the caller's. Calls `callback(Mission::Result::NoSystem)` synchronously, on the caller's thread, if no connection exists yet. |
+| `void pause_async(mavsdk::Mission::ResultCallback) const` | Implements the mission-aware branch of `PauseMissionCommand`. Same non-blocking/callback-thread/no-connection behavior as `start_async()`. |
 | `karshipta::v1::MissionProgress get_progress() const` | Non-blocking cached read of the latest progress. Default (empty `mission_id`, `finished=false`) until an upload has actually succeeded. |
 | `bool notify_interrupted()` | Marks the current mission interrupted if one is active; returns `false` (no-op) otherwise. Idempotent. |
 | `bool take_pending_return_to_launch()` | Test-and-clear: `true` at most once, when the final pass of an RTL-terminated mission completes. |
@@ -190,6 +193,31 @@ upload succeeds (`run_upload_worker()`, not only from the first
 `get_progress()`'s own documented default — behave correctly from the
 moment of upload, not only after the first progress frame arrives.
 
+## Design: start_async()/pause_async() (gateway issue #69)
+
+`start_mission()`/`pause_mission()` are documented blocking by MAVSDK, and
+unlike `upload_mission()`/`download_mission()`, the `Mission` plugin has no
+`cancel_mission_start()`/`cancel_mission_pause()` counterpart at all to
+interrupt one in flight. Before `start_async()`/`pause_async()` existed,
+`CommandExecutor`'s worker thread called `start()`/`pause()` directly:
+if the underlying MAVLink command ack never arrived (a dead link), that
+call had no way to return, and neither did the worker thread's `jthread`
+join at shutdown.
+
+`start_async()`/`pause_async()` wrap `start_mission_async()`/
+`pause_mission_async()` instead: `ensure_mission()`'s not-yet-connected case
+still resolves synchronously (same immediate `NoSystem` as the blocking
+pair), but a real call now returns to the caller immediately, with the
+`Result` delivered later via `callback` on whatever thread MAVSDK's own I/O
+invokes it from. This mirrors `handle_progress()`'s existing
+`start_mission_async()` re-trigger call, which already accepts a
+fire-and-forget callback for the same reason.
+
+The wait for that callback's result now belongs to the caller
+(`CommandExecutor`, see `command-executor.md`'s Threading section), not to
+this class: `start_async()`/`pause_async()` themselves never block and
+never wait on anything, they only fire the MAVSDK call and return.
+
 ## Thread safety
 
 - `init_mutex_` guards the one-time lazy construction in `ensure_mission()`.
@@ -228,16 +256,26 @@ explicit VehicleMission(VehicleConnection& connection);
 ## Constraints and preconditions
 
 - **Requires a successful `VehicleConnection::connect()` before any real
-  work happens.** `start()`/`pause()` return `Mission::Result::NoSystem` if
-  not yet connected; a queued upload records the same result via
-  `take_upload_result()` rather than ever calling MAVSDK.
+  work happens.** `start()`/`pause()`/`start_async()`/`pause_async()` all
+  resolve to `Mission::Result::NoSystem` if not yet connected (the async
+  pair via an immediate, synchronous callback); a queued upload records the
+  same result via `take_upload_result()` rather than ever calling MAVSDK.
 - **Does not rebind across reconnects**, same as `TelemetryInfo`.
-- **`start()`/`pause()` are not queued.** They are fast MAVSDK calls (no
-  data transfer), called directly and synchronously by `CommandExecutor`'s
-  own worker thread — only `enqueue_upload()` goes through this class's own
-  queue.
-- **A mission must be uploaded before `start()`.** This class does not
-  enforce that itself; MAVSDK's own `Result` reflects it.
+- **`start_async()`/`pause_async()` are not queued**, same as their blocking
+  counterparts. Fast MAVSDK calls (no data transfer) fired directly by
+  `CommandExecutor`'s own worker thread, which then waits for the result
+  itself (`command_executor.cpp`'s `wait_for_mission_result()`) rather than
+  blocking inside this class's call — only `enqueue_upload()`/
+  `enqueue_download()` go through this class's own queue.
+- **The async callback must not assume anything about the caller's
+  lifetime.** It can run on a MAVSDK-internal thread after the caller has
+  stopped waiting for it (a `CommandExecutor` shutdown mid-flight) or after
+  the caller itself no longer exists; `start_async()`/`pause_async()`
+  themselves only ever call `log_result()` (static, thread-safe) and the
+  caller's own callback, never touching `VehicleMission` state from the
+  callback body.
+- **A mission must be uploaded before `start()`/`start_async()`.** This
+  class does not enforce that itself; MAVSDK's own `Result` reflects it.
 
 ## Automated tests
 
@@ -246,8 +284,9 @@ deliberately-unconnected-`VehicleConnection` strategy `command_executor_test.cpp
 uses for `VehicleActions`: validation rejections (empty `vehicle_id`, empty
 items, non-terminal RTL) are covered directly since they never touch
 MAVSDK; a well-formed RTL-terminated mission is confirmed to pass
-validation and fail at `NoSystem` instead; `start()`/`pause()`/`enqueue_download()`
-all fail fast without a connection; the accessor defaults (including
+validation and fail at `NoSystem` instead; `start()`/`pause()`/
+`start_async()`/`pause_async()`/`enqueue_download()` all fail fast without a
+connection; the accessor defaults (including
 `take_download_result()`) and the destructor's queue-dropping behavior are
 covered. Actual upload/download/progress/repeat-loop behavior against a live MAVLink
 mission handshake is **not** exercised — there is no MAVSDK server-plugin
