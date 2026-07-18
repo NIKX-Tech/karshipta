@@ -19,7 +19,9 @@ and fleet persistence are all facade methods on this class.
 - Register/deregister vehicles by `vehicle_id`, building and tearing down each
   one's object graph (`add_vehicle`/`remove_vehicle`, and the wire-facing
   `handle_add_vehicle`/`handle_remove_vehicle` that answer a console's
-  `AddVehicle`/`RemoveVehicle` with a `VehicleConfigAck`).
+  `AddVehicle`/`RemoveVehicle` with a `VehicleConfigAck`, and, on success,
+  broadcast an INFO `VEHICLE_ADDED`/`VEHICLE_REMOVED` `Event` so every
+  connected console, not just the requester, learns the fleet changed).
 - Persist the fleet to disk after every successful add/remove, and reload it
   at boot (`load_persisted`/`restore_and_start`) so a gateway that crashes or
   restarts while a vehicle is airborne reconnects to it instead of forgetting
@@ -111,6 +113,12 @@ generated `fleet_state.yaml` itself is gitignored.
   waits while connected, and on drop broadcasts a WARNING `LINK_LOST` `Event`
   before reconnecting (not on a deliberate `stop()`/`force_stop()` - the loop
   only emits `LINK_LOST` when the drop wasn't requested).
+- `handle_add_vehicle()`/`handle_remove_vehicle()` broadcast an INFO
+  `VEHICLE_ADDED`/`VEHICLE_REMOVED` `Event` (`broadcast_fleet_event()`) on
+  their accepted path only, same no-lock-held pattern as
+  `broadcast_command_ack()`/`broadcast_link_event()`. A rejection is answered
+  by the `VehicleConfigAck` alone: nothing about the fleet actually changed
+  for another console to learn about.
 - One shared `publish_worker_` (not one per vehicle: the per-tick work is
   cheap cached-getter reads, not I/O, so batching it on one thread is simpler
   and just as fast) builds every vehicle's `VehicleState` under the lock, then
@@ -136,9 +144,11 @@ generated `fleet_state.yaml` itself is gitignored.
 
 ## Automated tests
 
-`gateway/tests/vehicle/vehicle_manager_test.cpp` (GoogleTest, no SITL/Docker -
-`add_vehicle`/`load_persisted` never call `connect()`), against a `FakeTransport`
-that records `broadcast()`/`send()` calls instead of touching a real socket:
+`gateway/tests/vehicle/vehicle_manager_test.cpp` (GoogleTest, no SITL/Docker
+container - most tests never call `connect()` at all, and the ones that do
+connect to an in-process fake `Mavsdk` core over loopback instead), against a
+`FakeTransport` that records `broadcast()`/`send()` calls instead of touching
+a real socket:
 
 - `AddVehicleRegistersAndListsId`, `AddVehicleRejectsEmptyId`,
   `AddVehicleRejectsDuplicateId`, `AddVehicleRejectsDuplicateSystemId`.
@@ -151,6 +161,20 @@ that records `broadcast()`/`send()` calls instead of touching a real socket:
   rejected (proves `system_id` itself survived the round trip).
 - `RemovePersistsRemoval`, `LoadPersistedOnMissingFileReturnsZero`,
   `MalformedEntryIsSkippedNotFatal`, `LoadPersistedDoesNotRewriteFile`.
+- `HandleAddVehicleAcceptsPersistsStartsAndEmitsEvent`: an `AddVehicle`
+  request is ACCEPTED, persisted, starts the reconnect worker, and broadcasts
+  a `VEHICLE_ADDED` `Event`.
+- `HandleAddVehicleRejectsDuplicateIdWithReasonAndNoEvent`,
+  `HandleRemoveVehicleRejectsUnknownVehicleWithReason`: REJECTED acks carry a
+  reason and broadcast no fleet-change `Event`.
+- `HandleRemoveVehicleAcceptsPersistsRemovalAndEmitsEvent`: mirrors the add
+  case for `RemoveVehicle`.
+- `HandleRemoveVehicleRejectsWhileAirborne`: against a `FakeInAirAutopilot` (a
+  second in-process `Mavsdk` core, same "fake autopilot" pattern as
+  `vehicle_connection_test.cpp`, that continuously republishes
+  `EXTENDED_SYS_STATE`/`InAir` via the `TelemetryServer` plugin) - a real
+  connect, then a `RemoveVehicle` for a genuinely airborne vehicle comes back
+  REJECTED ("vehicle is in the air") and the vehicle stays registered.
 
 ## Manual verification
 

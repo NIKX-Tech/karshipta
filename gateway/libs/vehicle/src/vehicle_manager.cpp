@@ -508,6 +508,22 @@ void VehicleManager::broadcast_mission_download(const karshipta::v1::Mission& mi
     transport_.broadcast(serialize_envelope(envelope));
 }
 
+void VehicleManager::broadcast_fleet_event(const std::string& vehicle_id, bool added) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_vehicle_id(vehicle_id);
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_INFO);
+    if (added) {
+        event->set_code("VEHICLE_ADDED");
+        event->set_message("vehicle added to fleet");
+    } else {
+        event->set_code("VEHICLE_REMOVED");
+        event->set_message("vehicle removed from fleet");
+    }
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
 bool VehicleManager::start(const std::string& vehicle_id) {
     std::lock_guard lock(vehicles_mutex_);
     auto* vehicle = find_locked(vehicle_id);
@@ -1117,6 +1133,7 @@ karshipta::v1::VehicleConfigAck VehicleManager::handle_add_vehicle(
     } else {
         ack.set_status(karshipta::v1::VEHICLE_CONFIG_STATUS_ACCEPTED);
         ack.set_message("connection attempt underway");
+        broadcast_fleet_event(cfg.vehicle_id, /*added=*/true);
     }
     return ack;
 }
@@ -1135,6 +1152,7 @@ karshipta::v1::VehicleConfigAck VehicleManager::handle_remove_vehicle(
     } else {
         ack.set_status(karshipta::v1::VEHICLE_CONFIG_STATUS_ACCEPTED);
         ack.set_message("vehicle removed");
+        broadcast_fleet_event(request.vehicle_id(), /*added=*/false);
     }
     return ack;
 }

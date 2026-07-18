@@ -1,14 +1,17 @@
 #include "vehicle_manager.h"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <mavsdk/plugins/telemetry_server/telemetry_server.h>
 
 #include <karshipta/v1/envelope.pb.h>
 
@@ -76,6 +79,38 @@ std::string read_file(const std::filesystem::path& path) {
     out << in.rdbuf();
     return out.str();
 }
+
+// Stands in for PX4 SITL, reporting itself permanently airborne: an
+// independent Mavsdk core that heartbeats as an autopilot (same pattern as
+// vehicle_connection_test.cpp's make_fake_autopilot) and continuously
+// republishes EXTENDED_SYS_STATE/InAir over its outbound connection, so
+// VehicleManager's ground-safety guard (verify_grounded_and_disarm) sees a
+// vehicle it must refuse to remove regardless of when the client's
+// TelemetryInfo subscribes relative to any single publish call.
+class FakeInAirAutopilot {
+public:
+    FakeInAirAutopilot(uint8_t system_id, uint16_t port)
+        : core_(std::make_shared<mavsdk::Mavsdk>(
+              mavsdk::Mavsdk::Configuration{system_id, /*component_id=*/1,
+                                             /*always_send_heartbeats=*/true})),
+          telemetry_server_(core_->server_component()) {
+        const auto result = core_->add_any_connection("udpout://127.0.0.1:" + std::to_string(port));
+        EXPECT_EQ(result, mavsdk::ConnectionResult::Success);
+        publisher_ = std::jthread([this](const std::stop_token& stop_token) {
+            while (!stop_token.stop_requested()) {
+                telemetry_server_.publish_extended_sys_state(
+                    mavsdk::TelemetryServer::VtolState::Undefined,
+                    mavsdk::TelemetryServer::LandedState::InAir);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+    }
+
+private:
+    std::shared_ptr<mavsdk::Mavsdk> core_;
+    mavsdk::TelemetryServer telemetry_server_;
+    std::jthread publisher_;
+};
 
 // Base fixture: a shared Mavsdk core and a FakeTransport, matching
 // command_executor_test.cpp's "never-connected vehicle" pattern - nothing
@@ -314,4 +349,132 @@ TEST_F(VehicleManagerPersistenceTest, LoadPersistedDoesNotRewriteFile) {
     const auto after = read_file(path_);
 
     EXPECT_EQ(before, after);
+}
+
+namespace {
+
+// First Event among broadcast_envelopes() with this code, if any.
+std::optional<karshipta::v1::Event> find_event(
+    const std::vector<karshipta::v1::Envelope>& envelopes, const std::string& code) {
+    for (const auto& envelope : envelopes) {
+        if (envelope.has_event() && envelope.event().code() == code) {
+            return envelope.event();
+        }
+    }
+    return std::nullopt;
+}
+
+karshipta::v1::AddVehicle make_add_request(const std::string& request_id,
+                                            const std::string& vehicle_id,
+                                            const std::string& connection_url,
+                                            uint32_t mavlink_system_id = 0) {
+    karshipta::v1::AddVehicle request;
+    request.set_request_id(request_id);
+    request.set_vehicle_id(vehicle_id);
+    request.set_connection_url(connection_url);
+    request.set_mavlink_system_id(mavlink_system_id);
+    return request;
+}
+
+karshipta::v1::RemoveVehicle make_remove_request(const std::string& request_id,
+                                                  const std::string& vehicle_id) {
+    karshipta::v1::RemoveVehicle request;
+    request.set_request_id(request_id);
+    request.set_vehicle_id(vehicle_id);
+    return request;
+}
+
+}  // namespace
+
+TEST_F(VehicleManagerPersistenceTest, HandleAddVehicleAcceptsPersistsStartsAndEmitsEvent) {
+    auto manager = make_manager(path_);
+
+    const auto ack =
+        manager.handle_add_vehicle(make_add_request("req-1", "alpha-1", "udpin://127.0.0.1:25290"));
+
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.vehicle_id(), "alpha-1");
+    EXPECT_EQ(ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_ACCEPTED);
+
+    const auto ids = manager.list_vehicle_ids();
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(ids.front(), "alpha-1");
+    EXPECT_TRUE(manager.is_started("alpha-1"));  // reconnect-forever underway
+
+    EXPECT_NE(read_file(path_).find("alpha-1"), std::string::npos);
+
+    const auto event = find_event(transport_.broadcast_envelopes(), "VEHICLE_ADDED");
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->vehicle_id(), "alpha-1");
+    EXPECT_EQ(event->severity(), karshipta::v1::SEVERITY_INFO);
+}
+
+TEST_F(VehicleManagerTest, HandleAddVehicleRejectsDuplicateIdWithReasonAndNoEvent) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_vehicle(make_config("alpha-1", "udpin://127.0.0.1:24991")));
+
+    const auto ack = manager.handle_add_vehicle(
+        make_add_request("req-2", "alpha-1", "udpin://127.0.0.1:24992"));
+
+    EXPECT_EQ(ack.request_id(), "req-2");
+    EXPECT_EQ(ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("already registered"), std::string::npos);
+    EXPECT_FALSE(find_event(transport_.broadcast_envelopes(), "VEHICLE_ADDED").has_value());
+}
+
+TEST_F(VehicleManagerTest, HandleRemoveVehicleRejectsUnknownVehicleWithReason) {
+    auto manager = make_manager();
+
+    const auto ack = manager.handle_remove_vehicle(make_remove_request("req-3", "ghost"));
+
+    EXPECT_EQ(ack.request_id(), "req-3");
+    EXPECT_EQ(ack.vehicle_id(), "ghost");
+    EXPECT_EQ(ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("unknown"), std::string::npos);
+    EXPECT_FALSE(find_event(transport_.broadcast_envelopes(), "VEHICLE_REMOVED").has_value());
+}
+
+TEST_F(VehicleManagerPersistenceTest, HandleRemoveVehicleAcceptsPersistsRemovalAndEmitsEvent) {
+    auto manager = make_manager(path_);
+    ASSERT_TRUE(manager.add_vehicle(make_config("alpha-1", "udpin://127.0.0.1:24991", 5)));
+    ASSERT_NE(read_file(path_).find("alpha-1"), std::string::npos);
+
+    const auto ack = manager.handle_remove_vehicle(make_remove_request("req-4", "alpha-1"));
+
+    EXPECT_EQ(ack.request_id(), "req-4");
+    EXPECT_EQ(ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_ACCEPTED);
+    EXPECT_TRUE(manager.list_vehicle_ids().empty());
+    EXPECT_EQ(read_file(path_).find("alpha-1"), std::string::npos);
+
+    const auto event = find_event(transport_.broadcast_envelopes(), "VEHICLE_REMOVED");
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->vehicle_id(), "alpha-1");
+}
+
+TEST_F(VehicleManagerTest, HandleRemoveVehicleRejectsWhileAirborne) {
+    constexpr uint16_t port = 25291;
+    constexpr uint8_t system_id = 42;
+    FakeInAirAutopilot fake(system_id, port);
+
+    auto manager = make_manager();
+    const auto add_ack = manager.handle_add_vehicle(make_add_request(
+        "req-add", "alpha-air", "udpin://127.0.0.1:" + std::to_string(port), system_id));
+    ASSERT_EQ(add_ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_ACCEPTED);
+
+    bool connected = false;
+    for (int attempt = 0; attempt < 100 && !connected; ++attempt) {
+        connected = manager.is_connected("alpha-air");
+        if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(connected) << "fake autopilot never discovered";
+    // The fake republishes InAir every 50ms; give the client's TelemetryInfo a
+    // moment to have received at least one of those since connecting.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const auto remove_ack =
+        manager.handle_remove_vehicle(make_remove_request("req-remove", "alpha-air"));
+
+    EXPECT_EQ(remove_ack.status(), karshipta::v1::VEHICLE_CONFIG_STATUS_REJECTED);
+    EXPECT_NE(remove_ack.message().find("air"), std::string::npos) << remove_ack.message();
+    EXPECT_EQ(manager.list_vehicle_ids().size(), 1u);  // still registered, not removed
 }

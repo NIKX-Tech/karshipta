@@ -24,6 +24,32 @@ deploy/      docker-compose demo, SITL configs
 docs/        architecture, quickstart
 ```
 
+## Commands
+
+Proto (validate a schema change before it lands; mirrors CI):
+```
+protoc -I proto --descriptor_set_out=/dev/null proto/karshipta/v1/*.proto
+```
+
+Console (`console/`; regenerate types after any `.proto` change):
+```
+npm install && npm run proto:gen
+npm run dev -- --open   # dev server, standalone simulated fleet
+npm run build
+npm run check           # svelte-kit sync + svelte-check (strict TS)
+npm run lint             # prettier --check + eslint
+```
+
+Gateway (`gateway/`):
+```
+cmake -S gateway -B gateway/build
+cmake --build gateway/build
+./gateway/build/src/karshipta_gateway   # needs PX4 SITL running, see docs/quickstart.md
+```
+Tests are off by default (`-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`; `-R <name>` runs one). Platform-specific setup (Windows vendoring, WSL toolchain) is in `docs/quickstart-windows.md` and each component's own `CLAUDE.local.md` — don't re-derive it from scratch.
+
+CI (`.github/workflows/ci.yml`) runs a `proto`, a `console`, and a `gateway` job (gcc + clang matrix) on every push.
+
 ## Current phase
 
 MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` (gateway M1 to M6) and `docs/architecture.md`. Do not scaffold features beyond the current milestone.
