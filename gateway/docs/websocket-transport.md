@@ -85,28 +85,48 @@ websocket:
   host: 127.0.0.1
   port: 8765
   allow_lan_bind: false
+  container_bind: false
 ```
 
 - A missing config file, or `websocket` section, falls back to
   `(127.0.0.1, 8765)`.
 - A `host` that is not exactly `127.0.0.1`, `localhost`, or `::1` (this
   includes `0.0.0.0`, and any specific LAN address) is treated as a wider
-  bind and gated by `allow_lan_bind`:
-  - `allow_lan_bind: false` (the default): the requested host is **ignored**
-    and the transport binds to `127.0.0.1` anyway, with a logged warning
-    explaining why and how to opt in.
+  bind and gated by `allow_lan_bind` and `container_bind`, checked in that
+  order:
   - `allow_lan_bind: true`: the requested host is honored, but every startup
     logs a loud `SECURITY:`-prefixed warning that the resulting server is
     unauthenticated and reachable from other machines.
+  - `container_bind: true`, and this process detects it is actually running
+    inside a container (checks for `/.dockerenv`): the requested host is
+    honored, with a narrower logged warning. This exists for the
+    `deploy/docker-compose.yml` demo (`deploy/gateway-config.yaml`): a
+    container's own loopback is not reachable from the host at all, so the
+    `127.0.0.1` default is unusable there, but the resulting bind is still
+    only reachable through whatever ports the container runtime publishes
+    to the host, not directly from the LAN the way `allow_lan_bind` is
+    reachable from other machines. Requesting `container_bind: true` while
+    not actually running in a container (e.g. that config file copied to a
+    bare-metal run) is ignored, with a logged warning, and falls back to
+    `127.0.0.1` like the default case below.
+  - Neither escape hatch set (the default): the requested host is
+    **ignored** and the transport binds to `127.0.0.1` anyway, with a
+    logged warning explaining why and how to opt in.
 - **Cross-machine access is meant to go through `RelayTransport` instead**
   (`gateway/docs/relay-transport.md`), not a LAN-exposed plain websocket.
   `allow_lan_bind` exists for cases (LAN testing, a trusted isolated
   network) where that is not yet practical, not as the recommended path.
+  `container_bind` is narrower still: it is meant only for the
+  docker-compose demo, not as a general substitute for `allow_lan_bind`.
 
 This policy lives in `from_config()`, not the plain constructor: the
 constructor still binds wherever it is told, unconditionally, since tests
 construct `WebsocketTransport` directly against `127.0.0.1` on ephemeral
 ports and should not go through config-file loading to do it.
+`from_config()` also takes an injectable `is_in_container` predicate
+(defaulting to the free function `is_running_in_container()`) purely so
+tests can assert both branches of the container check without depending on
+`/.dockerenv`.
 
 ## Design: mapping IXWebSocket connections to `ClientId`
 

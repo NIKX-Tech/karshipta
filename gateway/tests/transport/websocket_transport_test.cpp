@@ -209,3 +209,40 @@ TEST(WebsocketTransportFromConfig, LanBindWithEscapeHatchIsHonored) {
 
     std::filesystem::remove(path);
 }
+
+TEST(WebsocketTransportFromConfig, ContainerBindHonoredWhenDetectedAsContainer) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "karshipta_gateway_test_container_bind.yaml";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "websocket:\n";
+        out << "  host: 0.0.0.0\n";
+        out << "  port: 8765\n";
+        out << "  container_bind: true\n";
+    }
+
+    const auto transport = WebsocketTransport::from_config(path.string(), [] { return true; });
+
+    EXPECT_EQ(transport->host(), "0.0.0.0");
+    EXPECT_EQ(transport->port(), 8765);
+
+    std::filesystem::remove(path);
+}
+
+TEST(WebsocketTransportFromConfig, ContainerBindFallsBackToLoopbackOutsideContainer) {
+    const auto path = std::filesystem::temp_directory_path() /
+                       "karshipta_gateway_test_container_bind_not_container.yaml";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "websocket:\n";
+        out << "  host: 0.0.0.0\n";
+        out << "  port: 8765\n";
+        out << "  container_bind: true\n";
+    }
+
+    const auto transport = WebsocketTransport::from_config(path.string(), [] { return false; });
+
+    EXPECT_EQ(transport->host(), "127.0.0.1");
+
+    std::filesystem::remove(path);
+}

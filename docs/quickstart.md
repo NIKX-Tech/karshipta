@@ -1,9 +1,11 @@
 # Quickstart: run the console against a real simulated vehicle
 
-The one-command `docker compose up` demo lands with gateway M6. Until then,
-this is how to run the same three pieces by hand: a PX4 SITL vehicle, the
-C++ gateway (M1 to M3 are done: connect, telemetry, commands), and the
-console. Fifteen minutes the first time, since the gateway needs a build.
+As of gateway M6, `docker compose -f deploy/docker-compose.yml up` starts
+three PX4 SITL vehicles and the gateway in one step (see the README's
+"one-command demo"). This page is the alternative: running the same pieces
+by hand, useful for gateway development itself or when you don't want
+Docker in the loop. Fifteen minutes the first time, since the gateway needs
+a build.
 
 If you only want the console with a simulated fleet and no real vehicle,
 the README's quickstart is enough; skip this page.

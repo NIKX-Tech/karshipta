@@ -44,7 +44,7 @@ Early development, pre-release. The roadmap to v0.1 is in [ROADMAP.md](ROADMAP.m
 | `proto/` protobuf contract | ✅ v1 schema defined |
 | `console/` web dashboard | 🚧 live map, commands, missions, simulated fleet |
 | `gateway/` MAVLink edge service | 🚧 connect, telemetry, commands done (M1 to M3); multi-vehicle and missions next (M4 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
-| `deploy/` one-command demo | 🚧 SITL containers ready, services land with their Dockerfiles (M6) |
+| `deploy/` one-command demo | 🚧 SITL + gateway containers up (M6); console joins with its own Dockerfile next (C6) |
 
 ## Try the console
 
@@ -65,16 +65,25 @@ your hardware. Everything from there is one click:
   panel (top bar) walks you to it, or see [docs/quickstart.md](docs/quickstart.md)
   to run one against PX4 SITL.
 
-## The one-command demo (coming with v0.1)
+## The one-command demo
 
 ```bash
-docker compose up
+docker compose -f deploy/docker-compose.yml up
 ```
 
-Today that starts three PX4 SITL vehicles only; the gateway and console join
-the compose file when their Dockerfiles land (M6/C6), at which point this
-command plus opening the console and clicking "Add simulated vehicle" is the
-whole demo.
+This starts three PX4 SITL vehicles and the gateway, which connects to
+`sitl-1` and serves it over `ws://localhost:8765`, the same port a natively
+run gateway uses. In a separate terminal, start the console against it:
+
+```bash
+cd console
+npm install && npm run proto:gen
+PUBLIC_GATEWAY_WS_URL=ws://localhost:8765 npm run dev -- --open
+```
+
+The console starts pointed at that gateway, `sitl-1` live instead of the
+fake fleet. The console itself doesn't join the compose file until it has
+its own Dockerfile (C6); until then this is a two-command demo, not one.
 
 ## Architecture
 
