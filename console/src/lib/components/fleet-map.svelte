@@ -35,6 +35,39 @@
 	// landing on the map is immediately losing your bearings.
 	const INITIAL_ZOOM = 11;
 
+	// All free, no API key: CARTO for dark/light (the pair already used for
+	// the rest of the UI's own light/dark tokens - the map can follow
+	// independently of the app chrome, which stays dark-only), Esri World
+	// Imagery for satellite (the standard no-key choice for this, widely
+	// used for exactly this purpose). Esri's tile scheme is z/y/x, not the
+	// usual z/x/y - easy to get backwards.
+	type BasemapStyle = 'dark' | 'light' | 'satellite';
+	const BASEMAP_TILES: Record<BasemapStyle, string[]> = {
+		dark: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
+		light: ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'],
+		satellite: [
+			'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+		]
+	};
+	const BASEMAP_LABELS: Record<BasemapStyle, string> = {
+		dark: 'Dark',
+		light: 'Light',
+		satellite: 'Satellite'
+	};
+	// One combined attribution covering every basemap this control can
+	// switch to, set once at source creation: MapLibre's RasterTileSource
+	// has no setAttribution() to go with setTiles(), and rewriting it on
+	// every switch isn't worth the complexity this saves - showing all
+	// three credits regardless of which is currently active is a common,
+	// acceptable tradeoff other map apps make too.
+	const BASEMAP_ATTRIBUTION =
+		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics';
+	let basemapStyle = $state<BasemapStyle>('dark');
+
+	let showGeozones = $state(true);
+	let layersMenuOpen = $state(false);
+	let layersMenuEl: HTMLDivElement | undefined;
+
 	interface MarkerHandle {
 		marker: maplibregl.Marker;
 		body: HTMLElement;
@@ -173,9 +206,9 @@
 					sources: {
 						basemap: {
 							type: 'raster',
-							tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
+							tiles: BASEMAP_TILES[basemapStyle],
 							tileSize: 256,
-							attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+							attribution: BASEMAP_ATTRIBUTION
 						}
 					},
 					layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }]
@@ -186,6 +219,11 @@
 			mapError = error instanceof Error ? error.message : String(error);
 			return;
 		}
+		// Zoom in/out + a compass that resets bearing/pitch to north-up on
+		// click - MapLibre's own control, just recolored (see the :global
+		// style block below) to match the rest of the UI instead of its
+		// default white box.
+		created.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
 		created.on('click', (event) => {
 			if (fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId) {
 				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
@@ -311,6 +349,48 @@
 		const planning =
 			fleet.missionDraft?.vehicleId === fleet.selectedVehicleId && fleet.missionDraft;
 		map.getCanvas().style.cursor = fleet.gotoArming || planning ? 'crosshair' : '';
+	});
+
+	// swap the raster tile source in place on basemapStyle change - cheaper
+	// than map.setStyle(), which tears down and rebuilds every source/layer
+	// (route, geozones, markers) this component owns, not just the basemap
+	$effect(() => {
+		const activeMap = map;
+		const style = basemapStyle;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.RasterTileSource>('basemap');
+		source?.setTiles(BASEMAP_TILES[style]);
+	});
+
+	// no-fly-zone layer visibility, independent of whether zones are loaded
+	// at all (geozoneStore.active, gated on the control below even
+	// existing) - a viewer who doesn't want the clutter can turn it off
+	// without losing the underlying data/fetches
+	$effect(() => {
+		const activeMap = map;
+		const visible = showGeozones;
+		if (!activeMap || !mapLoaded) return;
+		const visibility = visible ? 'visible' : 'none';
+		activeMap.setLayoutProperty(GEOZONE_FILL_LAYER, 'visibility', visibility);
+		activeMap.setLayoutProperty(GEOZONE_LINE_LAYER, 'visibility', visibility);
+	});
+
+	// close the layers menu on an outside click or Escape, same convention
+	// as any other dismissable popover in this app
+	$effect(() => {
+		if (!layersMenuOpen) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (layersMenuEl && !layersMenuEl.contains(event.target as Node)) layersMenuOpen = false;
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') layersMenuOpen = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
 	});
 
 	// push loaded airspace zones into their source whenever the store updates
@@ -459,7 +539,70 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
-	{#if geozoneStore.active}
+
+	<!--
+		Top-left, opposite the zoom/compass cluster (top-right, MapLibre's own
+		NavigationControl) rather than stacked with it - two separate,
+		spatially distinct control clusters read as less cluttered than one
+		crowded corner, which is the whole point given how easily map chrome
+		turns "disturbing".
+	-->
+	<div bind:this={layersMenuEl} class="absolute top-3 left-3">
+		<button
+			type="button"
+			onclick={() => (layersMenuOpen = !layersMenuOpen)}
+			aria-expanded={layersMenuOpen}
+			aria-label="Map layers"
+			class="border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg flex h-8 w-8 items-center justify-center rounded border"
+		>
+			<svg
+				width="15"
+				height="15"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linejoin="round"
+			>
+				<path d="M12 3 L21 8 L12 13 L3 8 Z" />
+				<path d="M3 12 L12 17 L21 12" stroke-linecap="round" />
+				<path d="M3 16 L12 21 L21 16" stroke-linecap="round" />
+			</svg>
+		</button>
+		{#if layersMenuOpen}
+			<div
+				class="border-edge bg-panel/95 absolute top-9 left-0 flex w-40 flex-col gap-3 rounded border p-2.5"
+			>
+				<div>
+					<p class="text-fg-muted mb-1.5 text-[9px] font-medium tracking-widest">BASEMAP</p>
+					<div class="flex flex-col gap-0.5">
+						{#each Object.keys(BASEMAP_LABELS) as style (style)}
+							<button
+								type="button"
+								onclick={() => (basemapStyle = style as BasemapStyle)}
+								aria-pressed={basemapStyle === style}
+								class="rounded px-2 py-1 text-left text-[11px] {basemapStyle === style
+									? 'bg-accent/15 text-accent'
+									: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
+							>
+								{BASEMAP_LABELS[style as BasemapStyle]}
+							</button>
+						{/each}
+					</div>
+				</div>
+				{#if geozoneStore.active}
+					<div class="border-edge border-t pt-2">
+						<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+							<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
+							No-fly zones
+						</label>
+					</div>
+				{/if}
+			</div>
+		{/if}
+	</div>
+
+	{#if geozoneStore.active && showGeozones}
 		<ul
 			class="border-edge bg-panel/90 absolute bottom-8 left-4 flex gap-3 rounded border px-2 py-1"
 			aria-label="Airspace zone legend"
@@ -479,3 +622,40 @@
 		</ul>
 	{/if}
 </div>
+
+<style>
+	/*
+	 * MapLibre's NavigationControl ships hard-coded for its own default
+	 * white button background (#333 icon glyphs baked into embedded SVG data
+	 * URIs, not recolorable via currentColor). :global() since MapLibre
+	 * injects these nodes directly via its own DOM APIs, not through this
+	 * component's template - Svelte's scoped-class attribute never reaches
+	 * them. filter:invert flips the dark icon light without touching the
+	 * vendor's asset; simplest fix that doesn't fork the library's SVGs.
+	 */
+	:global(.maplibregl-ctrl-group) {
+		background: var(--color-panel);
+		border: 1px solid var(--color-edge);
+		box-shadow: none;
+	}
+	:global(.maplibregl-ctrl-group button + button) {
+		border-top: 1px solid var(--color-edge);
+	}
+	:global(.maplibregl-ctrl-group button) {
+		background: transparent;
+	}
+	:global(.maplibregl-ctrl-group button:hover) {
+		background: rgb(255 255 255 / 0.05);
+	}
+	:global(.maplibregl-ctrl-icon) {
+		filter: invert(1) opacity(0.7);
+	}
+	:global(.maplibregl-ctrl-attrib) {
+		background: transparent !important;
+		color: var(--color-fg-muted) !important;
+		font-size: 10px !important;
+	}
+	:global(.maplibregl-ctrl-attrib a) {
+		color: var(--color-fg-muted) !important;
+	}
+</style>
