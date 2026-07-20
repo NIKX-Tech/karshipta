@@ -13,6 +13,7 @@ import {
 } from '$lib/gen/karshipta/v1/command';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
+import type { LatLon } from '$lib/geolocation';
 
 /**
  * Dev stand-in for the real gateway until its milestones land. Implements
@@ -43,8 +44,9 @@ export const FAKE_FLEET_CENTER = { lat: HOME_LAT_DEG, lon: HOME_LON_DEG };
 
 /** owner-facing contract for spawning/removing demo vehicles from the UI */
 export interface DemoEngine extends FleetTransport {
-	/** spawns one demo vehicle with a procedurally varied patrol; returns its id */
-	spawnVehicle(): string;
+	/** spawns one demo vehicle with a procedurally varied patrol centered at
+	 * `location` (defaults to FAKE_FLEET_CENTER); returns its id */
+	spawnVehicle(location?: LatLon): string;
 	despawnVehicle(vehicleId: string): void;
 }
 
@@ -54,6 +56,8 @@ interface VehicleSpec {
 	periodS: number;
 	cruiseAltM: number;
 	phaseRad: number;
+	homeLatDeg: number;
+	homeLonDeg: number;
 }
 
 const SPAWN_RADIUS_MIN_M = 50;
@@ -66,13 +70,15 @@ const SPAWN_ALT_STEP_M = 15;
 const SPAWN_PHASE_STEP_RAD = 2.4;
 
 /** procedurally varied patrol so each newly spawned demo vehicle looks distinct */
-function nextSpec(vehicleId: string, spawnIndex: number): VehicleSpec {
+function nextSpec(vehicleId: string, spawnIndex: number, home: LatLon): VehicleSpec {
 	return {
 		vehicleId,
 		radiusM: SPAWN_RADIUS_MIN_M + (spawnIndex % 4) * SPAWN_RADIUS_STEP_M,
 		periodS: SPAWN_PERIOD_MIN_S + (spawnIndex % 3) * SPAWN_PERIOD_STEP_S,
 		cruiseAltM: SPAWN_ALT_MIN_M + (spawnIndex % 5) * SPAWN_ALT_STEP_M,
-		phaseRad: (spawnIndex * SPAWN_PHASE_STEP_RAD) % (2 * Math.PI)
+		phaseRad: (spawnIndex * SPAWN_PHASE_STEP_RAD) % (2 * Math.PI),
+		homeLatDeg: home.lat,
+		homeLonDeg: home.lon
 	};
 }
 
@@ -171,9 +177,9 @@ export class FakeGateway implements DemoEngine {
 		this.spawnCount = 0;
 	}
 
-	spawnVehicle(): string {
+	spawnVehicle(location?: LatLon): string {
 		const vehicleId = `demo-${this.spawnCount + 1}`;
-		const spec = nextSpec(vehicleId, this.spawnCount);
+		const spec = nextSpec(vehicleId, this.spawnCount, location ?? FAKE_FLEET_CENTER);
 		this.spawnCount += 1;
 		this.vehicles.set(vehicleId, initialVehicle(spec));
 		this.onEnvelope({
@@ -323,8 +329,10 @@ export class FakeGateway implements DemoEngine {
 					break;
 				}
 				this.interruptMission(vehicle, 'goto command');
-				const northM = (target.latitudeDeg - HOME_LAT_DEG) * METERS_PER_DEG_LAT;
-				const eastM = (target.longitudeDeg - HOME_LON_DEG) * metersPerDegLon();
+				const northM = (target.latitudeDeg - vehicle.spec.homeLatDeg) * METERS_PER_DEG_LAT;
+				const eastM =
+					(target.longitudeDeg - vehicle.spec.homeLonDeg) *
+					metersPerDegLon(vehicle.spec.homeLatDeg);
 				const altM = target.altitudeRelM > 0 ? target.altitudeRelM : vehicle.altM;
 				vehicle.mode = FlightMode.FLIGHT_MODE_OFFBOARD;
 				this.setTarget(vehicle, command, northM, eastM, altM, action.goto.speedMS, 'hold');
@@ -463,8 +471,10 @@ export class FakeGateway implements DemoEngine {
 			this.advanceMission(vehicle);
 			return;
 		}
-		const northM = (item.position.latitudeDeg - HOME_LAT_DEG) * METERS_PER_DEG_LAT;
-		const eastM = (item.position.longitudeDeg - HOME_LON_DEG) * metersPerDegLon();
+		const northM = (item.position.latitudeDeg - vehicle.spec.homeLatDeg) * METERS_PER_DEG_LAT;
+		const eastM =
+			(item.position.longitudeDeg - vehicle.spec.homeLonDeg) *
+			metersPerDegLon(vehicle.spec.homeLatDeg);
 		const altM = item.position.altitudeRelM > 0 ? item.position.altitudeRelM : vehicle.altM;
 		vehicle.mode = FlightMode.FLIGHT_MODE_MISSION;
 		this.setTarget(
@@ -697,8 +707,8 @@ export class FakeGateway implements DemoEngine {
 	}
 }
 
-function metersPerDegLon(): number {
-	return METERS_PER_DEG_LAT * Math.cos((HOME_LAT_DEG * Math.PI) / 180);
+function metersPerDegLon(homeLatDeg: number): number {
+	return METERS_PER_DEG_LAT * Math.cos((homeLatDeg * Math.PI) / 180);
 }
 
 function headingFrom(north: number, east: number): number {
@@ -713,8 +723,9 @@ function stateEnvelope(vehicle: SimVehicle, nowMs: number): Envelope {
 				vehicleId: vehicle.spec.vehicleId,
 				timestampMs: nowMs,
 				position: {
-					latitudeDeg: HOME_LAT_DEG + vehicle.northM / METERS_PER_DEG_LAT,
-					longitudeDeg: HOME_LON_DEG + vehicle.eastM / metersPerDegLon(),
+					latitudeDeg: vehicle.spec.homeLatDeg + vehicle.northM / METERS_PER_DEG_LAT,
+					longitudeDeg:
+						vehicle.spec.homeLonDeg + vehicle.eastM / metersPerDegLon(vehicle.spec.homeLatDeg),
 					altitudeMslM: HOME_ALT_MSL_M + vehicle.altM,
 					altitudeRelM: vehicle.altM
 				},

@@ -3,6 +3,8 @@
 	import { env } from '$env/dynamic/public';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
+	import { themeStore } from '$lib/theme.svelte';
+	import { locateOrFallback } from '$lib/geolocation';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import VehicleCard from '$lib/components/vehicle-card.svelte';
@@ -11,22 +13,83 @@
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
+	import LocationPickerBar from '$lib/components/location-picker-bar.svelte';
 	import logoMark from '$lib/assets/logo-mark.svg';
 
 	let connectionPanelOpen = $state(false);
 
-	// The demo engine is always available (instant, local, no network); the
-	// gateway is opt-in and explicit. PUBLIC_GATEWAY_WS_URL/PUBLIC_READONLY
+	// The map's initial camera position: centered on the operator's own
+	// location by default, falling back to FAKE_FLEET_CENTER on denial or
+	// unavailability. Resolved once, undefined until then - FleetMap reads
+	// centerLat/centerLon only at mount (see its own untrack'd creation
+	// effect), so it must not render until this settles, rather than
+	// mounting with a placeholder and reassigning props later.
+	let mapCenterLat = $state<number | undefined>(undefined);
+	let mapCenterLon = $state<number | undefined>(undefined);
+
+	// Demo vehicle placement: geolocation as the default, a map click as the
+	// override, matching the pattern already proven in karshipta-cloud.
+	let placing = $state(false);
+	let placingLocating = $state(false);
+	let placeLat = $state(FAKE_FLEET_CENTER.lat);
+	let placeLon = $state(FAKE_FLEET_CENTER.lon);
+
+	function startPlacement() {
+		placing = true;
+		placeLat = FAKE_FLEET_CENTER.lat;
+		placeLon = FAKE_FLEET_CENTER.lon;
+		placingLocating = true;
+		void locateOrFallback(FAKE_FLEET_CENTER).then((point) => {
+			placingLocating = false;
+			placeLat = point.lat;
+			placeLon = point.lon;
+		});
+	}
+
+	function cancelPlacement() {
+		placing = false;
+	}
+
+	function confirmPlacement() {
+		fleet.addDemoVehicle({ lat: placeLat, lon: placeLon });
+		placing = false;
+	}
+
+	function onMapClick(latitudeDeg: number, longitudeDeg: number) {
+		if (!placing) return;
+		placingLocating = false;
+		placeLat = latitudeDeg;
+		placeLon = longitudeDeg;
+	}
+
+	// Binding the demo engine here, at component init, not inside onMount:
+	// onMount only runs after the first render already committed, and by
+	// then a persisted demo fleet (see fleet-store.svelte.ts) has already
+	// painted the empty-state wizard for a frame before flipping over to
+	// the restored vehicles - a real, reported flash, not a style nit. This
+	// runs before that first render instead, so fleet.vehicleIds already
+	// reflects any restored vehicles the very first time the template reads
+	// it. Guarded because this script body also runs during prerendering,
+	// where window doesn't exist and starting the demo engine's tick
+	// interval would be wrong.
+	if (typeof window !== 'undefined') {
+		fleet.bindDemoEngine(new FakeGateway((envelope) => fleet.applyEnvelope(envelope, 'demo')));
+	}
+
+	// The gateway is opt-in and explicit; PUBLIC_GATEWAY_WS_URL/PUBLIC_READONLY
 	// stay as automation overrides (docker, CI) but no longer decide what the
-	// console shows by default: it opens empty and every vehicle is a UI
-	// action. onMount, not $effect: feeding the store must not make this
-	// block depend on it.
+	// console shows by default. onMount, not $effect: feeding the store must
+	// not make this block depend on it.
 	onMount(() => {
+		themeStore.init();
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
-		fleet.bindDemoEngine(new FakeGateway((envelope) => fleet.applyEnvelope(envelope, 'demo')));
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
+		void locateOrFallback(FAKE_FLEET_CENTER).then((point) => {
+			mapCenterLat = point.lat;
+			mapCenterLon = point.lon;
+		});
 		return () => fleet.teardown();
 	});
 
@@ -64,6 +127,34 @@
 			</span>
 		{/if}
 		<button
+			class="text-fg-muted hover:text-fg flex h-6 w-6 items-center justify-center rounded hover:bg-white/5"
+			onclick={() => themeStore.toggle()}
+			aria-label="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
+			title="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
+		>
+			{#if themeStore.current === 'dark'}
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.75"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<circle cx="12" cy="12" r="4" />
+					<path
+						d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+					/>
+				</svg>
+			{:else}
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+					<path d="M20.5 14.5a8.5 8.5 0 1 1-9-13 7 7 0 0 0 9 13Z" />
+				</svg>
+			{/if}
+		</button>
+		<button
 			class="flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-white/5"
 			onclick={() => (connectionPanelOpen = !connectionPanelOpen)}
 			aria-expanded={connectionPanelOpen}
@@ -75,17 +166,51 @@
 	</header>
 
 	<aside class="flex flex-col gap-2 overflow-y-auto p-3" aria-label="Fleet">
-		<AddVehicleMenu variant="compact" onopenconnection={() => (connectionPanelOpen = true)} />
+		<AddVehicleMenu
+			variant="compact"
+			onopenconnection={() => (connectionPanelOpen = true)}
+			onstartdemoplacement={startPlacement}
+		/>
 		{#each fleet.vehicleIds as vehicleId (vehicleId)}
 			<VehicleCard {vehicleId} vehicle={fleet.vehicles[vehicleId]} />
 		{/each}
 	</aside>
 
 	<div class="relative">
-		<FleetMap centerLat={FAKE_FLEET_CENTER.lat} centerLon={FAKE_FLEET_CENTER.lon} />
+		{#if mapCenterLat !== undefined && mapCenterLon !== undefined}
+			<FleetMap
+				centerLat={mapCenterLat}
+				centerLon={mapCenterLon}
+				{onMapClick}
+				crosshair={placing}
+				placementPoint={placing ? { latitudeDeg: placeLat, longitudeDeg: placeLon } : undefined}
+			/>
+		{/if}
 		<EventsFeed />
-		{#if fleet.vehicleIds.length === 0}
-			<EmptyState onopenconnection={() => (connectionPanelOpen = true)} />
+		{#if fleet.vehicleIds.length === 0 && !placing}
+			<EmptyState
+				onopenconnection={() => (connectionPanelOpen = true)}
+				onstartdemoplacement={startPlacement}
+			/>
+		{/if}
+		{#if placing}
+			{#snippet confirm()}
+				<button
+					type="button"
+					onclick={confirmPlacement}
+					disabled={placingLocating}
+					class="bg-accent text-ink rounded px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+				>
+					Deploy here
+				</button>
+			{/snippet}
+			<LocationPickerBar
+				lat={placeLat}
+				lon={placeLon}
+				locating={placingLocating}
+				oncancel={cancelPlacement}
+				{confirm}
+			/>
 		{/if}
 	</div>
 
