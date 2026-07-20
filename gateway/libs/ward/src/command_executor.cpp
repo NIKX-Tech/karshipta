@@ -3,7 +3,11 @@
 #include <spdlog/spdlog.h>
 
 #include <cmath>
+#include <condition_variable>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -29,6 +33,48 @@ std::pair<bool, std::string> mission_outcome(const mavsdk::Mission::Result resul
         return {true, std::move(success_message)};
     }
     return {false, WardMission::result_name(result)};
+}
+
+// Independently-owned holder for one in-flight start_async()/pause_async()
+// result (gateway issue #69). Owned via shared_ptr and touched only through
+// it, never through `this`/CommandExecutor/WardMission, so the callback
+// registered below stays safe to run even after wait_for_mission_result()
+// has already returned (interrupted by a stop request, or simply outlived
+// by a slow reply) and possibly after the executor itself is gone.
+struct PendingMissionResult {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool done = false;
+    mavsdk::Mission::Result result = mavsdk::Mission::Result::Unknown;
+};
+
+// Fires a start_async()/pause_async()-shaped call and waits for its result
+// the same interruptible way CommandExecutor::run() waits on its queue:
+// via a stop_token-aware condition_variable_any, not a raw block inside
+// MAVSDK's own call. This is the actual fix for gateway issue #69 (mirrors
+// #67's Bug 4 discussion) -- it does not make MAVSDK reply any faster, it
+// makes the wait for that reply something CommandExecutor's worker can be
+// woken out of on shutdown, the same escape hatch every other queue wait
+// already has. Returns nullopt if the stop_token fired before the callback
+// did, in which case the callback (still holding its own shared_ptr to the
+// holder) is left to complete on its own, its result simply never read.
+std::optional<mavsdk::Mission::Result> wait_for_mission_result(
+    const std::stop_token& stop_token,
+    const std::function<void(mavsdk::Mission::ResultCallback)>& start) {
+    auto pending = std::make_shared<PendingMissionResult>();
+    start([pending](const mavsdk::Mission::Result result) {
+        {
+            std::lock_guard lock(pending->mutex);
+            pending->result = result;
+            pending->done = true;
+        }
+        pending->changed.notify_all();
+    });
+    std::unique_lock lock(pending->mutex);
+    if (!pending->changed.wait(lock, stop_token, [&] { return pending->done; })) {
+        return std::nullopt;
+    }
+    return pending->result;
 }
 
 const char* action_case_name(const karshipta::v1::Command& command) {
@@ -94,7 +140,7 @@ void CommandExecutor::run(const std::stop_token& stop_token) {
             command = std::move(queue_.front());
             queue_.pop_front();
         }
-        execute(command);
+        execute(command, stop_token);
     }
     // Reject, never drop, whatever was still waiting when the gateway went down.
     std::lock_guard lock(mutex_);
@@ -104,16 +150,18 @@ void CommandExecutor::run(const std::stop_token& stop_token) {
     queue_.clear();
 }
 
-void CommandExecutor::execute(const karshipta::v1::Command& command) {
+void CommandExecutor::execute(const karshipta::v1::Command& command,
+                              const std::stop_token& stop_token) {
     spdlog::info("executing {} for {} (command_id={})", action_case_name(command),
                  command.ward_id(), command.command_id());
-    const auto [success, message] = dispatch(command);
+    const auto [success, message] = dispatch(command, stop_token);
     send_ack(command,
              success ? karshipta::v1::COMMAND_STATUS_SUCCESS : karshipta::v1::COMMAND_STATUS_REJECTED,
              message);
 }
 
-std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Command& command) {
+std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Command& command,
+                                                        const std::stop_token& stop_token) {
     using Result = mavsdk::Action::Result;
 
     const auto describe = [](const Result result) { return WardActions::result_name(result); };
@@ -166,22 +214,34 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
                 std::numeric_limits<float>::quiet_NaN()));  // NaN keeps the current yaw
         }
         case karshipta::v1::Command::kStartMission:
-            return dispatch_start_mission();
+            return dispatch_start_mission(stop_token);
         case karshipta::v1::Command::kPauseMission:
-            return dispatch_pause();
+            return dispatch_pause(stop_token);
         case karshipta::v1::Command::ACTION_NOT_SET:
             break;
     }
     return {false, "command has no action"};
 }
 
-std::pair<bool, std::string> CommandExecutor::dispatch_start_mission() const {
-    return mission_outcome(mission_.start());
+std::pair<bool, std::string> CommandExecutor::dispatch_start_mission(
+    const std::stop_token& stop_token) const {
+    const auto result = wait_for_mission_result(
+        stop_token, [this](mavsdk::Mission::ResultCallback callback) {
+            mission_.start_async(std::move(callback));
+        });
+    if (!result) return {false, "gateway shutting down"};
+    return mission_outcome(*result);
 }
 
-std::pair<bool, std::string> CommandExecutor::dispatch_pause() const {
+std::pair<bool, std::string> CommandExecutor::dispatch_pause(
+    const std::stop_token& stop_token) const {
     if (telemetry_.get_flight_mode() == mavsdk::Telemetry::FlightMode::Mission) {
-        return mission_outcome(mission_.pause(), "pause");
+        const auto result = wait_for_mission_result(
+            stop_token, [this](mavsdk::Mission::ResultCallback callback) {
+                mission_.pause_async(std::move(callback));
+            });
+        if (!result) return {false, "gateway shutting down"};
+        return mission_outcome(*result, "pause");
     }
     return action_outcome(actions_.hold(), "hold");
 }
