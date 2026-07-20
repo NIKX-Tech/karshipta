@@ -1,0 +1,16 @@
+# Docker-compose demo override for gateway/config/gateway.yaml (see
+# gateway/docs/websocket-transport.md, "Design: safe-bind config").
+#
+# Inside a container the gateway's own loopback (127.0.0.1) is not reachable
+# from the host at all, so the safe default is unusable here. container_bind
+# is the narrower escape hatch for exactly this case: the gateway checks
+# that it is actually running in a container (not just that this file was
+# copied somewhere) before honoring a non-loopback host, and the resulting
+# bind is only reachable through whatever ports docker-compose publishes to
+# the host, not directly from the LAN. This is not the same opt-in as
+# allow_lan_bind and is not meant as a general substitute for it.
+
+websocket:
+  host: 0.0.0.0
+  port: 8765
+  container_bind: true

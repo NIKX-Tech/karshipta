@@ -73,6 +73,11 @@ class RelayTransport final : public Transport {
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Always kOperator: relayly pairing has no per-peer role concept yet
+    // (see the class comment), so there is nothing to mark a peer viewer
+    // with. Revisit once peer identity exists past the Noise XX handshake.
+    [[nodiscard]] ClientRole role(ClientId client) const override;
+
     // The credentials this instance was built with, whether via the
     // constructor or from_config(). Read-only: there is no setter, since
     // credentials are meant to be fixed for the lifetime of one instance.

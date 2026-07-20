@@ -1,6 +1,6 @@
 # CLAUDE.md: Karshipta monorepo
 
-Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones and unmanned vehicles. Users connect real or simulated vehicles (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. Flagship demo: `docker compose up` starts 3 PX4 SITL vehicles, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
+Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones, unmanned vehicles, and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. A ward is any tracked, controlled unit: a flight vehicle today, and any other MAVLink-speaking tracked entity (a livestock GPS tag, a generic tracker) alongside it. Flagship demo: `docker compose up` starts 3 PX4 SITL wards, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
 
 Owned by NIKX Technologies B.V. License: AGPL-3.0. Domain: karshipta.com.
 
@@ -60,7 +60,7 @@ MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` (gateway 
 
 ## Terminology
 
-`docs/glossary.md` is the locked vocabulary. In code, schema, and technical docs the unit is always a "vehicle" (never "drone"), a gateway manages a "fleet", and MAVLink endpoints are "connection URLs". Reviews enforce this.
+`docs/glossary.md` is the locked vocabulary. In code, schema, and technical docs the unit is always a "ward" (never "vehicle" or "drone"), a gateway manages a "fleet", and MAVLink endpoints are "connection URLs". Reviews enforce this.
 
 ## Hygiene rules (strict)
 

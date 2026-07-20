@@ -61,7 +61,7 @@
 	</div>
 
 	<p class="text-fg-muted mt-2 text-[10px]">
-		Real hardware and simulated (PX4 SITL) vehicles both connect through a running gateway. See
+		Real hardware and simulated (PX4 SITL) wards both connect through a running gateway. See
 		<a
 			href="https://github.com/NIKX-Tech/karshipta/blob/main/docs/quickstart.md"
 			target="_blank"

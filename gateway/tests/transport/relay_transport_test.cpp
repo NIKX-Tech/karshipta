@@ -118,6 +118,14 @@ TEST(RelayTransport, StopIsIdempotentAndStartAfterStopWorks) {
     fake_relay.stop();
 }
 
+TEST(RelayTransport, RoleIsAlwaysOperator) {
+    // No per-peer role concept exists yet (see the class comment and
+    // transport.h): any client id, connected or not, reads as kOperator.
+    RelayTransport transport("ws://" + std::string(kHost) + ":1", RelayCredentials{"test-device", ""});
+    EXPECT_EQ(transport.role(/*client=*/0), Transport::ClientRole::kOperator);
+    EXPECT_EQ(transport.role(/*client=*/42), Transport::ClientRole::kOperator);
+}
+
 TEST(RelayTransport, FromConfigMissingFileDefaultsToEmptyCredentials) {
     const auto path = std::filesystem::temp_directory_path() /
                        "karshipta_relay_test_missing_credentials.yaml";

@@ -1,16 +1,17 @@
 <script lang="ts">
-	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
+	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
 
 	interface Props {
 		onopenconnection: () => void;
+		onstartdemoplacement: () => void;
 	}
 
-	const { onopenconnection }: Props = $props();
+	const { onopenconnection, onstartdemoplacement }: Props = $props();
 </script>
 
 <div
 	class="pointer-events-none absolute inset-0 flex items-center justify-center"
-	aria-label="No vehicles yet"
+	aria-label="No wards yet"
 >
-	<AddVehicleMenu {onopenconnection} variant="full" />
+	<AddWardMenu {onopenconnection} {onstartdemoplacement} variant="full" />
 </div>

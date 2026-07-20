@@ -12,6 +12,6 @@ websocket:
   # Escape hatch for a bare-LAN bind (e.g. host: 0.0.0.0 or a specific LAN
   # address). Off by default. If you turn this on, the websocket server has
   # NO AUTHENTICATION: anyone who can reach host:port can command every
-  # connected vehicle. Only acceptable on a trusted, isolated network, and the
+  # connected ward. Only acceptable on a trusted, isolated network, and the
   # gateway logs a loud warning on every startup while this is true.
   allow_lan_bind: false
