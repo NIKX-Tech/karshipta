@@ -1,15 +1,27 @@
 # Karshipta demo environment.
-# v0: SITL wards only. Gateway and console services are enabled as their
-# Dockerfiles land (gateway M6, console demo milestone).
+# SITL wards and the gateway are wired up (gateway M6). The console joins
+# the compose file with its own Dockerfile in a later milestone (C6); until
+# then, run it separately (see README.md) pointed at ws://localhost:8765.
 #
 # Note for M4: multi-instance PX4 SITL port layout is finalized in that
 # milestone; the px4io/px4-sitl image maps MAVLink SDK ports per instance.
+#
+# Note for whoever wires sitl-2/sitl-3 into the gateway's fleet: each
+# instance defaults to MAVLink system_id=1 (px4_instance isn't set per
+# service here), so as of M6 the gateway's single auto-seeded ward
+# (sitl-1) is the only one it actually tracks. Getting a real 3-ward
+# fleet out of this file needs each SITL instance given a distinct
+# PX4_INSTANCE (or equivalent system_id override) plus a matching
+# per-ward connection_url on the gateway side; out of scope for M6.
 
 services:
   sitl-1:
     image: px4io/px4-sitl:latest
     ports:
-      - "14540:14540/udp"
+      # 14540/udp is not published here: the gateway service claims that
+      # host port for itself below, since sitl-1's own MAVLink stream is
+      # always an outbound sender toward it (see the gateway service's
+      # ports comment), never something connected to directly.
       - "14550:14550/udp"
 
   sitl-2:
@@ -24,18 +36,22 @@ services:
       - "14542:14540/udp"
       - "14552:14550/udp"
 
-  # gateway:
-  #   build: ../gateway
-  #   volumes:
-  #     - ./gateway-config.yaml:/etc/karshipta/config.yaml:ro
-  #   ports:
-  #     - "8765:8765"
-  #   depends_on: [sitl-1, sitl-2, sitl-3]
-  #   Note for M6: the gateway defaults websocket.host to 127.0.0.1
-  #   (see gateway/docs/websocket-transport.md). Bound that way inside a
-  #   container, this port mapping will not reach it. ./gateway-config.yaml
-  #   needs websocket.allow_lan_bind: true, or the bind needs to move to the
-  #   docker network interface instead of the host loopback.
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    volumes:
+      - ./gateway-config.yaml:/app/gateway/config/gateway.yaml:ro
+    ports:
+      - "8765:8765"
+      # PX4 SITL's own startup script (px4-rc.mavlink) sends its MAVLink
+      # streams to Docker Desktop's fixed host-gateway address
+      # (192.168.65.254), not to a sibling container's address on this
+      # compose network; that is why this is a host port publish, matching
+      # the gateway's default connection URL (udp://:14540), rather than
+      # something resolved through the compose network's own DNS/bridge.
+      - "14540:14540/udp"
+    depends_on: [sitl-1, sitl-2, sitl-3]
 
   # console:
   #   build: ../console
