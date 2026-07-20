@@ -1,0 +1,11 @@
+# Both gateway/Dockerfile and console/Dockerfile build from the repo root
+# (each needs the sibling proto/ directory), so this applies to both - keeps
+# the build context from including things like a local gateway/build/ (a full
+# C++ tree with MAVSDK/yaml-cpp, hundreds of MB) or console/node_modules on
+# every single docker build invocation.
+.git
+**/node_modules
+**/.svelte-kit
+console/build
+gateway/build
+**/*.log
