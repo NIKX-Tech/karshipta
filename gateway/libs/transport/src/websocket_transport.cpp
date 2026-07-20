@@ -75,7 +75,7 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
         spdlog::warn(
             "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
             "network with NO AUTHENTICATION. Anyone who can reach this address can command "
-            "every connected vehicle. Only do this on a trusted, isolated network; prefer the "
+            "every connected ward. Only do this on a trusted, isolated network; prefer the "
             "relay transport for cross-machine access.",
             host, port);
     } else if (container_bind && is_in_container()) {

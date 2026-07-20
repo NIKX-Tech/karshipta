@@ -25,7 +25,7 @@ if you're touching build config near it.
   winget install Kitware.CMake Ninja-build.Ninja Git.Git
   ```
 - **Docker Desktop** (for PX4 SITL, needed to run the gateway against a
-  vehicle; WSL2 backend):
+  ward; WSL2 backend):
   ```
   winget install Docker.DockerDesktop
   ```
@@ -159,7 +159,7 @@ docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
 ```
 
 `main.cpp` connects to `udpin://0.0.0.0:14540` (PX4's SDK port; 14550 is for
-QGroundControl). If the gateway doesn't see the vehicle, from the PX4 shell
+QGroundControl). If the gateway doesn't see the ward, from the PX4 shell
 (`pxh>`): `param set MAV_0_BROADCAST 1`, `mavlink start -u 14540 -o 14540 -r 4000000`,
 `reboot`.
 
@@ -174,7 +174,7 @@ gateway/build/src/karshipta_gateway.exe
 The post-build step copies MAVSDK's and protobuf's runtime DLLs next to the
 executable automatically (`$<TARGET_RUNTIME_DLLS:...>` in
 `gateway/src/CMakeLists.txt`); no manual DLL copying is needed. Expected
-output once the vehicle connects: one log line per second with `lat`, `lon`,
+output once the ward connects: one log line per second with `lat`, `lon`,
 `alt_m`, and `battery_pct`.
 
 ## 8. Tests

@@ -31,7 +31,7 @@
 	>
 		<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">EVENTS</h3>
 		<ul class="mt-2 space-y-1">
-			<!-- keyed by index: identical (ts, code, vehicle) tuples can occur in one tick -->
+			<!-- keyed by index: identical (ts, code, ward) tuples can occur in one tick -->
 			{#each visible as event, index (index)}
 				<li class="flex items-baseline gap-2 text-[11px]">
 					<span
@@ -40,8 +40,8 @@
 						)}"
 					></span>
 					<span class="text-fg-muted font-mono tabular-nums">{time(event.timestampMs)}</span>
-					{#if event.vehicleId}
-						<span class="font-mono">{event.vehicleId}</span>
+					{#if event.wardId}
+						<span class="font-mono">{event.wardId}</span>
 					{/if}
 					<span class="text-fg-muted truncate">{event.message}</span>
 				</li>

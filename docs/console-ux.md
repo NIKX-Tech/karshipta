@@ -22,9 +22,9 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 ```
 
 - **Top bar**: identity, fleet count, a clickable gateway status button (LIVE / CONNECTING / DOWN) that opens the connection panel. The one place the amber pulse always lives.
-- **Left rail (16rem)**: the whole fleet at a glance. Compact cards: id, DEMO badge when applicable, armed, link dot, remove action, one mono line of mode/alt/battery. Click selects; selection is blue everywhere (card, marker, ring).
-- **Map (center)**: fills all remaining space. Markers are amber arrows rotating with heading; labels stay upright. Goto targeting arms a crosshair. An empty-state overlay with the three onboarding actions renders here when the fleet is empty.
-- **Right detail panel (18rem, only when a vehicle is selected)**: full telemetry of the selected vehicle, then the command dock, then command trackers. Everything about ONE vehicle lives here; the left rail never grows detail.
+- **Left rail (16rem)**: the whole fleet at a glance. Compact cards: id, DEMO badge when applicable, armed (flight wards only), link dot, remove action, one mono line of mode/alt/battery. Click selects; selection is blue everywhere (card, marker, ring).
+- **Map (center)**: fills all remaining space. Markers are amber arrows rotating with heading; labels stay upright. Heading applies to any moving ward, not just flight ones. Goto targeting arms a crosshair. An empty-state overlay with the three onboarding actions renders here when the fleet is empty.
+- **Right detail panel (18rem, only when a ward is selected)**: full telemetry of the selected ward, then the command dock, then command trackers. The command dock and mission panel only render for a ward with a `flight` state; a non-flight ward (e.g. a tag) shows telemetry only. Everything about ONE ward lives here; the left rail never grows detail.
 - **Events (overlay, bottom right of map)**: fleet-wide feed with severity dots and mono timestamps.
 
 ## Where the next features go
@@ -32,17 +32,17 @@ The console is an instrument panel, not a website: dark surfaces, 1px borders, o
 | Milestone | Slot |
 |---|---|
 | Mission editor (shipped) | right panel MISSION section below COMMANDS; waypoints draw on the map as a dashed blue route with numbered points |
-| Multi-vehicle actions (select-all RTL) | left rail header, later milestone |
+| Multi-ward actions (select-all RTL) | left rail header, later milestone |
 | Telemetry charts / log review (v0.2) | bottom drawer under the map, collapsed by default |
 | Video feeds (later) | detail panel top, above telemetry |
 
-## Vehicle onboarding (C7)
+## Ward onboarding (C7)
 
-The console opens empty: no automatic fleet, no vehicle until an explicit UI action. Two independent channels feed the fleet, and every vehicle in `fleet.vehicles` carries which one it came from (`source: 'demo' | 'gateway'`):
+The console opens empty: no automatic fleet, no ward until an explicit UI action. Two independent channels feed the fleet, and every ward in `fleet.wards` carries which one it came from (`source: 'demo' | 'gateway'`):
 
-- **Demo engine**: always available, pure client-side (`FakeGateway`), zero network. "Add demo vehicle" spawns one instantly with a procedurally varied patrol; ids are `demo-1`, `demo-2`, ... Removing one is instant and local. This is also the console's test harness; it is not a toy to delete, only to stop treating as the default.
-- **Gateway channel**: opt-in. The connection panel (opened from the top bar's status button) holds the WebSocket URL (remembered in `localStorage`, never auto-connected) and a Connect/Disconnect action. Both "Add simulated vehicle" (a PX4 SITL preset, prefilled `udpin://0.0.0.0:14540`) and "Connect real vehicle" (blank form: id, name, type, connection URL, MAVLink system id) send the same `AddVehicle` envelope to the connected gateway and track the `VehicleConfigAck` lifecycle (pending / rejected with reason / accepted). The gateway sees no difference between "simulated" and "real"; the distinction is console-side framing only. Adding a second or later simulated vehicle in one session shows a resource-warning confirm first (each is a full autopilot build).
-- Disconnecting the gateway removes only `source: 'gateway'` vehicles; demo vehicles are untouched. Removing a vehicle is guarded: disabled while armed or airborne, on both channels.
+- **Demo engine**: always available, pure client-side (`FakeGateway`), zero network. "Add demo ward" spawns one instantly with a procedurally varied patrol; ids are `demo-1`, `demo-2`, ... Removing one is instant and local. This is also the console's test harness; it is not a toy to delete, only to stop treating as the default. Every demo ward is a flight-capable multirotor today; there is no non-flight demo path yet.
+- **Gateway channel**: opt-in. The connection panel (opened from the top bar's status button) holds the WebSocket URL (remembered in `localStorage`, never auto-connected) and a Connect/Disconnect action. Both "Add simulated ward" (a PX4 SITL preset, prefilled `udpin://0.0.0.0:14540`) and "Connect real ward" (blank form: id, name, ward class, connection URL, MAVLink system id) send the same `AddWard` envelope to the connected gateway and track the `WardConfigAck` lifecycle (pending / rejected with reason / accepted). The ward class dropdown lists every `WardClass`, not just flight-capable ones: the connect mechanism is MAVLink, which isn't flight-exclusive, so a MAVLink-speaking tracker or tag connects through this exact same dialog. The gateway sees no difference between "simulated" and "real"; the distinction is console-side framing only. Adding a second or later simulated ward in one session shows a resource-warning confirm first (each is a full autopilot build).
+- Disconnecting the gateway removes only `source: 'gateway'` wards; demo wards are untouched. Removing a ward is guarded: disabled while armed or airborne, on both channels.
 - `PUBLIC_GATEWAY_WS_URL` and `PUBLIC_READONLY` are automation overrides only (docker, CI), not the default experience: when set, the console auto-connects on load; when unset, connecting is always a click.
 
 ## Viewer mode

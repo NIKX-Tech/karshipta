@@ -1,10 +1,19 @@
 /*
- * Karshipta brand system tokens. Dark instrumentation look, one signature
- * accent. Functional colors carry meaning only, never decoration: armed
- * green, critical red, selected blue, synthetic violet. Amber is the brand
- * accent (logo mark, active states, live-telemetry pulse). Part of the
- * console-core package: any app consuming it shares these tokens, not a
- * copy.
+ * Karshipta brand system tokens. One signature accent, functional colors
+ * that carry meaning only, never decoration: armed green, critical red,
+ * selected blue, synthetic violet. Amber is the brand accent (logo mark,
+ * active states, live-telemetry pulse) and stays the same hue in both
+ * themes - it's the one constant across an otherwise-inverted palette. Part
+ * of the console-core package: any app consuming it shares these tokens,
+ * not a copy (karshipta-cloud imports this file directly rather than
+ * duplicating the values, so it follows both themes automatically).
+ *
+ * Dark is the default (no attribute needed); light is an override block
+ * below, not a second @theme - Tailwind's @theme is what generates the
+ * utility classes (bg-panel, text-fg, ...) from these custom property
+ * names in the first place, and only needs to happen once. Applying
+ * data-theme="light" on the root element is a themeStore concern
+ * (theme.svelte.ts), not this file's.
  */
 @theme {
 	--color-ink: #0a0e12;
@@ -25,4 +34,21 @@
 	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
 	--font-display: 'Space Grotesk Variable', 'Inter Variable', ui-sans-serif, sans-serif;
 	--font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', monospace;
+}
+
+/* Functional colors are darkened a step from their dark-theme values here,
+ * not reused as-is: several of them (amber, green, blue) are tuned for
+ * contrast against a near-black background and read as washed out - fail
+ * ordinary text-contrast expectations - against white. */
+:root[data-theme='light'] {
+	--color-ink: #f4f6f8;
+	--color-panel: #ffffff;
+	--color-edge: #dde2e7;
+	--color-fg: #12161c;
+	--color-fg-muted: #5b6673;
+	--color-accent: #b8720c;
+	--color-armed: #1e8449;
+	--color-critical: #c0392b;
+	--color-selected: #1d6fcc;
+	--color-synthetic: #7c5cd6;
 }

@@ -1,5 +1,5 @@
 # Karshipta demo environment.
-# SITL vehicles and the gateway are wired up (gateway M6). The console joins
+# SITL wards and the gateway are wired up (gateway M6). The console joins
 # the compose file with its own Dockerfile in a later milestone (C6); until
 # then, run it separately (see README.md) pointed at ws://localhost:8765.
 #
@@ -8,11 +8,11 @@
 #
 # Note for whoever wires sitl-2/sitl-3 into the gateway's fleet: each
 # instance defaults to MAVLink system_id=1 (px4_instance isn't set per
-# service here), so as of M6 the gateway's single auto-seeded vehicle
-# (sitl-1) is the only one it actually tracks. Getting a real 3-vehicle
+# service here), so as of M6 the gateway's single auto-seeded ward
+# (sitl-1) is the only one it actually tracks. Getting a real 3-ward
 # fleet out of this file needs each SITL instance given a distinct
 # PX4_INSTANCE (or equivalent system_id override) plus a matching
-# per-vehicle connection_url on the gateway side; out of scope for M6.
+# per-ward connection_url on the gateway side; out of scope for M6.
 
 services:
   sitl-1:

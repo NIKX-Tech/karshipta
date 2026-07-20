@@ -1,16 +1,16 @@
-# Quickstart: run the console against a real simulated vehicle
+# Quickstart: run the console against a real simulated ward
 
 As of gateway M6, `docker compose -f deploy/docker-compose.yml up` starts
-three PX4 SITL vehicles and the gateway in one step (see the README's
+three PX4 SITL wards and the gateway in one step (see the README's
 "one-command demo"). This page is the alternative: running the same pieces
 by hand, useful for gateway development itself or when you don't want
 Docker in the loop. Fifteen minutes the first time, since the gateway needs
 a build.
 
-If you only want the console with a simulated fleet and no real vehicle,
+If you only want the console with a simulated fleet and no real ward,
 the README's quickstart is enough; skip this page.
 
-## 1. Start a simulated vehicle (PX4 SITL)
+## 1. Start a simulated ward (PX4 SITL)
 
 ```sh
 docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
@@ -56,7 +56,7 @@ Expect:
 [info] websocket server listening on ws://127.0.0.1:8765
 ```
 
-Leave this running too. It publishes one vehicle, `sitl-1`, at
+Leave this running too. It publishes one ward, `sitl-1`, at
 `ws://localhost:8765`.
 
 The gateway binds to loopback only by default (`gateway/config/gateway.yaml`),
@@ -66,7 +66,7 @@ cross-machine access is meant to go through the relay transport (see
 `gateway/docs/relay-transport.md`), which is still scaffold-only as of M4.
 If you understand the risk and need a bare-LAN bind anyway (no
 authentication exists yet: anyone who can reach the address can command
-every connected vehicle), set `websocket.allow_lan_bind: true` and
+every connected ward), set `websocket.allow_lan_bind: true` and
 `websocket.host` to a reachable address in `gateway/config/gateway.yaml`;
 the gateway logs a loud warning on every startup while that is on.
 
@@ -84,16 +84,16 @@ PUBLIC_GATEWAY_WS_URL=ws://localhost:8765 npm run dev -- --open
 ```
 
 The top bar reads `FLEET 1` with a `LIVE` link (not `SIM`), the fake fleet is
-gone, and `sitl-1` is the real SITL vehicle. Select it and try Arm, then
-Takeoff: the command tracker shows ACCEPTED then SUCCESS, and the vehicle
+gone, and `sitl-1` is the real SITL ward. Select it and try Arm, then
+Takeoff: the command tracker shows ACCEPTED then SUCCESS, and the ward
 climbs in SITL's own console output too. `PUBLIC_READONLY=true` opens a
 read-only viewer session instead (see [console-ux.md](console-ux.md)).
 
-## Multiple vehicles
+## Multiple wards
 
-Not yet: the gateway connects to exactly one vehicle
-(`kConnectionUrl`/`kVehicleId` in `gateway/src/main.cpp`) until the config
-file and `VehicleManager` land in gateway M4
+Not yet: the gateway connects to exactly one ward
+(`kConnectionUrl`/`kWardId` in `gateway/src/main.cpp`) until the config
+file and `WardManager` land in gateway M4
 ([tracking issue](https://github.com/NIKX-Tech/karshipta/issues/16)).
 
 ## Troubleshooting
