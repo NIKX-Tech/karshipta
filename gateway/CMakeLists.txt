@@ -82,6 +82,32 @@ if(NOT yaml-cpp_FOUND)
   endif()
 endif()
 
+# SQLite: used by FleetZoneStore (gateway issue #85) to persist Fleet and
+# Zone, a narrow, explicitly-signed-off exception to "no backend, no
+# database in the MVP" (root CLAUDE.md), scoped to exactly those two
+# saved-object types. find_package(SQLite3) is a CMake-bundled module (not a
+# vendor-provided config), so it works against whatever system sqlite3 dev
+# package is already installed (present by default on macOS; Ubuntu CI needs
+# libsqlite3-dev, commonly already part of the runner image). When absent,
+# fall back to building the single-file amalgamation via FetchContent - no
+# system package required at all, same self-contained spirit as the
+# yaml-cpp/ixwebsocket fallbacks above. The amalgamation ships no CMakeLists
+# of its own (it is just sqlite3.c/.h), so the library is declared by hand.
+find_package(SQLite3 QUIET)
+if(NOT SQLite3_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(
+    sqlite3
+    URL https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip
+  )
+  FetchContent_MakeAvailable(sqlite3)
+  add_library(sqlite3_amalgamation STATIC "${sqlite3_SOURCE_DIR}/sqlite3.c")
+  target_include_directories(sqlite3_amalgamation PUBLIC "${sqlite3_SOURCE_DIR}")
+  if(NOT TARGET SQLite::SQLite3)
+    add_library(SQLite::SQLite3 ALIAS sqlite3_amalgamation)
+  endif()
+endif()
+
 # proto/karshipta/v1/*.proto is the single source of truth (root CLAUDE.md); protoc
 # regenerates the C++ bindings into gen/ at configure time so `gateway/gen/` never
 # needs to be hand-edited or committed (see repo .gitignore).
@@ -118,6 +144,7 @@ target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/fleet)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
@@ -144,6 +171,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/ward/ward_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
     tests/transport/relay_transport_test.cpp
+    tests/fleet/fleet_zone_store_test.cpp
   )
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
@@ -153,6 +181,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     MAVSDK::mavsdk
     spdlog::spdlog
     ward
+    fleet
     transport
     # the transport test drives the server with a real ix client
     ixwebsocket::ixwebsocket

@@ -6,6 +6,11 @@ console/.svelte-kit/
 console/build/
 console/src/lib/gen/
 
+# gateway generated state (operator-facing config in gateway/config/ stays
+# tracked; these two are runtime output, not committed assets)
+gateway/config/fleet_state.yaml
+gateway/config/fleet_zones.db
+
 # local notes
 CLAUDE.local.md
 
