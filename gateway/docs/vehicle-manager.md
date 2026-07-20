@@ -104,9 +104,26 @@ generated `fleet_state.yaml` itself is gitignored.
 
 ## Threading
 
-- `vehicles_mutex_` guards `managed_vehicles_` and every element's
-  `executor`/`busy`/`reconnect_worker`. Lock order: `vehicles_mutex_` before
-  any `VehicleConnection`/`TelemetryInfo`/`VehicleActions` internal mutex.
+- Locking is two-level (gateway issue #70: replaces an earlier single
+  fleet-wide `vehicles_mutex_`). `vehicles_mutex_` is structural only -
+  `managed_vehicles_`'s shape (insert, erase, lookup) - and is always held
+  briefly. Each vehicle's own `executor`/`busy`/`reconnect_worker` lives
+  behind that vehicle's own `ManagedVehicle::mutex_` instead, so one
+  vehicle's slow teardown (in particular `stop_worker()`'s join of a
+  reconnect attempt stuck mid-discovery, up to `kAutopilotDiscoveryTimeoutS`)
+  never blocks any other vehicle's calls. Lock order: `vehicles_mutex_`
+  before a vehicle's own `mutex_`, and that before any
+  `VehicleConnection`/`TelemetryInfo`/`VehicleActions` internal mutex;
+  nothing ever holds two different vehicles' `mutex_` at once.
+- `managed_vehicles_` stores `shared_ptr<ManagedVehicle>`, not
+  `ManagedVehicle` by value. `find_shared_locked()` copies the `shared_ptr`
+  under the structural lock and returns immediately, so the returned vehicle
+  stays valid for the rest of the call even if concurrently erased from the
+  map by another thread. Nothing may retain a copy of this `shared_ptr`
+  beyond the synchronous scope of the call that obtained it (no background
+  thread, no stored field) - see the invariant documented on `ManagedVehicle`
+  itself, which is what lets `~VehicleManager()` bound the object's true
+  lifetime to `managed_vehicles_`'s own destruction.
 - Each vehicle's `reconnect_worker` is an independent `jthread`: connects,
   broadcasts an INFO `LINK_CONNECTED` `Event`, requests the telemetry stream
   rate (re-requested on every reconnect - PX4 forgets it across a link drop),
@@ -138,9 +155,17 @@ generated `fleet_state.yaml` itself is gitignored.
 - Both worker types are declared after `managed_vehicles_` (`publish_worker_`
   last of all), so C++'s reverse-declaration-order destruction stops and
   joins every thread before the vehicles they read are torn down. The
-  destructor additionally blocks until no vehicle is `busy`, since
-  `force_stop()` spends up to two minutes unlocked holding a raw
-  `ManagedVehicle*`.
+  destructor additionally snapshots every vehicle once (structural lock) and
+  then waits for each one's own `busy` flag to clear, since `force_stop()`
+  spends up to two minutes unlocked holding a `shared_ptr<ManagedVehicle>`.
+  No shared `condition_variable` spans this any more (`busy` now lives in N
+  per-vehicle mutexes, which one `condition_variable`'s one-mutex contract
+  can't wait across); each vehicle is polled on its own `mutex_` instead,
+  acceptable since this runs once, at shutdown, never on a hot path.
+  `make_executor()`'s ack callback captures `&transport_` directly, never
+  `this`, so a `CommandExecutor` that (incorrectly) outlived
+  `VehicleManager` via a leaked `shared_ptr<ManagedVehicle>` copy still
+  couldn't touch a destroyed `VehicleManager` through it.
 
 ## Automated tests
 
@@ -175,6 +200,13 @@ a real socket:
   `EXTENDED_SYS_STATE`/`InAir` via the `TelemetryServer` plugin) - a real
   connect, then a `RemoveVehicle` for a genuinely airborne vehicle comes back
   REJECTED ("vehicle is in the air") and the vehicle stays registered.
+- `StopOnOneVehicleDoesNotBlockIsStartedOnAnother` (gateway issue #70): one
+  vehicle is `start()`ed against a port nothing listens on, so its first
+  `connect()` attempt blocks for the full, deterministic
+  `kAutopilotDiscoveryTimeoutS` (~3s); `stop()` on it is run on its own
+  thread, and `is_started()` on a second, unrelated vehicle is asserted to
+  return in well under 500ms while that's in flight - proving one vehicle's
+  slow `stop_worker()` join no longer stalls another vehicle's calls.
 
 ## Manual verification
 

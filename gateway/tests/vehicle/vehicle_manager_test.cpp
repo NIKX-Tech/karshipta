@@ -262,6 +262,43 @@ TEST_F(VehicleManagerTest, RemoveVehicleRemovesNeverStartedVehicle) {
     EXPECT_TRUE(manager.list_vehicle_ids().empty());
 }
 
+// Regression test for gateway issue #70 (per-vehicle locking replacing the
+// single fleet-wide vehicles_mutex_). Before this change, stop_worker()'s
+// join of a reconnect_worker stuck mid-discovery ran under the same lock
+// every other vehicle's calls needed, so one vehicle's up-to-
+// kAutopilotDiscoveryTimeoutS (~3s) worst case stalled the whole fleet.
+TEST_F(VehicleManagerTest, StopOnOneVehicleDoesNotBlockIsStartedOnAnother) {
+    auto manager = make_manager();
+    // Nothing ever listens on either port: connect_with_retry()'s first
+    // attempt blocks for the full, deterministic kAutopilotDiscoveryTimeoutS
+    // (3s), rather than racing a real autopilot's actual response time.
+    ASSERT_TRUE(manager.add_vehicle(make_config("slow-vehicle", "udpin://127.0.0.1:24994")));
+    ASSERT_TRUE(manager.add_vehicle(make_config("fast-vehicle", "udpin://127.0.0.1:24995")));
+    ASSERT_TRUE(manager.start("slow-vehicle"));
+
+    // stop() on a vehicle that has never connected: link_state() reads
+    // kNeverDiscovered (distinct from kLinkDown), which passes stop()'s
+    // guard, and is_in_air() defaults false, so stop() proceeds all the way
+    // to stop_worker()'s join - the exact path this test exercises. Runs on
+    // its own thread since it blocks for the discovery window.
+    std::thread slow_stop([&manager] { manager.stop("slow-vehicle"); });
+
+    // Give the reconnect worker a moment to actually enter its first
+    // connect() attempt before racing it from the assertion below.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const auto before = std::chrono::steady_clock::now();
+    const bool fast_started = manager.is_started("fast-vehicle");
+    const auto elapsed = std::chrono::steady_clock::now() - before;
+
+    slow_stop.join();
+
+    EXPECT_FALSE(fast_started);  // never start()ed; this call's speed is what's under test
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500))
+        << "is_started() on an unrelated vehicle must not block behind another "
+           "vehicle's slow stop_worker() join";
+}
+
 TEST_F(VehicleManagerPersistenceTest, PersistsOnAddAndRoundTripsOnReload) {
     {
         auto manager = make_manager(path_);

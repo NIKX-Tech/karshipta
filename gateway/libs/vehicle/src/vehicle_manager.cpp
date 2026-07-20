@@ -189,6 +189,29 @@ karshipta::v1::CommandAck make_rejected_ack(const karshipta::v1::Command& comman
     return ack;
 }
 
+// Free-function counterparts of VehicleManager::broadcast_command_ack()/
+// broadcast_rejection_event(), taking Transport& explicitly instead of
+// reading transport_ off `this`. make_executor()'s ack callback calls these
+// directly (never the VehicleManager member functions of the same name)
+// specifically so that callback never captures `this` at all; the member
+// functions below just delegate to these for every other caller.
+void emit_command_ack(Transport& transport, const karshipta::v1::CommandAck& ack) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_command_ack() = ack;
+    transport.broadcast(serialize_envelope(envelope));
+}
+
+void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck& ack) {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_vehicle_id(ack.vehicle_id());
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code("COMMAND_REJECTED");
+    event->set_message(ack.message());
+    transport.broadcast(serialize_envelope(envelope));
+}
+
 }  // namespace
 
 VehicleManager::VehicleManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
@@ -203,35 +226,53 @@ std::unique_ptr<VehicleManager> VehicleManager::create(Transport& tp,
 
 VehicleManager::~VehicleManager() {
     // See the header comment: force_stop() in particular runs for up to
-    // kForceStopLandingTimeoutS with vehicles_mutex_ released, holding a raw
-    // ManagedVehicle*. Waiting here for every busy flag to clear guarantees
+    // kForceStopLandingTimeoutS with no lock held, holding a
+    // shared_ptr<ManagedVehicle>. Snapshotting every vehicle once (structural
+    // lock) and then waiting for each one's own busy flag to clear guarantees
     // managed_vehicles_ never gets torn down out from under one of those
-    // unlocked windows.
-    std::unique_lock lock(vehicles_mutex_);
-    busy_cv_.wait(lock, [this] {
-        return std::none_of(managed_vehicles_.begin(), managed_vehicles_.end(),
-                             [](const auto& entry) { return entry.second.busy; });
-    });
+    // unlocked windows. No shared condition_variable spans this: busy now
+    // lives in N per-vehicle mutexes, so each is polled on its own mutex_
+    // instead, acceptable since this runs once, at shutdown, never on a hot
+    // path.
+    std::vector<std::shared_ptr<ManagedVehicle>> vehicles;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        vehicles.reserve(managed_vehicles_.size());
+        for (const auto& [id, vehicle] : managed_vehicles_) {
+            vehicles.push_back(vehicle);
+        }
+    }
+    for (const auto& vehicle : vehicles) {
+        std::unique_lock lock(vehicle->mutex_);
+        while (vehicle->busy) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            lock.lock();
+        }
+    }
 }
 
-ManagedVehicle* VehicleManager::find_locked(const std::string& vehicle_id) {
+std::shared_ptr<ManagedVehicle> VehicleManager::find_shared_locked(
+    const std::string& vehicle_id) const {
+    std::lock_guard lock(vehicles_mutex_);
     const auto it = managed_vehicles_.find(vehicle_id);
-    return it == managed_vehicles_.end() ? nullptr : &it->second;
-}
-
-const ManagedVehicle* VehicleManager::find_locked(const std::string& vehicle_id) const {
-    const auto it = managed_vehicles_.find(vehicle_id);
-    return it == managed_vehicles_.end() ? nullptr : &it->second;
+    return it == managed_vehicles_.end() ? nullptr : it->second;
 }
 
 std::unique_ptr<CommandExecutor> VehicleManager::make_executor(ManagedVehicle& vehicle) {
+    // Captures &transport_, never `this` (see the header comment on this
+    // method): keeps this callback safe to invoke even if a CommandExecutor
+    // outlives VehicleManager itself. Calls the free functions below (not the
+    // VehicleManager member functions of the same name) precisely because it
+    // must not touch `this`.
+    Transport* transport = &transport_;
     return std::make_unique<CommandExecutor>(
         *vehicle.actions, *vehicle.telemetry, *vehicle.mission,
-        [this](const karshipta::v1::CommandAck& ack) {
-            broadcast_command_ack(ack);
+        [transport](const karshipta::v1::CommandAck& ack) {
+            emit_command_ack(*transport, ack);
             // rejected commands are events a human should see (gateway rule 5)
             if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
-                broadcast_rejection_event(ack);
+                emit_rejection_event(*transport, ack);
             }
         });
 }
@@ -242,29 +283,18 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
         return "vehicle_id is empty";
     }
 
-    std::lock_guard lock(vehicles_mutex_);
-    if (managed_vehicles_.contains(cfg.vehicle_id)) {
-        return "vehicle_id '" + cfg.vehicle_id + "' already registered";
-    }
-    // system_id 0 means "first autopilot" (fleet.proto), so zeros are not
-    // identities and must not collide with each other.
-    if (cfg.system_id != 0) {
-        for (const auto& [id, vehicle] : managed_vehicles_) {
-            if (vehicle.config.system_id == cfg.system_id) {
-                return "system_id " + std::to_string(cfg.system_id) +
-                       " already bound to vehicle_id '" + id + "'";
-            }
-        }
-    }
-
     spdlog::debug("add_vehicle: building object graph for '{}' (system_id={}, url={})",
                   cfg.vehicle_id, cfg.system_id, cfg.connection_url);
 
-    // Each object below binds to the previous one by reference, so they must be
-    // built in this order: connection first, then telemetry/actions/mission off
-    // of it, then the executor off of those. None of this connects to the
-    // vehicle yet (VehicleConnection's constructor only stores state); that
-    // happens when start() launches the reconnect worker.
+    // Built entirely without vehicles_mutex_: constructing this object graph
+    // touches nothing shared (each object only binds to the previous one by
+    // reference; VehicleConnection's constructor only stores state, it does
+    // not connect), so there is nothing here for another thread to observe or
+    // race against. The duplicate-vehicle_id/duplicate-system_id checks that
+    // used to run before this build now run AFTER it, under the lock, right
+    // next to the insert itself (see below) - checking before an unlocked
+    // build would leave a window for two concurrent add_vehicle_impl calls to
+    // both pass the check and then both try to insert the same vehicle_id.
     const std::optional<uint32_t> expected_system_id =
         cfg.system_id == 0 ? std::nullopt : std::optional<uint32_t>{cfg.system_id};
     auto connection =
@@ -274,24 +304,35 @@ std::optional<std::string> VehicleManager::add_vehicle_impl(const VehicleConfig&
     auto mission = std::make_unique<VehicleMission>(*connection);
     auto mission_importer = std::make_unique<MissionImporter>(*connection);
 
-    ManagedVehicle managed{
-        .config = cfg,
-        .connection = std::move(connection),
-        .telemetry = std::move(telemetry),
-        .actions = std::move(actions),
-        .mission = std::move(mission),
-        .mission_importer = std::move(mission_importer),
-        // Explicit even though these match ManagedVehicle's own default
-        // member initializers (nullptr, false, not-joinable): gcc/clang's
-        // -Wmissing-field-initializers (part of -Wextra) flags a designated
-        // initializer that doesn't reach the struct's last member, even when
-        // the skipped ones have in-class defaults. executor is filled in
-        // below since it needs a reference to `managed` itself.
-        .executor = nullptr,
-        .busy = false,
-        .reconnect_worker = {},
-    };
-    managed.executor = make_executor(managed);
+    // make_shared<ManagedVehicle>() default-constructs the aggregate (mutex_
+    // default-constructs, unique_ptrs to nullptr, busy to false,
+    // reconnect_worker not-joinable), then fields are filled in below;
+    // ManagedVehicle contains a std::mutex, which is neither copyable nor
+    // movable, so it cannot be built as a local variable and moved/emplaced
+    // the way the pre-shared_ptr version of this function did.
+    auto managed = std::make_shared<ManagedVehicle>();
+    managed->config = cfg;
+    managed->connection = std::move(connection);
+    managed->telemetry = std::move(telemetry);
+    managed->actions = std::move(actions);
+    managed->mission = std::move(mission);
+    managed->mission_importer = std::move(mission_importer);
+    managed->executor = make_executor(*managed);
+
+    std::lock_guard lock(vehicles_mutex_);
+    if (managed_vehicles_.contains(cfg.vehicle_id)) {
+        return "vehicle_id '" + cfg.vehicle_id + "' already registered";
+    }
+    // system_id 0 means "first autopilot" (fleet.proto), so zeros are not
+    // identities and must not collide with each other.
+    if (cfg.system_id != 0) {
+        for (const auto& [id, vehicle] : managed_vehicles_) {
+            if (vehicle->config.system_id == cfg.system_id) {
+                return "system_id " + std::to_string(cfg.system_id) +
+                       " already bound to vehicle_id '" + id + "'";
+            }
+        }
+    }
 
     managed_vehicles_.emplace(cfg.vehicle_id, std::move(managed));
     spdlog::info("vehicle '{}' registered (system_id={}, total={})", cfg.vehicle_id, cfg.system_id,
@@ -323,21 +364,23 @@ std::vector<std::string> VehicleManager::list_vehicle_ids() const {
 }
 
 void VehicleManager::dispatch_command(const karshipta::v1::Command& command) {
-    // The rejection ack is built under the lock but broadcast after releasing
-    // it: Transport::broadcast is a blocking socket write and must not stall
-    // every other manager call behind a slow client. The accept path below
-    // gets the same treatment: enqueue() synchronously broadcasts its own
-    // ACCEPTED ack, so it must not run while vehicles_mutex_ is held either.
+    // The rejection ack is built under vehicle->mutex_ but broadcast after
+    // releasing it: Transport::broadcast is a blocking socket write and must
+    // not stall every other manager call behind a slow client. The accept
+    // path below gets the same treatment: enqueue() synchronously broadcasts
+    // its own ACCEPTED ack, so it must not run while any lock is held either.
+    // find_shared_locked() only takes the structural lock (briefly); every
+    // read/write below is under this one vehicle's own mutex_, so a slow
+    // command on vehicle A never blocks a lookup or command for vehicle B.
+    auto vehicle = find_shared_locked(command.vehicle_id());
     std::optional<karshipta::v1::CommandAck> rejection;
     CommandExecutor* executor = nullptr;
-    {
-        std::lock_guard lock(vehicles_mutex_);
-        auto* vehicle = find_locked(command.vehicle_id());
-        if (vehicle == nullptr) {
-            spdlog::warn("dispatch_command rejected: unknown vehicle_id '{}'",
-                         command.vehicle_id());
-            rejection = make_rejected_ack(command, "unknown vehicle_id: " + command.vehicle_id());
-        } else if (vehicle->executor == nullptr) {
+    if (vehicle == nullptr) {
+        spdlog::warn("dispatch_command rejected: unknown vehicle_id '{}'", command.vehicle_id());
+        rejection = make_rejected_ack(command, "unknown vehicle_id: " + command.vehicle_id());
+    } else {
+        std::lock_guard lock(vehicle->mutex_);
+        if (vehicle->executor == nullptr) {
             spdlog::warn("dispatch_command rejected: vehicle_id '{}' is stopped",
                          command.vehicle_id());
             rejection = make_rejected_ack(command, "vehicle is stopped");
@@ -364,18 +407,18 @@ void VehicleManager::dispatch_command(const karshipta::v1::Command& command) {
         return;
     }
     executor->enqueue(command);
-    clear_busy_and_notify(command.vehicle_id());
+    clear_busy(vehicle);
 }
 
 void VehicleManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
+    auto vehicle = find_shared_locked(mission.vehicle_id());
     std::optional<std::string> rejection_reason;
     VehicleMission* target = nullptr;
-    {
-        std::lock_guard lock(vehicles_mutex_);
-        auto* vehicle = find_locked(mission.vehicle_id());
-        if (vehicle == nullptr) {
-            rejection_reason = "unknown vehicle_id: " + mission.vehicle_id();
-        } else if (vehicle->executor == nullptr) {
+    if (vehicle == nullptr) {
+        rejection_reason = "unknown vehicle_id: " + mission.vehicle_id();
+    } else {
+        std::lock_guard lock(vehicle->mutex_);
+        if (vehicle->executor == nullptr) {
             rejection_reason = "vehicle is stopped";
         } else if (vehicle->busy) {
             rejection_reason = "vehicle is busy, retry shortly";
@@ -390,19 +433,19 @@ void VehicleManager::handle_mission_upload(const karshipta::v1::Mission& mission
         return;
     }
     target->enqueue_upload(mission);
-    clear_busy_and_notify(mission.vehicle_id());
+    clear_busy(vehicle);
 }
 
 void VehicleManager::handle_mission_file_upload(const karshipta::v1::MissionFileUpload& upload) {
+    auto vehicle = find_shared_locked(upload.vehicle_id());
     std::optional<std::string> rejection_reason;
     MissionImporter* importer = nullptr;
     VehicleMission* target = nullptr;
-    {
-        std::lock_guard lock(vehicles_mutex_);
-        auto* vehicle = find_locked(upload.vehicle_id());
-        if (vehicle == nullptr) {
-            rejection_reason = "unknown vehicle_id: " + upload.vehicle_id();
-        } else if (vehicle->executor == nullptr) {
+    if (vehicle == nullptr) {
+        rejection_reason = "unknown vehicle_id: " + upload.vehicle_id();
+    } else {
+        std::lock_guard lock(vehicle->mutex_);
+        if (vehicle->executor == nullptr) {
             rejection_reason = "vehicle is stopped";
         } else if (vehicle->busy) {
             rejection_reason = "vehicle is busy, retry shortly";
@@ -422,23 +465,23 @@ void VehicleManager::handle_mission_file_upload(const karshipta::v1::MissionFile
     if (!mission) {
         spdlog::warn("mission file import rejected for {}: {}", upload.vehicle_id(), reason);
         broadcast_mission_event(upload.vehicle_id(), "MISSION_IMPORT_REJECTED", reason);
-        clear_busy_and_notify(upload.vehicle_id());
+        clear_busy(vehicle);
         return;
     }
     target->enqueue_upload(std::move(*mission));
-    clear_busy_and_notify(upload.vehicle_id());
+    clear_busy(vehicle);
 }
 
 void VehicleManager::handle_mission_download_request(
     const karshipta::v1::MissionDownloadRequest& request) {
+    auto vehicle = find_shared_locked(request.vehicle_id());
     std::optional<std::string> rejection_reason;
     VehicleMission* target = nullptr;
-    {
-        std::lock_guard lock(vehicles_mutex_);
-        auto* vehicle = find_locked(request.vehicle_id());
-        if (vehicle == nullptr) {
-            rejection_reason = "unknown vehicle_id: " + request.vehicle_id();
-        } else if (vehicle->executor == nullptr) {
+    if (vehicle == nullptr) {
+        rejection_reason = "unknown vehicle_id: " + request.vehicle_id();
+    } else {
+        std::lock_guard lock(vehicle->mutex_);
+        if (vehicle->executor == nullptr) {
             rejection_reason = "vehicle is stopped";
         } else if (vehicle->busy) {
             rejection_reason = "vehicle is busy, retry shortly";
@@ -453,24 +496,15 @@ void VehicleManager::handle_mission_download_request(
         return;
     }
     target->enqueue_download();
-    clear_busy_and_notify(request.vehicle_id());
+    clear_busy(vehicle);
 }
 
 void VehicleManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
-    karshipta::v1::Envelope envelope;
-    *envelope.mutable_command_ack() = ack;
-    transport_.broadcast(serialize_envelope(envelope));
+    emit_command_ack(transport_, ack);
 }
 
 void VehicleManager::broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const {
-    karshipta::v1::Envelope envelope;
-    auto* event = envelope.mutable_event();
-    event->set_vehicle_id(ack.vehicle_id());
-    event->set_timestamp_ms(unix_epoch_ms());
-    event->set_severity(karshipta::v1::SEVERITY_WARNING);
-    event->set_code("COMMAND_REJECTED");
-    event->set_message(ack.message());
-    transport_.broadcast(serialize_envelope(envelope));
+    emit_rejection_event(transport_, ack);
 }
 
 void VehicleManager::broadcast_link_event(const std::string& vehicle_id, bool connected) const {
@@ -525,12 +559,12 @@ void VehicleManager::broadcast_fleet_event(const std::string& vehicle_id, bool a
 }
 
 bool VehicleManager::start(const std::string& vehicle_id) {
-    std::lock_guard lock(vehicles_mutex_);
-    auto* vehicle = find_locked(vehicle_id);
+    auto vehicle = find_shared_locked(vehicle_id);
     if (vehicle == nullptr) {
         spdlog::warn("start rejected: unknown vehicle_id '{}'", vehicle_id);
         return false;
     }
+    std::lock_guard lock(vehicle->mutex_);
     if (vehicle->busy) {
         spdlog::warn("start rejected: vehicle_id '{}' is mid-transition", vehicle_id);
         return false;
@@ -545,8 +579,18 @@ bool VehicleManager::start(const std::string& vehicle_id) {
     if (vehicle->executor == nullptr) {
         vehicle->executor = make_executor(*vehicle);
     }
-    vehicle->reconnect_worker = std::jthread(
-        [this, vehicle](std::stop_token stop_token) { run_reconnect_loop(*vehicle, stop_token); });
+    // Captures a raw pointer, not the shared_ptr itself: reconnect_worker is
+    // one of ManagedVehicle's own members, so a shared_ptr captured here
+    // would keep the object alive as long as the thread runs, which is
+    // exactly what has to stop and join for the object to ever be destroyed
+    // in the first place, i.e. a self-referential leak/deadlock. The raw
+    // pointer is safe because reconnect_worker's own lifetime is always
+    // bounded by ManagedVehicle's lifetime (it's a member, declared last so
+    // it stops and joins before anything else in the struct is torn down).
+    ManagedVehicle* raw_vehicle = vehicle.get();
+    vehicle->reconnect_worker = std::jthread([this, raw_vehicle](std::stop_token stop_token) {
+        run_reconnect_loop(*raw_vehicle, stop_token);
+    });
     return true;
 }
 
@@ -566,11 +610,11 @@ void VehicleManager::persist_locked() const {
     YAML::Node vehicles(YAML::NodeType::Sequence);
     for (const auto& [id, vehicle] : managed_vehicles_) {
         YAML::Node entry;
-        entry["vehicle_id"] = vehicle.config.vehicle_id;
-        entry["connection_url"] = vehicle.config.connection_url;
-        entry["mavlink_system_id"] = vehicle.config.system_id;
-        entry["name"] = vehicle.config.name;
-        entry["type"] = karshipta::v1::VehicleType_Name(vehicle.config.type);
+        entry["vehicle_id"] = vehicle->config.vehicle_id;
+        entry["connection_url"] = vehicle->config.connection_url;
+        entry["mavlink_system_id"] = vehicle->config.system_id;
+        entry["name"] = vehicle->config.name;
+        entry["type"] = karshipta::v1::VehicleType_Name(vehicle->config.type);
         vehicles.push_back(entry);
     }
     root["vehicles"] = vehicles;
@@ -655,9 +699,9 @@ void VehicleManager::run_publish_loop(std::chrono::milliseconds interval, std::s
     while (!stop_token.stop_requested()) {
         std::vector<std::vector<uint8_t>> frames;
         // Deferred so broadcast_mission_event()/broadcast_mission_download()
-        // (blocking socket writes) never run while vehicles_mutex_ is held,
-        // same rule as everywhere else in this file. mission set means
-        // "broadcast this download"; otherwise code/message carry an event.
+        // (blocking socket writes) never run while any lock is held, same
+        // rule as everywhere else in this file. mission set means "broadcast
+        // this download"; otherwise code/message carry an event.
         struct DeferredMissionBroadcast {
             std::string vehicle_id;
             std::optional<karshipta::v1::Mission> mission;
@@ -665,83 +709,100 @@ void VehicleManager::run_publish_loop(std::chrono::milliseconds interval, std::s
             std::string message;
         };
         std::vector<DeferredMissionBroadcast> deferred_mission_broadcasts;
-        // vehicle_id + executor to enqueue a synthetic RTL command on, once
+        // vehicle + executor to enqueue a synthetic RTL command on, once
         // unlocked; mirrors dispatch_command's busy-then-unlocked-enqueue
         // pattern so a concurrent remove_vehicle() can't destroy the executor
-        // out from under this deferred call.
-        std::vector<std::pair<std::string, CommandExecutor*>> pending_rtl;
+        // out from under this deferred call. Keeps the vehicle's shared_ptr
+        // (not just its id) so clear_busy() can clear busy
+        // directly on it afterward, without a second lookup.
+        std::vector<std::pair<std::shared_ptr<ManagedVehicle>, CommandExecutor*>> pending_rtl;
+
+        std::vector<std::shared_ptr<ManagedVehicle>> vehicles;
         {
-            // Cheap in-memory work only (TelemetryInfo's/VehicleMission's
-            // getters are cached reads, not MAVSDK round-trips): safe to
-            // build every frame while holding the lock. The broadcast itself
-            // is not, so it happens after releasing it below.
+            // Structural lock only, held briefly: copies every vehicle's
+            // shared_ptr, which is what keeps each one alive for the rest of
+            // this tick independent of a concurrent remove_vehicle() erasing
+            // it from the map mid-tick. TelemetryInfo's/VehicleMission's
+            // getters below are cached reads (not MAVSDK round-trips) that
+            // guard their own internal state already, so none of this needs
+            // vehicles_mutex_ held any longer than this copy.
             std::lock_guard lock(vehicles_mutex_);
-            frames.reserve(managed_vehicles_.size());
-            for (auto& [id, vehicle] : managed_vehicles_) {
-                karshipta::v1::Envelope state_envelope;
-                *state_envelope.mutable_vehicle_state() =
-                    build_vehicle_state(id, *vehicle.connection, *vehicle.telemetry);
-                frames.push_back(serialize_envelope(state_envelope));
+            vehicles.reserve(managed_vehicles_.size());
+            for (const auto& [id, vehicle] : managed_vehicles_) {
+                vehicles.push_back(vehicle);
+            }
+        }
+        frames.reserve(vehicles.size());
+        for (const auto& vehicle : vehicles) {
+            const std::string& id = vehicle->config.vehicle_id;
+            karshipta::v1::Envelope state_envelope;
+            *state_envelope.mutable_vehicle_state() =
+                build_vehicle_state(id, *vehicle->connection, *vehicle->telemetry);
+            frames.push_back(serialize_envelope(state_envelope));
 
-                if (!vehicle.mission) continue;  // always built by add_vehicle_impl; defensive only
+            if (!vehicle->mission) continue;  // always built by add_vehicle_impl; defensive only
 
-                // Only once something has actually been uploaded (get_progress()'s
-                // own documented default), so vehicles with no mission don't
-                // spam empty progress frames every tick.
-                const auto progress = vehicle.mission->get_progress();
-                if (!progress.mission_id().empty()) {
-                    karshipta::v1::Envelope progress_envelope;
-                    *progress_envelope.mutable_mission_progress() = progress;
-                    frames.push_back(serialize_envelope(progress_envelope));
+            // Only once something has actually been uploaded (get_progress()'s
+            // own documented default), so vehicles with no mission don't
+            // spam empty progress frames every tick.
+            const auto progress = vehicle->mission->get_progress();
+            if (!progress.mission_id().empty()) {
+                karshipta::v1::Envelope progress_envelope;
+                *progress_envelope.mutable_mission_progress() = progress;
+                frames.push_back(serialize_envelope(progress_envelope));
+            }
+
+            if (vehicle->mission->take_pending_return_to_launch()) {
+                // Only the busy check-and-set below needs this vehicle's own
+                // mutex_; everything else touched on this vehicle in this
+                // loop is a cached, self-synchronized read that needs no
+                // lock (see ManagedVehicle's header comment).
+                std::lock_guard vlock(vehicle->mutex_);
+                if (vehicle->executor != nullptr && !vehicle->busy) {
+                    vehicle->busy = true;
+                    pending_rtl.emplace_back(vehicle, vehicle->executor.get());
+                } else {
+                    // Narrow race (vehicle mid-transition exactly when its
+                    // final pass completed): the flag is already consumed
+                    // by take_pending_return_to_launch() and cannot be
+                    // retried. Logged so it's at least observable.
+                    spdlog::warn(
+                        "vehicle '{}' mission finished pending return-to-launch, but the "
+                        "vehicle is busy or stopped; return-to-launch not sent this cycle",
+                        id);
                 }
+            }
 
-                if (vehicle.mission->take_pending_return_to_launch()) {
-                    if (vehicle.executor != nullptr && !vehicle.busy) {
-                        vehicle.busy = true;
-                        pending_rtl.emplace_back(id, vehicle.executor.get());
-                    } else {
-                        // Narrow race (vehicle mid-transition exactly when its
-                        // final pass completed): the flag is already consumed
-                        // by take_pending_return_to_launch() and cannot be
-                        // retried. Logged so it's at least observable.
-                        spdlog::warn(
-                            "vehicle '{}' mission finished pending return-to-launch, but the "
-                            "vehicle is busy or stopped; return-to-launch not sent this cycle",
-                            id);
-                    }
+            if (const auto upload_result = vehicle->mission->take_upload_result()) {
+                if (upload_result->result != mavsdk::Mission::Result::Success) {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
+                         VehicleMission::result_name(upload_result->result)});
                 }
+            }
 
-                if (const auto upload_result = vehicle.mission->take_upload_result()) {
-                    if (upload_result->result != mavsdk::Mission::Result::Success) {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
-                             VehicleMission::result_name(upload_result->result)});
-                    }
-                }
-
-                if (auto download_result = vehicle.mission->take_download_result()) {
-                    if (download_result->mission) {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::move(download_result->mission), "", ""});
-                    } else {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::nullopt, "MISSION_DOWNLOAD_REJECTED", download_result->message});
-                    }
+            if (auto download_result = vehicle->mission->take_download_result()) {
+                if (download_result->mission) {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::move(download_result->mission), "", ""});
+                } else {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::nullopt, "MISSION_DOWNLOAD_REJECTED", download_result->message});
                 }
             }
         }
         for (const auto& frame : frames) {
             transport_.broadcast(frame);
         }
-        for (auto& [vehicle_id, executor] : pending_rtl) {
+        for (auto& [vehicle, executor] : pending_rtl) {
             karshipta::v1::Command rtl;
-            rtl.set_command_id("gateway-mission-rtl-" + vehicle_id + "-" +
+            rtl.set_command_id("gateway-mission-rtl-" + vehicle->config.vehicle_id + "-" +
                                 std::to_string(unix_epoch_ms()));
-            rtl.set_vehicle_id(vehicle_id);
+            rtl.set_vehicle_id(vehicle->config.vehicle_id);
             rtl.set_timestamp_ms(unix_epoch_ms());
             rtl.mutable_rtl();
             executor->enqueue(rtl);
-            clear_busy_and_notify(vehicle_id);
+            clear_busy(vehicle);
         }
         for (auto& broadcast : deferred_mission_broadcasts) {
             if (broadcast.mission) {
@@ -760,17 +821,17 @@ void VehicleManager::send_vehicle_info(Transport::ClientId client) const {
         std::shared_ptr<mavsdk::System> system;
         karshipta::v1::VehicleType type;
     };
-    // Snapshot cheap values under the lock, then release it before the
-    // per-vehicle work below: query_firmware_version() is a blocking MAVSDK
-    // round-trip, not cached state, and transport_.send() is a blocking
-    // socket write - neither may run while vehicles_mutex_ is held, or every
-    // other VehicleManager call stalls behind one client connect.
+    // Snapshot cheap values under the structural lock, then release it before
+    // the per-vehicle work below: query_firmware_version() is a blocking
+    // MAVSDK round-trip, not cached state, and transport_.send() is a
+    // blocking socket write - neither may run while any lock is held, or
+    // every other VehicleManager call stalls behind one client connect.
     std::vector<Snapshot> snapshots;
     {
         std::lock_guard lock(vehicles_mutex_);
         snapshots.reserve(managed_vehicles_.size());
         for (const auto& [id, vehicle] : managed_vehicles_) {
-            snapshots.push_back({id, vehicle.connection->get_system(), vehicle.config.type});
+            snapshots.push_back({id, vehicle->connection->get_system(), vehicle->config.type});
         }
     }
     for (const auto& snapshot : snapshots) {
@@ -812,28 +873,20 @@ void VehicleManager::stop_worker(ManagedVehicle& vehicle) {
     if (!vehicle.reconnect_worker.joinable()) {
         return;
     }
-    // Joining under vehicles_mutex_ is deliberate: other threads read
-    // joinable() under the lock, so the join must not race them. Worst case
-    // it blocks ~3s (a discovery attempt is not stop-token-interruptible).
-    // Not moved unlocked: std::jthread::joinable()/join() are not safe to
-    // call concurrently on the same object from different threads, so an
-    // unlocked join here would race is_started()/list_status()'s locked
-    // joinable() reads on this exact object. A real fix needs a per-vehicle
-    // mutex (finer than vehicles_mutex_), which is a larger change than this
-    // pass's scope; the ~3s worst case is accepted for now.
+    // Joining under vehicle.mutex_ is deliberate: other threads read
+    // joinable() on this same vehicle under that same mutex, so the join
+    // must not race them (std::jthread::joinable()/join() are not safe to
+    // call concurrently on the same object from different threads). Worst
+    // case this blocks ~3s (a discovery attempt is not stop-token-
+    // interruptible) - but now only for THIS vehicle's own mutex_, not the
+    // fleet-wide vehicles_mutex_, so no other vehicle's calls are affected.
     vehicle.reconnect_worker.request_stop();
     vehicle.reconnect_worker.join();
 }
 
-void VehicleManager::clear_busy_and_notify(const std::string& vehicle_id) {
-    std::lock_guard lock(vehicles_mutex_);
-    if (auto* v = find_locked(vehicle_id)) {
-        v->busy = false;
-    }
-    // Unconditional: ~VehicleManager()'s wait must re-evaluate even when the
-    // vehicle that just finished was erased by this same transition (a
-    // successful remove_vehicle_impl()), not just when a flag actually flips.
-    busy_cv_.notify_all();
+void VehicleManager::clear_busy(const std::shared_ptr<ManagedVehicle>& vehicle) {
+    std::lock_guard lock(vehicle->mutex_);
+    vehicle->busy = false;
 }
 
 std::optional<std::string> VehicleManager::verify_grounded_and_disarm(
@@ -857,7 +910,7 @@ std::optional<std::string> VehicleManager::verify_grounded_and_disarm(
         return std::nullopt;
     }
 
-    std::lock_guard lock(vehicles_mutex_);
+    std::lock_guard lock(vehicle.mutex_);
     vehicle.executor = make_executor(vehicle);
     if (!link_ok) return "link dropped during transition";
     if (!grounded) return "vehicle took off during transition";
@@ -865,15 +918,14 @@ std::optional<std::string> VehicleManager::verify_grounded_and_disarm(
 }
 
 bool VehicleManager::stop(const std::string& vehicle_id) {
-    ManagedVehicle* vehicle = nullptr;
+    auto vehicle = find_shared_locked(vehicle_id);
+    if (vehicle == nullptr) {
+        spdlog::warn("stop rejected: unknown vehicle_id '{}'", vehicle_id);
+        return false;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(vehicles_mutex_);
-        vehicle = find_locked(vehicle_id);
-        if (vehicle == nullptr) {
-            spdlog::warn("stop rejected: unknown vehicle_id '{}'", vehicle_id);
-            return false;
-        }
+        std::lock_guard lock(vehicle->mutex_);
         if (vehicle->busy) {
             spdlog::warn("stop rejected: vehicle_id '{}' is mid-transition", vehicle_id);
             return false;
@@ -901,9 +953,11 @@ bool VehicleManager::stop(const std::string& vehicle_id) {
         vehicle->busy = true;
         retired_executor = std::move(vehicle->executor);
     }
-    // busy is set: no other transition can start, remove_vehicle cannot erase
-    // this entry, so `vehicle` stays valid across the unlocked phases below.
-    ScopeExit clear_busy{[this, &vehicle_id] { clear_busy_and_notify(vehicle_id); }};
+    // busy is set: no other transition on this vehicle can start, and
+    // remove_vehicle cannot erase this entry, so `vehicle` (kept alive by our
+    // own shared_ptr copy regardless) stays usable across the unlocked phases
+    // below.
+    ScopeExit busy_guard{[this, &vehicle] { clear_busy(vehicle); }};
 
     // Unlocked: joins the executor worker (may be mid-MAVSDK-call for
     // seconds) and broadcasts rejection acks for whatever was still queued.
@@ -916,7 +970,7 @@ bool VehicleManager::stop(const std::string& vehicle_id) {
         return false;
     }
 
-    std::lock_guard lock(vehicles_mutex_);
+    std::lock_guard lock(vehicle->mutex_);
     stop_worker(*vehicle);
     spdlog::info("vehicle_id '{}' stopped", vehicle_id);
     return true;
@@ -929,15 +983,14 @@ void VehicleManager::stop_all() {
 }
 
 bool VehicleManager::force_stop(const std::string& vehicle_id) {
-    ManagedVehicle* vehicle = nullptr;
+    auto vehicle = find_shared_locked(vehicle_id);
+    if (vehicle == nullptr) {
+        spdlog::warn("force_stop rejected: unknown vehicle_id '{}'", vehicle_id);
+        return false;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(vehicles_mutex_);
-        vehicle = find_locked(vehicle_id);
-        if (vehicle == nullptr) {
-            spdlog::warn("force_stop rejected: unknown vehicle_id '{}'", vehicle_id);
-            return false;
-        }
+        std::lock_guard lock(vehicle->mutex_);
         if (vehicle->busy) {
             spdlog::warn("force_stop rejected: vehicle_id '{}' is mid-transition", vehicle_id);
             return false;
@@ -945,7 +998,7 @@ bool VehicleManager::force_stop(const std::string& vehicle_id) {
         vehicle->busy = true;
         retired_executor = std::move(vehicle->executor);
     }
-    ScopeExit clear_busy{[this, &vehicle_id] { clear_busy_and_notify(vehicle_id); }};
+    ScopeExit busy_guard{[this, &vehicle] { clear_busy(vehicle); }};
 
     retired_executor.reset();  // unlocked; see stop()
 
@@ -986,7 +1039,7 @@ bool VehicleManager::force_stop(const std::string& vehicle_id) {
             std::this_thread::sleep_for(kReconnectPollInterval);
         }
         if (!safe_on_ground) {
-            std::lock_guard lock(vehicles_mutex_);
+            std::lock_guard lock(vehicle->mutex_);
             vehicle->executor = make_executor(*vehicle);
             spdlog::error("force_stop timed out for vehicle_id '{}': not confirmed landed and "
                           "disarmed within {}s; monitoring stays active",
@@ -999,7 +1052,7 @@ bool VehicleManager::force_stop(const std::string& vehicle_id) {
     // stop(); taking the vehicle offline is the whole point of force_stop.
     (void)disarm_if_armed(vehicle_id, *vehicle);
 
-    std::lock_guard lock(vehicles_mutex_);
+    std::lock_guard lock(vehicle->mutex_);
     stop_worker(*vehicle);
     spdlog::warn("vehicle_id '{}' force-stopped", vehicle_id);
     return true;
@@ -1012,40 +1065,56 @@ void VehicleManager::force_stop_all() {
 }
 
 bool VehicleManager::is_started(const std::string& vehicle_id) const {
-    std::lock_guard lock(vehicles_mutex_);
-    const auto* vehicle = find_locked(vehicle_id);
-    return vehicle != nullptr && vehicle->reconnect_worker.joinable();
+    auto vehicle = find_shared_locked(vehicle_id);
+    if (vehicle == nullptr) {
+        return false;
+    }
+    std::lock_guard lock(vehicle->mutex_);
+    return vehicle->reconnect_worker.joinable();
 }
 
 bool VehicleManager::is_connected(const std::string& vehicle_id) const {
-    std::lock_guard lock(vehicles_mutex_);
-    const auto* vehicle = find_locked(vehicle_id);
+    // connection->is_connected() guards its own internal state (see
+    // VehicleConnection), so no vehicle->mutex_ is needed here at all: only
+    // reconnect_worker/executor/busy live behind that.
+    auto vehicle = find_shared_locked(vehicle_id);
     return vehicle != nullptr && vehicle->connection->is_connected();
 }
 
 std::vector<VehicleStatus> VehicleManager::list_status() const {
-    std::lock_guard lock(vehicles_mutex_);
+    std::vector<std::shared_ptr<ManagedVehicle>> vehicles;
+    {
+        std::lock_guard lock(vehicles_mutex_);
+        vehicles.reserve(managed_vehicles_.size());
+        for (const auto& [id, vehicle] : managed_vehicles_) {
+            vehicles.push_back(vehicle);
+        }
+    }
     std::vector<VehicleStatus> statuses;
-    statuses.reserve(managed_vehicles_.size());
-    for (const auto& [id, vehicle] : managed_vehicles_) {
+    statuses.reserve(vehicles.size());
+    for (const auto& vehicle : vehicles) {
+        bool started = false;
+        {
+            std::lock_guard lock(vehicle->mutex_);
+            started = vehicle->reconnect_worker.joinable();
+        }
         statuses.push_back(VehicleStatus{
-            .vehicle_id = id,
-            .started = vehicle.reconnect_worker.joinable(),
-            .connected = vehicle.connection->is_connected(),
+            .vehicle_id = vehicle->config.vehicle_id,
+            .started = started,
+            .connected = vehicle->connection->is_connected(),
         });
     }
     return statuses;
 }
 
 std::optional<std::string> VehicleManager::remove_vehicle_impl(const std::string& vehicle_id) {
-    ManagedVehicle* vehicle = nullptr;
+    auto vehicle = find_shared_locked(vehicle_id);
+    if (vehicle == nullptr) {
+        return "unknown vehicle_id: " + vehicle_id;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(vehicles_mutex_);
-        vehicle = find_locked(vehicle_id);
-        if (vehicle == nullptr) {
-            return "unknown vehicle_id: " + vehicle_id;
-        }
+        std::lock_guard lock(vehicle->mutex_);
         if (vehicle->busy) {
             return "vehicle is mid-transition";
         }
@@ -1061,7 +1130,7 @@ std::optional<std::string> VehicleManager::remove_vehicle_impl(const std::string
         vehicle->busy = true;
         retired_executor = std::move(vehicle->executor);
     }
-    ScopeExit clear_busy{[this, &vehicle_id] { clear_busy_and_notify(vehicle_id); }};
+    ScopeExit busy_guard{[this, &vehicle] { clear_busy(vehicle); }};
 
     retired_executor.reset();  // unlocked; see stop()
 
@@ -1069,8 +1138,17 @@ std::optional<std::string> VehicleManager::remove_vehicle_impl(const std::string
         return *error;
     }
 
+    // Structural lock outer, this vehicle's own mutex_ inner (the documented
+    // lock order): stop_worker() needs the latter, erase() needs the former.
+    // vehicle->mutex_ is released again before erase(): erasing from the map
+    // needs no state that lock guards, and this keeps the structural lock's
+    // hold time as short as the original single-lock version's equivalent
+    // section.
     std::lock_guard lock(vehicles_mutex_);
-    stop_worker(*vehicle);
+    {
+        std::lock_guard vlock(vehicle->mutex_);
+        stop_worker(*vehicle);
+    }
     managed_vehicles_.erase(vehicle_id);
     persist_locked();
     spdlog::info("vehicle_id '{}' removed (total={})", vehicle_id, managed_vehicles_.size());
