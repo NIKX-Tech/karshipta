@@ -1,5 +1,5 @@
 <script lang="ts">
-	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
+	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
 
 	interface Props {
 		onopenconnection: () => void;
@@ -11,7 +11,7 @@
 
 <div
 	class="pointer-events-none absolute inset-0 flex items-center justify-center"
-	aria-label="No vehicles yet"
+	aria-label="No wards yet"
 >
-	<AddVehicleMenu {onopenconnection} {onstartdemoplacement} variant="full" />
+	<AddWardMenu {onopenconnection} {onstartdemoplacement} variant="full" />
 </div>

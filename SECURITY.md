@@ -25,5 +25,5 @@ We take the security of Karshipta seriously. It is command and control software:
 
 ## Scope Notes
 
-- Karshipta is simulation-first and not certified for real flight operations. Reports about unsafe behavior against real vehicles are still very welcome; treat anything that could bypass autopilot safety checks as security-relevant.
+- Karshipta is simulation-first and not certified for real flight operations. Reports about unsafe behavior against real wards are still very welcome; treat anything that could bypass autopilot safety checks as security-relevant.
 - The gateway-to-console wire protocol (protobuf Envelopes over WebSocket) and the optional E2E-encrypted relay transport are in scope.

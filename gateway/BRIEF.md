@@ -7,7 +7,7 @@
 
 ## What Karshipta is
 
-An open-source, self-hosted, web-based command and control platform for fleets of drones. Users connect real or simulated vehicles (PX4/ArduPilot over MAVLink) and monitor and task them from a browser. The flagship demo: `docker compose up` starts 3 PX4 SITL vehicles plus the gateway plus the web console, and you watch a simulated fleet fly missions in your browser within 60 seconds.
+An open-source, self-hosted, web-based command and control platform for fleets of drones and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from a browser. The flagship demo: `docker compose up` starts 3 PX4 SITL wards plus the gateway plus the web console, and you watch a simulated fleet fly missions in your browser within 60 seconds.
 
 The gateway is the heart of the system and it is yours.
 
@@ -15,9 +15,9 @@ The gateway is the heart of the system and it is yours.
 
 A single C++ service that:
 
-1. Connects to N vehicles over MAVLink (UDP for SITL, serial/TCP later) using MAVSDK.
-2. Assigns each vehicle a stable `vehicle_id` and tracks its state.
-3. Publishes telemetry as protobuf `Envelope` frames over a WebSocket server (binary frames, one Envelope per frame). Target rate: 2 to 10 Hz per vehicle.
+1. Connects to N wards over MAVLink (UDP for SITL, serial/TCP later) using MAVSDK.
+2. Assigns each ward a stable `ward_id` and tracks its state.
+3. Publishes telemetry as protobuf `Envelope` frames over a WebSocket server (binary frames, one Envelope per frame). Target rate: 2 to 10 Hz per ward.
 4. Receives `Command` and `Mission` envelopes from clients, executes them via MAVSDK, and replies with `CommandAck` / `MissionProgress`.
 5. Emits `Event` messages for anything a human should see (link lost, low battery, rejected command).
 
@@ -26,9 +26,9 @@ The protobuf files in `proto/karshipta/v1/` are the single source of truth. Neve
 ## Architecture rules
 
 - **Transport abstraction from day one.** Define a small `Transport` interface (start, stop, send(bytes), on_receive(callback)). Implementation 1: plain WebSocket server (use IXWebSocket or uWebSockets, your pick). Implementation 2 comes in week 4 and will connect outward to a relay service instead of listening; your code must not care which transport is active.
-- One `VehicleManager` owning N `Vehicle` objects, each wrapping a MAVSDK `System`.
-- Vehicles are discovered dynamically: the gateway takes a list of connection URLs from a YAML/JSON config file (e.g. `udp://:14540`, `udp://:14541`).
-- Reconnect forever: SITL containers restart, links drop. `connected=false` in VehicleState, keep trying, emit Events.
+- One `WardManager` owning N `Ward` objects, each wrapping a MAVSDK `System`.
+- Wards are discovered dynamically: the gateway takes a list of connection URLs from a YAML/JSON config file (e.g. `udp://:14540`, `udp://:14541`).
+- Reconnect forever: SITL containers restart, links drop. `connected=false` in WardState, keep trying, emit Events.
 - No global state, no singletons. Everything owned by a `Gateway` object created in `main`.
 - Log with spdlog. Errors that reject a command must produce a CommandAck with a reason, never a silent drop.
 
@@ -38,16 +38,16 @@ The protobuf files in `proto/karshipta/v1/` are the single source of truth. Neve
 Run `docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest`. A minimal C++ program connects via MAVSDK to `udp://:14540` and prints position + battery at 1 Hz. CMake project builds in the repo CI.
 
 **M2 (week 2): Telemetry over WebSocket.**
-Gateway serves `ws://localhost:8765`. Any WebSocket client receives binary Envelope frames with VehicleInfo on connect and VehicleState at ~5 Hz. Include a tiny Python test client in `gateway/tools/` for verification.
+Gateway serves `ws://localhost:8765`. Any WebSocket client receives binary Envelope frames with WardInfo on connect and WardState at ~5 Hz. Include a tiny Python test client in `gateway/tools/` for verification.
 
 **M3 (week 3): Commands.**
 Arm, disarm, takeoff, land, RTL, goto. Incoming Command envelopes executed via MAVSDK Action plugin, every command answered with a CommandAck. Rejections carry a human-readable reason.
 
-**M4 (week 4): Multi-vehicle + relay transport.**
+**M4 (week 4): Multi-ward + relay transport.**
 Config file lists 3 SITL endpoints; gateway manages all three concurrently. Second Transport implementation added (details and credentials come from Erfan that week).
 
 **M5 (week 5): Missions.**
-Mission upload via MAVSDK Mission plugin, start/pause, MissionProgress published as the vehicle advances.
+Mission upload via MAVSDK Mission plugin, start/pause, MissionProgress published as the ward advances.
 
 **M6 (week 6): Dockerfile + hardening.**
 Multi-stage Dockerfile, gateway joins the root docker-compose. Reconnect behavior verified by killing/restarting SITL containers mid-flight.

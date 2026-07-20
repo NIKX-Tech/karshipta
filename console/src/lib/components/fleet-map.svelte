@@ -2,7 +2,7 @@
 	import { untrack } from 'svelte';
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import { VehicleOrigin } from '$lib/gen/karshipta/v1/common';
+	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
@@ -17,15 +17,15 @@
 		 * Fires on every map click alongside whatever the map already does
 		 * with it (goto targeting, waypoint placement) - a generic escape
 		 * hatch for a consuming app's own click-to-place flows (e.g. picking
-		 * a spawn point for a new vehicle) rather than a store-level concept
+		 * a spawn point for a new ward) rather than a store-level concept
 		 * like fleet.gotoArming, which is specifically about commanding an
-		 * already-selected vehicle. The caller decides whether it cares.
+		 * already-selected ward. The caller decides whether it cares.
 		 */
 		onMapClick?: (latitudeDeg: number, longitudeDeg: number) => void;
 		/**
 		 * Shows a crosshair cursor, same as goto-targeting/waypoint-planning
 		 * below - a plain prop for the same reason onMapClick is: a consuming
-		 * app's own click-to-place flow (e.g. demo-vehicle placement) isn't a
+		 * app's own click-to-place flow (e.g. demo-ward placement) isn't a
 		 * store-level concept, so it has no other way to tell the map a click
 		 * means something right now.
 		 */
@@ -33,17 +33,17 @@
 		/**
 		 * Shows a single pending-placement pin at this point - the visual
 		 * counterpart to crosshair/onMapClick: without it, a click during a
-		 * consuming app's placement flow (e.g. demo-vehicle placement) has no
+		 * consuming app's placement flow (e.g. demo-ward placement) has no
 		 * visible result and the operator can't tell where they clicked.
 		 */
 		placementPoint?: { latitudeDeg: number; longitudeDeg: number };
 		/**
-		 * Owner identity for the selected vehicle's badge - a plain callback,
+		 * Owner identity for the selected ward's badge - a plain callback,
 		 * not a store-level concept, since "who owns this" only exists for a
 		 * multi-tenant consuming app (see karshipta-cloud); the single-operator
 		 * OSS console has no such notion and simply never passes this.
 		 */
-		ownerFor?: (vehicleId: string) => { username: string; photoUrl: string | null } | undefined;
+		ownerFor?: (wardId: string) => { username: string; photoUrl: string | null } | undefined;
 	}
 
 	const { centerLat, centerLon, onMapClick, crosshair, placementPoint, ownerFor }: Props = $props();
@@ -131,7 +131,7 @@
 	const GEOZONE_SOURCE = 'geozones';
 	const GEOZONE_FILL_LAYER = 'geozones-fill';
 	const GEOZONE_LINE_LAYER = 'geozones-line';
-	const TRAIL_SOURCE = 'vehicle-trails';
+	const TRAIL_SOURCE = 'ward-trails';
 	/**
 	 * Older points age out so a long-idle tab doesn't grow this forever, but
 	 * generously - a few thousand points costs nothing to render, and a trail
@@ -166,14 +166,14 @@
 		return meters < 1000 ? `${meters.toFixed(0)} m` : `${(meters / 1000).toFixed(2)} km`;
 	}
 
-	// imperative per-vehicle marker cache, deliberately not reactive state
+	// imperative per-ward marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
 	let waypointMarkers: maplibregl.Marker[] = [];
 	let placementMarker: maplibregl.Marker | undefined;
 	let measureMarkers: maplibregl.Marker[] = [];
 	let measureLabelMarker: maplibregl.Marker | undefined;
-	// flown path per vehicle, oldest-first; client-side only, never persisted
-	// or synced - purely a "where has this vehicle been recently" trail
+	// flown path per ward, oldest-first; client-side only, never persisted
+	// or synced - purely a "where has this ward been recently" trail
 	let trails: Record<string, [number, number][]> = {};
 	let mapLoaded = $state(false);
 	// camera state; arrows compensate for bearing, marker elevation for pitch/zoom
@@ -181,7 +181,7 @@
 	let pitchDeg = $state(0);
 	let zoomLevel = $state(INITIAL_ZOOM);
 
-	function markerElement(vehicleId: string): Omit<MarkerHandle, 'marker'> & {
+	function markerElement(wardId: string): Omit<MarkerHandle, 'marker'> & {
 		element: HTMLElement;
 	} {
 		// zero-size root pinned to the ground position; the body (arrow + label)
@@ -189,12 +189,12 @@
 		const element = document.createElement('div');
 		element.setAttribute('role', 'button');
 		element.setAttribute('tabindex', '0');
-		element.setAttribute('aria-label', `Vehicle ${vehicleId}`);
+		element.setAttribute('aria-label', `Ward ${wardId}`);
 		element.className = 'relative h-0 w-0 cursor-pointer';
 		// The badge (name/telemetry/owner) only ever renders for the selected
-		// vehicle - see the sync effect below - so it starts hidden. Unselected
+		// ward - see the sync effect below - so it starts hidden. Unselected
 		// markers show only the ground dot and arrow; a map with several
-		// vehicles on it stays scannable instead of turning into a wall of text.
+		// wards on it stays scannable instead of turning into a wall of text.
 		element.innerHTML = `
 			<span class="bg-accent/50 absolute -top-0.5 -left-0.5 h-1 w-1 rounded-full" data-part="ground"></span>
 			<span class="bg-edge absolute left-0 w-px" data-part="stem"></span>
@@ -243,7 +243,7 @@
 		const toggleSelect = (event: Event) => {
 			// keep marker clicks from also registering as map clicks (goto targeting)
 			event.stopPropagation();
-			fleet.select(fleet.selectedVehicleId === vehicleId ? undefined : vehicleId);
+			fleet.select(fleet.selectedWardId === wardId ? undefined : wardId);
 		};
 		element.addEventListener('click', toggleSelect);
 		element.addEventListener('keydown', (event) => {
@@ -284,7 +284,7 @@
 			tiles: basemapTiles
 		}));
 		// a map init failure (e.g. no WebGL) must not take the rest of the
-		// console down; vehicle cards keep working without the map
+		// console down; ward cards keep working without the map
 		let created: maplibregl.Map;
 		try {
 			created = new maplibregl.Map({
@@ -321,7 +321,7 @@
 		// Bottom-left: the only corner still empty, and where most map apps
 		// put a scale bar - distance is otherwise unjudgeable at a glance,
 		// which matters more here than on a general-purpose map (planning a
-		// goto, eyeballing how far a vehicle still has to fly).
+		// goto, eyeballing how far a ward still has to fly).
 		created.addControl(
 			new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }),
 			'bottom-left'
@@ -336,7 +336,7 @@
 						: [...measurePoints, [event.lngLat.lng, event.lngLat.lat]];
 				return;
 			}
-			if (fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId) {
+			if (fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId) {
 				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
@@ -435,7 +435,7 @@
 			// flown-path trails: above geozones (so a zone fill doesn't visually
 			// bury them), below the mission-route line (a planned route stays
 			// the most prominent line on the map) - a real Marker exists on top
-			// of both regardless, so the trail never competes with the vehicle
+			// of both regardless, so the trail never competes with the ward
 			// itself for attention.
 			created.addSource(TRAIL_SOURCE, {
 				type: 'geojson',
@@ -503,25 +503,25 @@
 		};
 	});
 
-	// Pan to a vehicle once when it's selected (sidebar click, marker click,
+	// Pan to a ward once when it's selected (sidebar click, marker click,
 	// or a /pilots/[username] deep link), not continuously - lastFocusedId
 	// guards against re-panning on every subsequent telemetry tick for the
 	// same selection, which would fight the operator's own camera control.
 	// Reading state.position here (not untracked) is deliberate: a deep
-	// link can select a vehicle before its telemetry has arrived, and this
+	// link can select a ward before its telemetry has arrived, and this
 	// needs to re-fire once position actually shows up for it.
-	let lastFocusedVehicleId: string | undefined;
+	let lastFocusedWardId: string | undefined;
 	$effect(() => {
-		const selectedId = fleet.selectedVehicleId;
+		const selectedId = fleet.selectedWardId;
 		const activeMap = map;
 		if (!selectedId || !activeMap) {
-			lastFocusedVehicleId = undefined;
+			lastFocusedWardId = undefined;
 			return;
 		}
-		if (lastFocusedVehicleId === selectedId) return;
-		const position = fleet.vehicles[selectedId]?.state?.position;
+		if (lastFocusedWardId === selectedId) return;
+		const position = fleet.wards[selectedId]?.state?.position;
 		if (!position) return;
-		lastFocusedVehicleId = selectedId;
+		lastFocusedWardId = selectedId;
 		activeMap.easeTo({
 			center: [position.longitudeDeg, position.latitudeDeg],
 			duration: 600
@@ -532,8 +532,7 @@
 	// a consuming app's own click-to-place flow (crosshair prop) is active
 	$effect(() => {
 		if (!map) return;
-		const planning =
-			fleet.missionDraft?.vehicleId === fleet.selectedVehicleId && fleet.missionDraft;
+		const planning = fleet.missionDraft?.wardId === fleet.selectedWardId && fleet.missionDraft;
 		map.getCanvas().style.cursor =
 			fleet.gotoArming || planning || crosshair || measuring ? 'crosshair' : '';
 	});
@@ -601,12 +600,12 @@
 		});
 	});
 
-	// draw the mission draft of the selected vehicle: dashed blue route + numbered points
+	// draw the mission draft of the selected ward: dashed blue route + numbered points
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
 		const draft =
-			fleet.missionDraft && fleet.missionDraft.vehicleId === fleet.selectedVehicleId
+			fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId
 				? fleet.missionDraft
 				: undefined;
 		const coordinates = (draft?.waypoints ?? []).map((waypoint) => [
@@ -640,8 +639,8 @@
 
 	// single pending-placement pin, shown while a consuming app's placement
 	// flow has a point picked (geolocated default or a click override) and
-	// not yet confirmed - distinct styling from both vehicle arrows (not a
-	// real vehicle yet) and numbered waypoint markers (not a mission)
+	// not yet confirmed - distinct styling from both ward arrows (not a
+	// real ward yet) and numbered waypoint markers (not a mission)
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
@@ -709,46 +708,46 @@
 		}
 	});
 
-	// sync one marker per vehicle from the store
+	// sync one marker per ward from the store
 	$effect(() => {
 		if (!map) return;
-		for (const vehicleId of fleet.vehicleIds) {
-			const vehicle = fleet.vehicles[vehicleId];
-			const state = vehicle?.state;
+		for (const wardId of fleet.wardIds) {
+			const ward = fleet.wards[wardId];
+			const state = ward?.state;
 			if (!state?.position) continue;
-			// flown-path trail: skip appending when the vehicle hasn't actually
+			// flown-path trail: skip appending when the ward hasn't actually
 			// moved (idle/disarmed on the ground), so the array doesn't grow
 			// for no visual benefit
 			const point: [number, number] = [state.position.longitudeDeg, state.position.latitudeDeg];
-			const trail = (trails[vehicleId] ??= []);
+			const trail = (trails[wardId] ??= []);
 			const lastPoint = trail.at(-1);
 			if (!lastPoint || lastPoint[0] !== point[0] || lastPoint[1] !== point[1]) {
 				trail.push(point);
 				if (trail.length > TRAIL_MAX_POINTS) trail.shift();
 			}
-			let handle = markers[vehicleId];
+			let handle = markers[wardId];
 			if (!handle) {
-				const { element, ...parts } = markerElement(vehicleId);
+				const { element, ...parts } = markerElement(wardId);
 				// setLngLat must precede addTo: adding projects the position
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg])
 					.addTo(map);
 				handle = { marker, ...parts };
-				markers[vehicleId] = handle;
+				markers[wardId] = handle;
 			}
 			handle.marker.setLngLat([state.position.longitudeDeg, state.position.latitudeDeg]);
 			// heading is relative to true north; subtract the camera bearing so
 			// the arrow stays correct when the operator rotates the map
 			handle.arrow.style.rotate = `${state.headingDeg - bearingDeg}deg`;
-			const selected = fleet.selectedVehicleId === vehicleId;
+			const selected = fleet.selectedWardId === wardId;
 			// Unselected: no badge at all, so the map stays scannable with
-			// several vehicles on it - just the arrow and ground position.
+			// several wards on it - just the arrow and ground position.
 			// The full badge (name, connectivity, altitude, battery, owner)
-			// only earns its place once a vehicle is actually picked.
+			// only earns its place once a ward is actually picked.
 			handle.badge.classList.toggle('hidden', !selected);
 			handle.badge.classList.toggle('flex', selected);
 			if (selected) {
-				handle.nameEl.textContent = vehicleId;
+				handle.nameEl.textContent = wardId;
 				handle.connectivityDot.classList.toggle('bg-accent', state.connected);
 				handle.connectivityDot.classList.toggle('animate-pulse', state.connected);
 				handle.connectivityDot.classList.toggle('bg-critical', !state.connected);
@@ -756,7 +755,7 @@
 				const batteryLabel =
 					batteryPct === undefined || batteryPct < 0 ? '?' : `${batteryPct.toFixed(0)}%`;
 				handle.telemetryEl.textContent = `${state.position.altitudeRelM.toFixed(0)} m \u00b7 ${batteryLabel}`;
-				const owner = ownerFor?.(vehicleId);
+				const owner = ownerFor?.(wardId);
 				handle.ownerRow.classList.toggle('hidden', !owner);
 				handle.ownerRow.classList.toggle('flex', !!owner);
 				if (owner) {
@@ -778,11 +777,11 @@
 			handle.stem.style.height = `${Math.max(0, liftPx - 8)}px`;
 			handle.arrowPath.setAttribute('stroke', selected ? '#3b9eff' : '#0a0e12');
 			handle.arrowPath.setAttribute('stroke-width', selected ? '2.5' : '1.5');
-			// No autopilot behind this vehicle at all (see vehicle-card.svelte): a
+			// No autopilot behind this ward at all (see ward-card.svelte): a
 			// distinct hue, not a desaturated one, so it doesn't read as
 			// disabled/degraded - that's what the opacity fade below already
 			// means (link lost), and the two must not look like the same thing.
-			const synthetic = vehicle?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC;
+			const synthetic = ward?.info?.origin === WardOrigin.WARD_ORIGIN_SYNTHETIC;
 			handle.arrowPath.setAttribute('fill', synthetic ? '#a78bfa' : '#f5a623');
 			handle.badge.classList.toggle('border-selected', selected);
 			handle.badge.classList.toggle('border-edge', !selected);
@@ -790,25 +789,24 @@
 			// read as live
 			handle.body.style.opacity = state.connected ? '1' : '0.4';
 		}
-		for (const vehicleId of Object.keys(markers)) {
-			if (!fleet.vehicleIds.includes(vehicleId)) {
-				markers[vehicleId].marker.remove();
-				delete markers[vehicleId];
+		for (const wardId of Object.keys(markers)) {
+			if (!fleet.wardIds.includes(wardId)) {
+				markers[wardId].marker.remove();
+				delete markers[wardId];
 			}
 		}
-		for (const vehicleId of Object.keys(trails)) {
-			if (!fleet.vehicleIds.includes(vehicleId)) delete trails[vehicleId];
+		for (const wardId of Object.keys(trails)) {
+			if (!fleet.wardIds.includes(wardId)) delete trails[wardId];
 		}
 		const trailSource = map.getSource<maplibregl.GeoJSONSource>(TRAIL_SOURCE);
 		trailSource?.setData({
 			type: 'FeatureCollection',
 			features: Object.entries(trails)
 				.filter(([, points]) => points.length > 1)
-				.map(([vehicleId, points]) => ({
+				.map(([wardId, points]) => ({
 					type: 'Feature',
 					properties: {
-						synthetic:
-							fleet.vehicles[vehicleId]?.info?.origin === VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC
+						synthetic: fleet.wards[wardId]?.info?.origin === WardOrigin.WARD_ORIGIN_SYNTHETIC
 					},
 					geometry: { type: 'LineString', coordinates: points }
 				}))

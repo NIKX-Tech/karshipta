@@ -63,7 +63,7 @@ endif()
 
 # yaml-cpp: vcpkg/Homebrew installs provide a CMake config; when absent (Linux
 # CI, bare dev machines) fall back to a pinned FetchContent build. Used by
-# VehicleManager to persist the fleet to disk (crash recovery).
+# WardManager to persist the fleet to disk (crash recovery).
 find_package(yaml-cpp CONFIG QUIET)
 if(NOT yaml-cpp_FOUND)
   include(FetchContent)
@@ -111,7 +111,7 @@ target_include_directories(karshipta_proto PUBLIC "${KARSHIPTA_PROTO_GEN_DIR}")
 target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/vehicle)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
@@ -130,12 +130,12 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
 
   # Stacked milestone branches append their own test sources to this list.
   set(KARSHIPTA_TEST_SOURCES
-    tests/vehicle/vehicle_connection_test.cpp
-    tests/vehicle/telemetry_test.cpp
-    tests/vehicle/command_executor_test.cpp
-    tests/vehicle/vehicle_mission_test.cpp
-    tests/vehicle/mission_importer_test.cpp
-    tests/vehicle/vehicle_manager_test.cpp
+    tests/ward/ward_connection_test.cpp
+    tests/ward/telemetry_test.cpp
+    tests/ward/command_executor_test.cpp
+    tests/ward/ward_mission_test.cpp
+    tests/ward/mission_importer_test.cpp
+    tests/ward/ward_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
     tests/transport/relay_transport_test.cpp
   )
@@ -146,7 +146,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     GTest::gtest_main
     MAVSDK::mavsdk
     spdlog::spdlog
-    vehicle
+    ward
     transport
     # the transport test drives the server with a real ix client
     ixwebsocket::ixwebsocket

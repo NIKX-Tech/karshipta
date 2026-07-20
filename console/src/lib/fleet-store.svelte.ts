@@ -1,5 +1,5 @@
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
-import type { Event, VehicleInfo, VehicleState } from '$lib/gen/karshipta/v1/telemetry';
+import type { Event, WardInfo, WardState } from '$lib/gen/karshipta/v1/telemetry';
 import {
 	CommandStatus,
 	MissionAction,
@@ -7,19 +7,19 @@ import {
 	type Mission,
 	type MissionProgress
 } from '$lib/gen/karshipta/v1/command';
-import { VehicleConfigStatus, type AddVehicle } from '$lib/gen/karshipta/v1/fleet';
-import type { VehicleType } from '$lib/gen/karshipta/v1/common';
+import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
+import type { WardClass } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
 import type { LatLon } from '$lib/geolocation';
 
-/** where a vehicle's data comes from: the local demo engine or a connected gateway */
-export type VehicleSource = 'demo' | 'gateway';
+/** where a ward's data comes from: the local demo engine or a connected gateway */
+export type WardSource = 'demo' | 'gateway';
 
-export interface Vehicle {
-	info: VehicleInfo | undefined;
-	state: VehicleState | undefined;
-	source: VehicleSource;
+export interface Ward {
+	info: WardInfo | undefined;
+	state: WardState | undefined;
+	source: WardSource;
 }
 
 export interface DraftWaypoint {
@@ -29,7 +29,7 @@ export interface DraftWaypoint {
 }
 
 export interface MissionDraft {
-	vehicleId: string;
+	wardId: string;
 	waypoints: DraftWaypoint[];
 	repeatCount: number;
 }
@@ -39,7 +39,7 @@ const WAYPOINT_ACCEPTANCE_RADIUS_M = 2;
 
 export interface CommandTracker {
 	commandId: string;
-	vehicleId: string;
+	wardId: string;
 	/** the action oneof case, e.g. "takeoff" */
 	kind: string;
 	status: CommandStatus;
@@ -47,11 +47,11 @@ export interface CommandTracker {
 	sentAtMs: number;
 }
 
-export interface VehicleConfigTracker {
+export interface WardConfigTracker {
 	requestId: string;
 	kind: 'add' | 'remove';
-	vehicleId: string;
-	status: VehicleConfigStatus;
+	wardId: string;
+	status: WardConfigStatus;
 	message: string;
 	sentAtMs: number;
 }
@@ -62,14 +62,14 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const TRACKER_LINGER_MS = 6_000;
 const GATEWAY_URL_STORAGE_KEY = 'karshipta.gatewayUrl';
 /**
- * Each demo vehicle's home location, not just how many there were: a plain
- * count (this key's previous shape) loses exactly the thing spawnVehicle
- * now needs to reproduce a vehicle where the operator actually put it -
- * respawning N vehicles with no location silently drops them all back to
+ * Each demo ward's home location, not just how many there were: a plain
+ * count (this key's previous shape) loses exactly the thing spawnWard
+ * now needs to reproduce a ward where the operator actually put it -
+ * respawning N wards with no location silently drops them all back to
  * FAKE_FLEET_CENTER, which is what happened before this fix (deploy in
- * Amsterdam, refresh, vehicle is back in Zurich).
+ * Amsterdam, refresh, ward is back in Zurich).
  */
-const DEMO_VEHICLE_HOMES_STORAGE_KEY = 'karshipta.demoVehicleHomes';
+const DEMO_WARD_HOMES_STORAGE_KEY = 'karshipta.demoWardHomes';
 
 export function isTerminal(status: CommandStatus): boolean {
 	return (
@@ -79,10 +79,10 @@ export function isTerminal(status: CommandStatus): boolean {
 	);
 }
 
-export function isConfigTerminal(status: VehicleConfigStatus): boolean {
+export function isConfigTerminal(status: WardConfigStatus): boolean {
 	return (
-		status === VehicleConfigStatus.VEHICLE_CONFIG_STATUS_ACCEPTED ||
-		status === VehicleConfigStatus.VEHICLE_CONFIG_STATUS_REJECTED
+		status === WardConfigStatus.WARD_CONFIG_STATUS_ACCEPTED ||
+		status === WardConfigStatus.WARD_CONFIG_STATUS_REJECTED
 	);
 }
 
@@ -91,9 +91,9 @@ function readStoredGatewayUrl(): string | undefined {
 	return localStorage.getItem(GATEWAY_URL_STORAGE_KEY) ?? undefined;
 }
 
-function readStoredDemoVehicleHomes(): LatLon[] {
+function readStoredDemoWardHomes(): LatLon[] {
 	if (typeof localStorage === 'undefined') return [];
-	const raw = localStorage.getItem(DEMO_VEHICLE_HOMES_STORAGE_KEY);
+	const raw = localStorage.getItem(DEMO_WARD_HOMES_STORAGE_KEY);
 	if (!raw) return [];
 	try {
 		const parsed: unknown = JSON.parse(raw);
@@ -112,21 +112,21 @@ function readStoredDemoVehicleHomes(): LatLon[] {
 }
 
 /**
- * Single owner of all live fleet state, keyed by vehicle_id. Two independent
+ * Single owner of all live fleet state, keyed by ward_id. Two independent
  * channels feed it: the local demo engine (always available, instant, never
  * touches a network) and an optionally connected gateway (real hardware or
- * simulated vehicles behind a real gateway process). Every vehicle carries
+ * simulated wards behind a real gateway process). Every ward carries
  * which channel it came from, so commands and mission uploads route to the
- * right one and disconnecting the gateway never touches demo vehicles.
- * Components only read; connection and vehicle lifecycle are explicit
+ * right one and disconnecting the gateway never touches demo wards.
+ * Components only read; connection and ward lifecycle are explicit
  * actions, never automatic.
  */
 class FleetStore {
-	vehicles = $state<Record<string, Vehicle>>({});
+	wards = $state<Record<string, Ward>>({});
 	events = $state<Event[]>([]);
 	commands = $state<Record<string, CommandTracker>>({});
-	vehicleConfigRequests = $state<Record<string, VehicleConfigTracker>>({});
-	selectedVehicleId = $state<string | undefined>(undefined);
+	wardConfigRequests = $state<Record<string, WardConfigTracker>>({});
+	selectedWardId = $state<string | undefined>(undefined);
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
@@ -135,17 +135,17 @@ class FleetStore {
 	gatewayUrl = $state(readStoredGatewayUrl() ?? '');
 	/** read-only session: telemetry flows, commanding is refused observably */
 	readonly = $state(false);
-	/** how many simulated-vehicle adds this session has requested; drives the resource warning at C7's UI layer */
-	simulatedVehicleAddCount = $state(0);
-	/** mission being planned; while set, map clicks add waypoints for its vehicle */
+	/** how many simulated-ward adds this session has requested; drives the resource warning at C7's UI layer */
+	simulatedWardAddCount = $state(0);
+	/** mission being planned; while set, map clicks add waypoints for its ward */
 	missionDraft = $state<MissionDraft | undefined>(undefined);
-	/** last uploaded mission per vehicle, so Start knows what it refers to */
+	/** last uploaded mission per ward, so Start knows what it refers to */
 	uploadedMissions = $state<Record<string, Mission>>({});
 	missionProgress = $state<Record<string, MissionProgress>>({});
 
-	readonly vehicleIds = $derived(Object.keys(this.vehicles).sort());
-	readonly selectedVehicle = $derived(
-		this.selectedVehicleId !== undefined ? this.vehicles[this.selectedVehicleId] : undefined
+	readonly wardIds = $derived(Object.keys(this.wards).sort());
+	readonly selectedWard = $derived(
+		this.selectedWardId !== undefined ? this.wards[this.selectedWardId] : undefined
 	);
 	readonly gatewayConnected = $derived(this.link === 'live');
 
@@ -153,25 +153,25 @@ class FleetStore {
 	private gatewayTransport: FleetTransport | undefined;
 	// timers are bookkeeping, not state
 	private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	// each live demo vehicle's home location, keyed by id - bookkeeping for
-	// persistDemoVehicleHomes(), not state components read directly
-	private demoVehicleHomes: Record<string, LatLon> = {};
+	// each live demo ward's home location, keyed by id - bookkeeping for
+	// persistDemoWardHomes(), not state components read directly
+	private demoWardHomes: Record<string, LatLon> = {};
 
 	/**
 	 * Wires the always-available local demo engine; call once at app start.
 	 * Respawns whatever demo fleet was persisted from a previous session
-	 * (see addDemoVehicle/removeDemoVehicle), each at its original home
+	 * (see addDemoWard/removeDemoWard), each at its original home
 	 * location, so a browser refresh doesn't wipe a locally-run operator's
 	 * fleet back to empty or move it back to FAKE_FLEET_CENTER - the
-	 * vehicles come back on a fresh patrol (armed, not mid-mission), not
+	 * wards come back on a fresh patrol (armed, not mid-mission), not
 	 * with their exact prior flight state restored.
 	 */
 	bindDemoEngine(engine: DemoEngine): void {
 		this.demoEngine = engine;
 		engine.start();
-		for (const home of readStoredDemoVehicleHomes()) {
-			const vehicleId = engine.spawnVehicle(home);
-			this.demoVehicleHomes[vehicleId] = home;
+		for (const home of readStoredDemoWardHomes()) {
+			const wardId = engine.spawnWard(home);
+			this.demoWardHomes[wardId] = home;
 		}
 	}
 
@@ -194,10 +194,10 @@ class FleetStore {
 		this.gatewayTransport?.stop();
 		this.gatewayTransport = undefined;
 		this.link = 'down';
-		for (const [id, vehicle] of Object.entries(this.vehicles)) {
-			if (vehicle.source === 'gateway') delete this.vehicles[id];
+		for (const [id, ward] of Object.entries(this.wards)) {
+			if (ward.source === 'gateway') delete this.wards[id];
 		}
-		if (this.selectedVehicleId && !(this.selectedVehicleId in this.vehicles)) {
+		if (this.selectedWardId && !(this.selectedWardId in this.wards)) {
 			this.select(undefined);
 		}
 	}
@@ -206,10 +206,10 @@ class FleetStore {
 		this.link = status === 'open' ? 'live' : status === 'connecting' ? 'connecting' : 'down';
 	}
 
-	select(vehicleId: string | undefined): void {
-		this.selectedVehicleId = vehicleId;
+	select(wardId: string | undefined): void {
+		this.selectedWardId = wardId;
 		this.cancelGoto();
-		if (this.missionDraft && this.missionDraft.vehicleId !== vehicleId) {
+		if (this.missionDraft && this.missionDraft.wardId !== wardId) {
 			this.cancelPlanning();
 		}
 	}
@@ -230,9 +230,9 @@ class FleetStore {
 		this.pendingGoto = { latitudeDeg, longitudeDeg };
 	}
 
-	startPlanning(vehicleId: string): void {
+	startPlanning(wardId: string): void {
 		this.cancelGoto();
-		this.missionDraft = { vehicleId, waypoints: [], repeatCount: 0 };
+		this.missionDraft = { wardId, waypoints: [], repeatCount: 0 };
 	}
 
 	cancelPlanning(): void {
@@ -261,7 +261,7 @@ class FleetStore {
 		if (!draft || draft.waypoints.length === 0) return undefined;
 		const mission: Mission = {
 			missionId: crypto.randomUUID(),
-			vehicleId: draft.vehicleId,
+			wardId: draft.wardId,
 			name: `mission-${new Date().toISOString().slice(11, 19)}`,
 			repeatCount: draft.repeatCount,
 			items: draft.waypoints.map((waypoint, index) => ({
@@ -278,25 +278,25 @@ class FleetStore {
 				acceptanceRadiusM: WAYPOINT_ACCEPTANCE_RADIUS_M
 			}))
 		};
-		const channel = this.channelFor(draft.vehicleId);
+		const channel = this.channelFor(draft.wardId);
 		if (!channel) {
-			console.error(`fleet: cannot upload mission, ${draft.vehicleId} has no active channel`);
+			console.error(`fleet: cannot upload mission, ${draft.wardId} has no active channel`);
 			return undefined;
 		}
 		channel.send({ payload: { $case: 'missionUpload', missionUpload: mission } });
-		this.uploadedMissions[draft.vehicleId] = mission;
-		delete this.missionProgress[draft.vehicleId];
+		this.uploadedMissions[draft.wardId] = mission;
+		delete this.missionProgress[draft.wardId];
 		return mission;
 	}
 
-	sendCommand(vehicleId: string, action: NonNullable<Command['action']>): string {
+	sendCommand(wardId: string, action: NonNullable<Command['action']>): string {
 		if (this.readonly) {
 			// belt and braces: viewer mode hides the command UI, but any path
 			// that still sends must settle observably, never silently
 			const refusedId = crypto.randomUUID();
 			this.commands[refusedId] = {
 				commandId: refusedId,
-				vehicleId,
+				wardId,
 				kind: action.$case,
 				status: CommandStatus.COMMAND_STATUS_REJECTED,
 				message: 'read-only session',
@@ -306,19 +306,19 @@ class FleetStore {
 		}
 		const command: Command = {
 			commandId: crypto.randomUUID(),
-			vehicleId,
+			wardId,
 			timestampMs: Date.now(),
 			action
 		};
 		this.commands[command.commandId] = {
 			commandId: command.commandId,
-			vehicleId,
+			wardId,
 			kind: action.$case,
 			status: CommandStatus.COMMAND_STATUS_UNSPECIFIED,
 			message: '',
 			sentAtMs: command.timestampMs
 		};
-		const channel = this.channelFor(vehicleId);
+		const channel = this.channelFor(wardId);
 		if (!channel) {
 			this.settle(command.commandId, CommandStatus.COMMAND_STATUS_REJECTED, 'no active channel');
 			return command.commandId;
@@ -342,78 +342,78 @@ class FleetStore {
 		return command.commandId;
 	}
 
-	/** in-flight and recently settled commands for one vehicle, newest first */
-	commandsFor(vehicleId: string): CommandTracker[] {
+	/** in-flight and recently settled commands for one ward, newest first */
+	commandsFor(wardId: string): CommandTracker[] {
 		return Object.values(this.commands)
-			.filter((tracker) => tracker.vehicleId === vehicleId)
+			.filter((tracker) => tracker.wardId === wardId)
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
 	/**
-	 * Adds a vehicle through the connected gateway (covers both a simulated
+	 * Adds a ward through the connected gateway (covers both a simulated
 	 * SITL endpoint and real hardware; the gateway sees no difference). No
 	 * gateway connection means nothing to send to, reported immediately.
 	 */
-	noteSimulatedVehicleRequested(): void {
-		this.simulatedVehicleAddCount += 1;
+	noteSimulatedWardRequested(): void {
+		this.simulatedWardAddCount += 1;
 	}
 
-	requestAddVehicle(spec: {
-		vehicleId: string;
+	requestAddWard(spec: {
+		wardId: string;
 		name: string;
-		type: VehicleType;
+		wardClass: WardClass;
 		connectionUrl: string;
 		mavlinkSystemId: number;
 	}): string {
 		const requestId = crypto.randomUUID();
-		const addVehicle: AddVehicle = { requestId, ...spec };
-		this.trackConfigRequest(requestId, 'add', spec.vehicleId, () => ({
-			payload: { $case: 'addVehicle', addVehicle }
+		const addWard: AddWard = { requestId, ...spec };
+		this.trackConfigRequest(requestId, 'add', spec.wardId, () => ({
+			payload: { $case: 'addWard', addWard }
 		}));
 		return requestId;
 	}
 
-	requestRemoveVehicle(vehicleId: string): string {
+	requestRemoveWard(wardId: string): string {
 		const requestId = crypto.randomUUID();
-		this.trackConfigRequest(requestId, 'remove', vehicleId, () => ({
-			payload: { $case: 'removeVehicle', removeVehicle: { requestId, vehicleId } }
+		this.trackConfigRequest(requestId, 'remove', wardId, () => ({
+			payload: { $case: 'removeWard', removeWard: { requestId, wardId } }
 		}));
 		return requestId;
 	}
 
-	configRequestsFor(vehicleId: string): VehicleConfigTracker[] {
-		return Object.values(this.vehicleConfigRequests)
-			.filter((tracker) => tracker.vehicleId === vehicleId)
+	configRequestsFor(wardId: string): WardConfigTracker[] {
+		return Object.values(this.wardConfigRequests)
+			.filter((tracker) => tracker.wardId === wardId)
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
-	/** spawns a new demo vehicle purely client-side; never touches a network */
-	addDemoVehicle(location?: LatLon): void {
-		const vehicleId = this.demoEngine?.spawnVehicle(location);
-		if (vehicleId) this.demoVehicleHomes[vehicleId] = location ?? FAKE_FLEET_CENTER;
-		this.persistDemoVehicleHomes();
+	/** spawns a new demo ward purely client-side; never touches a network */
+	addDemoWard(location?: LatLon): void {
+		const wardId = this.demoEngine?.spawnWard(location);
+		if (wardId) this.demoWardHomes[wardId] = location ?? FAKE_FLEET_CENTER;
+		this.persistDemoWardHomes();
 	}
 
-	removeDemoVehicle(vehicleId: string): void {
-		this.demoEngine?.despawnVehicle(vehicleId);
-		delete this.vehicles[vehicleId];
-		delete this.demoVehicleHomes[vehicleId];
-		if (this.selectedVehicleId === vehicleId) this.select(undefined);
-		this.persistDemoVehicleHomes();
+	removeDemoWard(wardId: string): void {
+		this.demoEngine?.despawnWard(wardId);
+		delete this.wards[wardId];
+		delete this.demoWardHomes[wardId];
+		if (this.selectedWardId === wardId) this.select(undefined);
+		this.persistDemoWardHomes();
 	}
 
-	applyEnvelope(envelope: Envelope, source: VehicleSource): void {
+	applyEnvelope(envelope: Envelope, source: WardSource): void {
 		const payload = envelope.payload;
 		if (payload === undefined) {
 			console.warn('fleet: dropping Envelope with empty payload');
 			return;
 		}
 		switch (payload.$case) {
-			case 'vehicleInfo':
-				this.upsert(payload.vehicleInfo.vehicleId, source).info = payload.vehicleInfo;
+			case 'wardInfo':
+				this.upsert(payload.wardInfo.wardId, source).info = payload.wardInfo;
 				break;
-			case 'vehicleState':
-				this.upsert(payload.vehicleState.vehicleId, source).state = payload.vehicleState;
+			case 'wardState':
+				this.upsert(payload.wardState.wardId, source).state = payload.wardState;
 				break;
 			case 'event':
 				this.events = [payload.event, ...this.events].slice(0, MAX_EVENTS);
@@ -429,35 +429,35 @@ class FleetStore {
 				break;
 			}
 			case 'missionProgress':
-				this.missionProgress[payload.missionProgress.vehicleId] = payload.missionProgress;
+				this.missionProgress[payload.missionProgress.wardId] = payload.missionProgress;
 				break;
 			case 'missionDownload':
 				// Response to mission_download_request: the mission currently on the
-				// vehicle. Same slot as an upload, since both represent "what's on the
-				// vehicle now". No console UI sends mission_download_request yet.
-				this.uploadedMissions[payload.missionDownload.vehicleId] = payload.missionDownload;
+				// ward. Same slot as an upload, since both represent "what's on the
+				// ward now". No console UI sends mission_download_request yet.
+				this.uploadedMissions[payload.missionDownload.wardId] = payload.missionDownload;
 				break;
-			case 'vehicleConfigAck': {
-				const ack = payload.vehicleConfigAck;
-				const tracker = this.vehicleConfigRequests[ack.requestId];
+			case 'wardConfigAck': {
+				const ack = payload.wardConfigAck;
+				const tracker = this.wardConfigRequests[ack.requestId];
 				if (!tracker) {
-					console.warn(`fleet: VehicleConfigAck for unknown request_id ${ack.requestId}`);
+					console.warn(`fleet: WardConfigAck for unknown request_id ${ack.requestId}`);
 					break;
 				}
 				this.settleConfig(ack.requestId, ack.status, ack.message);
 				if (
 					tracker.kind === 'remove' &&
-					ack.status === VehicleConfigStatus.VEHICLE_CONFIG_STATUS_ACCEPTED
+					ack.status === WardConfigStatus.WARD_CONFIG_STATUS_ACCEPTED
 				) {
-					delete this.vehicles[ack.vehicleId];
-					if (this.selectedVehicleId === ack.vehicleId) this.select(undefined);
+					delete this.wards[ack.wardId];
+					if (this.selectedWardId === ack.wardId) this.select(undefined);
 				}
 				break;
 			}
 			case 'command':
 			case 'missionUpload':
-			case 'addVehicle':
-			case 'removeVehicle':
+			case 'addWard':
+			case 'removeWard':
 			case 'missionFileUpload':
 			case 'missionDownloadRequest':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
@@ -476,19 +476,19 @@ class FleetStore {
 		this.disconnectGateway();
 		for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
 		this.timeoutTimers.clear();
-		this.vehicles = {};
+		this.wards = {};
 		this.events = [];
 		this.commands = {};
-		this.vehicleConfigRequests = {};
-		this.selectedVehicleId = undefined;
+		this.wardConfigRequests = {};
+		this.selectedWardId = undefined;
 		this.missionDraft = undefined;
 		this.uploadedMissions = {};
 		this.missionProgress = {};
 		this.cancelGoto();
 	}
 
-	private channelFor(vehicleId: string): FleetTransport | undefined {
-		const source = this.vehicles[vehicleId]?.source;
+	private channelFor(wardId: string): FleetTransport | undefined {
+		const source = this.wards[wardId]?.source;
 		if (source === 'demo') return this.demoEngine;
 		if (source === 'gateway') return this.gatewayTransport;
 		return undefined;
@@ -497,21 +497,21 @@ class FleetStore {
 	private trackConfigRequest(
 		requestId: string,
 		kind: 'add' | 'remove',
-		vehicleId: string,
+		wardId: string,
 		buildEnvelope: () => Envelope
 	): void {
-		this.vehicleConfigRequests[requestId] = {
+		this.wardConfigRequests[requestId] = {
 			requestId,
 			kind,
-			vehicleId,
-			status: VehicleConfigStatus.VEHICLE_CONFIG_STATUS_UNSPECIFIED,
+			wardId,
+			status: WardConfigStatus.WARD_CONFIG_STATUS_UNSPECIFIED,
 			message: '',
 			sentAtMs: Date.now()
 		};
 		if (!this.gatewayTransport) {
 			this.settleConfig(
 				requestId,
-				VehicleConfigStatus.VEHICLE_CONFIG_STATUS_REJECTED,
+				WardConfigStatus.WARD_CONFIG_STATUS_REJECTED,
 				'no gateway connected'
 			);
 			return;
@@ -521,7 +521,7 @@ class FleetStore {
 			setTimeout(() => {
 				this.settleConfig(
 					requestId,
-					VehicleConfigStatus.VEHICLE_CONFIG_STATUS_REJECTED,
+					WardConfigStatus.WARD_CONFIG_STATUS_REJECTED,
 					'no acknowledgment from gateway'
 				);
 			}, REQUEST_TIMEOUT_MS)
@@ -530,7 +530,7 @@ class FleetStore {
 			this.gatewayTransport.send(buildEnvelope());
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
-			this.settleConfig(requestId, VehicleConfigStatus.VEHICLE_CONFIG_STATUS_REJECTED, reason);
+			this.settleConfig(requestId, WardConfigStatus.WARD_CONFIG_STATUS_REJECTED, reason);
 		}
 	}
 
@@ -551,8 +551,8 @@ class FleetStore {
 		}
 	}
 
-	private settleConfig(requestId: string, status: VehicleConfigStatus, message: string): void {
-		const tracker = this.vehicleConfigRequests[requestId];
+	private settleConfig(requestId: string, status: WardConfigStatus, message: string): void {
+		const tracker = this.wardConfigRequests[requestId];
 		if (!tracker || isConfigTerminal(tracker.status)) return;
 		tracker.status = status;
 		tracker.message = message;
@@ -563,26 +563,26 @@ class FleetStore {
 				this.timeoutTimers.delete(requestId);
 			}
 			setTimeout(() => {
-				delete this.vehicleConfigRequests[requestId];
+				delete this.wardConfigRequests[requestId];
 			}, TRACKER_LINGER_MS);
 		}
 	}
 
-	private persistDemoVehicleHomes(): void {
+	private persistDemoWardHomes(): void {
 		if (typeof localStorage === 'undefined') return;
-		const homes = Object.values(this.demoVehicleHomes);
+		const homes = Object.values(this.demoWardHomes);
 		if (homes.length > 0) {
-			localStorage.setItem(DEMO_VEHICLE_HOMES_STORAGE_KEY, JSON.stringify(homes));
+			localStorage.setItem(DEMO_WARD_HOMES_STORAGE_KEY, JSON.stringify(homes));
 		} else {
-			localStorage.removeItem(DEMO_VEHICLE_HOMES_STORAGE_KEY);
+			localStorage.removeItem(DEMO_WARD_HOMES_STORAGE_KEY);
 		}
 	}
 
-	private upsert(vehicleId: string, source: VehicleSource): Vehicle {
-		if (!(vehicleId in this.vehicles)) {
-			this.vehicles[vehicleId] = { info: undefined, state: undefined, source };
+	private upsert(wardId: string, source: WardSource): Ward {
+		if (!(wardId in this.wards)) {
+			this.wards[wardId] = { info: undefined, state: undefined, source };
 		}
-		return this.vehicles[vehicleId];
+		return this.wards[wardId];
 	}
 }
 
