@@ -25,11 +25,11 @@
 
 {#if visible.length > 0}
 	<section
-		class="border-edge bg-panel/90 absolute right-4 bottom-8 w-80 rounded border p-3"
+		class="absolute right-4 bottom-8 w-80 rounded border border-edge bg-panel/90 p-3"
 		aria-label="Events"
 		aria-live="polite"
 	>
-		<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">EVENTS</h3>
+		<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">EVENTS</h3>
 		<ul class="mt-2 space-y-1">
 			<!-- keyed by index: identical (ts, code, ward) tuples can occur in one tick -->
 			{#each visible as event, index (index)}
@@ -39,11 +39,11 @@
 							event.severity
 						)}"
 					></span>
-					<span class="text-fg-muted font-mono tabular-nums">{time(event.timestampMs)}</span>
+					<span class="font-mono text-fg-muted tabular-nums">{time(event.timestampMs)}</span>
 					{#if event.wardId}
 						<span class="font-mono">{event.wardId}</span>
 					{/if}
-					<span class="text-fg-muted truncate">{event.message}</span>
+					<span class="truncate text-fg-muted">{event.message}</span>
 				</li>
 			{/each}
 		</ul>

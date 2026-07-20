@@ -824,7 +824,7 @@
 	{#if mapError}
 		<p
 			role="alert"
-			class="border-critical bg-panel text-critical absolute inset-x-0 top-1/2 mx-auto w-fit max-w-lg rounded border px-4 py-2 text-sm"
+			class="absolute inset-x-0 top-1/2 mx-auto w-fit max-w-lg rounded border border-critical bg-panel px-4 py-2 text-sm text-critical"
 		>
 			Map unavailable: {mapError}
 		</p>
@@ -869,7 +869,7 @@
 				onclick={() => (layersMenuOpen = !layersMenuOpen)}
 				aria-expanded={layersMenuOpen}
 				aria-label="Map layers"
-				class="border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg flex h-8 w-8 items-center justify-center rounded border"
+				class="flex h-8 w-8 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg"
 			>
 				<svg
 					width="15"
@@ -887,10 +887,10 @@
 			</button>
 			{#if layersMenuOpen}
 				<div
-					class="border-edge bg-panel/95 absolute top-1/2 right-10 flex w-40 -translate-y-1/2 flex-col gap-3 rounded border p-2.5"
+					class="absolute top-1/2 right-10 flex w-40 -translate-y-1/2 flex-col gap-3 rounded border border-edge bg-panel/95 p-2.5"
 				>
 					<div>
-						<p class="text-fg-muted mb-1.5 text-[9px] font-medium tracking-widest">MAP STYLE</p>
+						<p class="mb-1.5 text-[9px] font-medium tracking-widest text-fg-muted">MAP STYLE</p>
 						<!-- A choice, not an on/off switch - checkmarks against the
 					     selected option, not a checkbox, since exactly one is always
 					     active. Light/dark isn't offered here: it follows the
@@ -921,7 +921,7 @@
 						</div>
 					</div>
 					{#if geozoneStore.active}
-						<div class="border-edge border-t pt-2">
+						<div class="border-t border-edge pt-2">
 							<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
 								<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
 								No-fly zones
@@ -935,7 +935,7 @@
 
 	{#if geozoneStore.active && showGeozones}
 		<ul
-			class="border-edge bg-panel/90 absolute bottom-8 left-4 flex gap-3 rounded border px-2 py-1"
+			class="absolute bottom-8 left-4 flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1"
 			aria-label="Airspace zone legend"
 		>
 			<li class="flex items-center gap-1 text-[10px]">

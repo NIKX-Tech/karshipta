@@ -23,12 +23,12 @@
 		role="alertdialog"
 		aria-modal="true"
 		aria-label={title}
-		class="border-edge bg-panel w-80 rounded border p-4"
+		class="w-80 rounded border border-edge bg-panel p-4"
 	>
 		<h3 class="font-display text-sm font-semibold">{title}</h3>
-		<p class="text-fg-muted mt-2 text-xs">{body}</p>
+		<p class="mt-2 text-xs text-fg-muted">{body}</p>
 		{#if warning}
-			<p class="text-accent mt-2 text-xs" role="alert">{warning}</p>
+			<p class="mt-2 text-xs text-accent" role="alert">{warning}</p>
 		{/if}
 		<div class="mt-4 flex justify-end gap-2">
 			<!-- autofocus on the safe action when a flight-critical dialog opens -->
@@ -36,13 +36,13 @@
 			<button
 				autofocus
 				onclick={oncancel}
-				class="border-edge text-fg-muted hover:text-fg rounded border px-3 py-1.5 text-xs"
+				class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
 			>
 				Cancel
 			</button>
 			<button
 				onclick={onconfirm}
-				class="bg-critical/15 border-critical/60 text-critical hover:bg-critical/25 rounded border px-3 py-1.5 text-xs font-medium"
+				class="rounded border border-critical/60 bg-critical/15 px-3 py-1.5 text-xs font-medium text-critical hover:bg-critical/25"
 			>
 				{confirmLabel}
 			</button>

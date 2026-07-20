@@ -61,8 +61,8 @@
 	});
 </script>
 
-<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Commands for {wardId}">
-	<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">COMMANDS</h3>
+<section class="rounded border border-edge bg-panel/90 p-3" aria-label="Commands for {wardId}">
+	<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">COMMANDS</h3>
 
 	<div class="mt-2 grid grid-cols-3 gap-1.5">
 		<button
@@ -147,20 +147,20 @@
 		</button>
 	</div>
 
-	<label class="text-fg-muted mt-2 flex items-center gap-2 text-[10px]">
+	<label class="mt-2 flex items-center gap-2 text-[10px] text-fg-muted">
 		Takeoff alt
 		<input
 			type="number"
 			min="2"
 			max="120"
 			bind:value={takeoffAltM}
-			class="border-edge bg-ink w-16 rounded border px-1.5 py-0.5 font-mono text-xs tabular-nums"
+			class="w-16 rounded border border-edge bg-ink px-1.5 py-0.5 font-mono text-xs tabular-nums"
 		/>
 		m
 	</label>
 
 	{#if fleet.gotoArming}
-		<p class="text-selected mt-2 text-[10px]">Click the map to set the goto target.</p>
+		<p class="mt-2 text-[10px] text-selected">Click the map to set the goto target.</p>
 	{/if}
 
 	{#if trackers.length > 0}
@@ -174,12 +174,12 @@
 							: tracker.status === CommandStatus.COMMAND_STATUS_REJECTED ||
 								  tracker.status === CommandStatus.COMMAND_STATUS_TIMEOUT
 								? 'text-critical'
-								: 'text-accent animate-pulse'}
+								: 'animate-pulse text-accent'}
 					>
 						{statusLabel(tracker.status)}
 					</span>
 					{#if tracker.message}
-						<span class="text-fg-muted truncate">{tracker.message}</span>
+						<span class="truncate text-fg-muted">{tracker.message}</span>
 					{/if}
 				</li>
 			{/each}

@@ -18,13 +18,13 @@
 
 <div
 	role="status"
-	class="border-edge bg-panel fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded border px-4 py-2.5 shadow-lg"
+	class="fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded border border-edge bg-panel px-4 py-2.5 shadow-lg"
 >
 	<div class="text-xs">
-		<p class="text-fg font-medium">
+		<p class="font-medium text-fg">
 			{locating ? 'Finding your location...' : 'Click the map to move the spawn point'}
 		</p>
-		<p class="text-fg-muted font-mono text-[10px] tabular-nums">
+		<p class="font-mono text-[10px] text-fg-muted tabular-nums">
 			{lat.toFixed(5)}, {lon.toFixed(5)}
 		</p>
 	</div>
@@ -32,7 +32,7 @@
 	<button
 		type="button"
 		onclick={oncancel}
-		class="border-edge text-fg-muted hover:text-fg rounded border px-3 py-1.5 text-xs"
+		class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
 	>
 		Cancel
 	</button>

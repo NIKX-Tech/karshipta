@@ -53,27 +53,27 @@
 </script>
 
 {#if variant === 'full'}
-	<div class="border-edge bg-panel/95 pointer-events-auto w-96 rounded border p-5 text-center">
+	<div class="pointer-events-auto w-96 rounded border border-edge bg-panel/95 p-5 text-center">
 		<h2 class="font-display text-sm font-semibold">No wards yet</h2>
-		<p class="text-fg-muted mt-1 text-xs">Add a ward to see it on the map.</p>
+		<p class="mt-1 text-xs text-fg-muted">Add a ward to see it on the map.</p>
 
 		<div class="mt-4 flex flex-col gap-2">
 			<button class="onboarding-button" onclick={addDemo}>
 				Add demo ward
-				<span class="text-fg-muted block text-[10px] font-normal">Instant, no gateway needed</span>
+				<span class="block text-[10px] font-normal text-fg-muted">Instant, no gateway needed</span>
 			</button>
 			<button class="onboarding-button" onclick={openSimulated}>
 				Add simulated ward
-				<span class="text-fg-muted block text-[10px] font-normal">PX4 SITL, through a gateway</span>
+				<span class="block text-[10px] font-normal text-fg-muted">PX4 SITL, through a gateway</span>
 			</button>
 			<button class="onboarding-button" onclick={openReal}>
 				Connect real ward
-				<span class="text-fg-muted block text-[10px] font-normal">MAVLink over a gateway</span>
+				<span class="block text-[10px] font-normal text-fg-muted">MAVLink over a gateway</span>
 			</button>
 		</div>
 
 		{#if !fleet.gatewayConnected}
-			<p class="text-fg-muted mt-3 text-[10px]">
+			<p class="mt-3 text-[10px] text-fg-muted">
 				Simulated and real wards need a running gateway; the amber GATEWAY button top-right connects
 				one.
 			</p>
@@ -82,7 +82,7 @@
 {:else}
 	<div class="relative">
 		<button
-			class="border-edge hover:border-accent text-fg-muted hover:text-fg rounded border px-2 py-1 font-mono text-xs"
+			class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
 			aria-label="Add ward"
 			aria-expanded={compactMenuOpen}
 			onclick={() => (compactMenuOpen = !compactMenuOpen)}
@@ -91,7 +91,7 @@
 		</button>
 		{#if compactMenuOpen}
 			<div
-				class="border-edge bg-panel absolute top-full left-0 z-30 mt-1 w-56 rounded border p-1.5"
+				class="absolute top-full left-0 z-30 mt-1 w-56 rounded border border-edge bg-panel p-1.5"
 				aria-label="Add ward menu"
 			>
 				<button class="menu-item" onclick={addDemo}>Add demo ward</button>
@@ -108,23 +108,23 @@
 			role="alertdialog"
 			aria-modal="true"
 			aria-label="Add another simulated ward"
-			class="border-edge bg-panel w-80 rounded border p-4"
+			class="w-80 rounded border border-edge bg-panel p-4"
 		>
 			<h3 class="font-display text-sm font-semibold">Add another simulated ward?</h3>
-			<p class="text-fg-muted mt-2 text-xs">
+			<p class="mt-2 text-xs text-fg-muted">
 				Each simulated ward is a full autopilot build running on your machine. A few at once can
 				make fans spin up and the machine run hot.
 			</p>
 			<div class="mt-4 flex justify-end gap-2">
 				<button
 					onclick={() => (simConfirmOpen = false)}
-					class="border-edge text-fg-muted hover:text-fg rounded border px-3 py-1.5 text-xs"
+					class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
 				>
 					Cancel
 				</button>
 				<button
 					onclick={startSimulated}
-					class="bg-accent/15 border-accent/60 text-accent hover:bg-accent/25 rounded border px-3 py-1.5 text-xs font-medium"
+					class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
 				>
 					Add anyway
 				</button>
