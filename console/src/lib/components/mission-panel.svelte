@@ -33,21 +33,21 @@
 	});
 </script>
 
-<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Mission for {wardId}">
-	<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">MISSION</h3>
+<section class="rounded border border-edge bg-panel/90 p-3" aria-label="Mission for {wardId}">
+	<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">MISSION</h3>
 
 	{#if !draft}
 		<button class="mission-button mt-2" onclick={() => fleet.startPlanning(wardId)}>
 			{uploaded ? 'Plan new mission' : 'Plan mission'}
 		</button>
 	{:else}
-		<p class="text-selected mt-2 text-[10px]">Click the map to add waypoints.</p>
+		<p class="mt-2 text-[10px] text-selected">Click the map to add waypoints.</p>
 		{#if draft.waypoints.length > 0}
 			<ol class="mt-2 space-y-1" aria-label="Waypoints">
 				{#each draft.waypoints as waypoint, index (index)}
 					<li class="flex items-center gap-2 text-[10px]">
-						<span class="text-selected w-5 font-mono">{index + 1}</span>
-						<span class="text-fg-muted font-mono tabular-nums">
+						<span class="w-5 font-mono text-selected">{index + 1}</span>
+						<span class="font-mono text-fg-muted tabular-nums">
 							{waypoint.latitudeDeg.toFixed(4)}, {waypoint.longitudeDeg.toFixed(4)}
 						</span>
 						<input
@@ -56,11 +56,11 @@
 							max="120"
 							aria-label="Waypoint {index + 1} altitude"
 							bind:value={waypoint.altitudeRelM}
-							class="border-edge bg-ink ml-auto w-12 rounded border px-1 py-0.5 font-mono text-[10px] tabular-nums"
+							class="ml-auto w-12 rounded border border-edge bg-ink px-1 py-0.5 font-mono text-[10px] tabular-nums"
 						/>
 						<span class="text-fg-muted">m</span>
 						<button
-							class="text-fg-muted hover:text-critical px-0.5"
+							class="px-0.5 text-fg-muted hover:text-critical"
 							aria-label="Remove waypoint {index + 1}"
 							onclick={() => fleet.removeWaypoint(index)}
 						>
@@ -70,14 +70,14 @@
 				{/each}
 			</ol>
 		{/if}
-		<label class="text-fg-muted mt-2 flex items-center gap-2 text-[10px]">
+		<label class="mt-2 flex items-center gap-2 text-[10px] text-fg-muted">
 			Repeat
 			<input
 				type="number"
 				min="0"
 				max="100"
 				bind:value={draft.repeatCount}
-				class="border-edge bg-ink w-12 rounded border px-1 py-0.5 font-mono text-xs tabular-nums"
+				class="w-12 rounded border border-edge bg-ink px-1 py-0.5 font-mono text-xs tabular-nums"
 			/>
 			extra passes
 		</label>
@@ -96,7 +96,7 @@
 	{/if}
 
 	{#if uploaded && !draft}
-		<p class="text-fg-muted mt-2 font-mono text-[10px] tabular-nums">
+		<p class="mt-2 font-mono text-[10px] text-fg-muted tabular-nums">
 			{uploaded.name} &middot; {uploaded.items.length} wp &middot; {uploaded.repeatCount} repeats
 		</p>
 		<div class="mt-2 flex gap-1.5">

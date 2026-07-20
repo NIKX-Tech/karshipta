@@ -80,13 +80,13 @@
 		role="dialog"
 		aria-modal="true"
 		aria-label={mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
-		class="border-edge bg-panel w-80 rounded border p-4"
+		class="w-80 rounded border border-edge bg-panel p-4"
 	>
 		<form onsubmit={submit}>
 			<h3 class="font-display text-sm font-semibold">
 				{mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
 			</h3>
-			<p class="text-fg-muted mt-1 text-xs">
+			<p class="mt-1 text-xs text-fg-muted">
 				{#if fleet.gatewayConnected}
 					Sent to the connected gateway; it starts connecting immediately.
 				{:else}
@@ -104,7 +104,7 @@
 						required
 						placeholder="alpha-1"
 						disabled={pending}
-						class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 font-mono text-xs disabled:opacity-50"
+						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
 					/>
 				</label>
 				<label class="block text-[10px]">
@@ -113,7 +113,7 @@
 						type="text"
 						bind:value={name}
 						disabled={pending}
-						class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 text-xs disabled:opacity-50"
+						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
 					/>
 				</label>
 				<label class="block text-[10px]">
@@ -121,7 +121,7 @@
 					<select
 						bind:value={wardClass}
 						disabled={pending}
-						class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 text-xs disabled:opacity-50"
+						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
 					>
 						{#each WARD_CLASSES as candidateClass (candidateClass)}
 							<option value={candidateClass}>{classLabel(candidateClass)}</option>
@@ -136,7 +136,7 @@
 						required
 						placeholder="udpin://0.0.0.0:14540"
 						disabled={pending}
-						class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 font-mono text-xs disabled:opacity-50"
+						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
 					/>
 				</label>
 				<label class="block text-[10px]">
@@ -147,13 +147,13 @@
 						max="255"
 						bind:value={mavlinkSystemId}
 						disabled={pending}
-						class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 font-mono text-xs tabular-nums disabled:opacity-50"
+						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs tabular-nums disabled:opacity-50"
 					/>
 				</label>
 			</div>
 
 			{#if rejected && tracker}
-				<p class="text-critical mt-2 text-xs" role="alert">Rejected: {tracker.message}</p>
+				<p class="mt-2 text-xs text-critical" role="alert">Rejected: {tracker.message}</p>
 			{/if}
 
 			<div class="mt-4 flex justify-end gap-2">
@@ -161,14 +161,14 @@
 					type="button"
 					onclick={onclose}
 					disabled={pending}
-					class="border-edge text-fg-muted hover:text-fg rounded border px-3 py-1.5 text-xs disabled:opacity-50"
+					class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg disabled:opacity-50"
 				>
 					Cancel
 				</button>
 				<button
 					type="submit"
 					disabled={pending || !fleet.gatewayConnected}
-					class="bg-accent/15 border-accent/60 text-accent hover:bg-accent/25 rounded border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
+					class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-40"
 				>
 					{pending ? 'Adding...' : 'Add ward'}
 				</button>

@@ -58,24 +58,24 @@
 </script>
 
 <section
-	class="border-edge bg-panel flex h-full w-72 flex-col gap-3 overflow-y-auto border-l p-3"
+	class="flex h-full w-72 flex-col gap-3 overflow-y-auto border-l border-edge bg-panel p-3"
 	aria-label="Ward detail {wardId}"
 >
 	<header class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
 		{#if synthetic}
 			<span
-				class="text-synthetic text-[10px] font-medium tracking-widest"
+				class="text-[10px] font-medium tracking-widest text-synthetic"
 				title="No autopilot behind this ward; demo telemetry standing in for one"
 			>
 				SIM
 			</span>
 		{/if}
 		{#if state?.flight?.armed}
-			<span class="text-armed text-[10px] font-medium tracking-widest">ARMED</span>
+			<span class="text-[10px] font-medium tracking-widest text-armed">ARMED</span>
 		{/if}
 		<button
-			class="text-fg-muted hover:text-fg ml-auto rounded px-1 text-sm leading-none"
+			class="ml-auto rounded px-1 text-sm leading-none text-fg-muted hover:text-fg"
 			aria-label="Close detail panel"
 			onclick={() => fleet.select(undefined)}
 		>
@@ -84,7 +84,7 @@
 	</header>
 
 	{#if info}
-		<p class="text-fg-muted -mt-2 text-[10px]">
+		<p class="-mt-2 text-[10px] text-fg-muted">
 			{info.autopilot}
 			{info.firmwareVersion} &middot; {wardClassLabel}
 		</p>
@@ -132,7 +132,7 @@
 			</dd>
 		</dl>
 	{:else}
-		<p class="text-fg-muted text-xs">Waiting for telemetry</p>
+		<p class="text-xs text-fg-muted">Waiting for telemetry</p>
 	{/if}
 
 	{#if !effectiveReadonly && state?.flight}

@@ -113,20 +113,20 @@
 	<title>Karshipta Console</title>
 </svelte:head>
 
-<div class="bg-ink grid h-dvh grid-cols-[16rem_minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)]">
+<div class="grid h-dvh grid-cols-[16rem_minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)] bg-ink">
 	<header
-		class="border-edge bg-panel col-span-3 flex items-center gap-2 border-b px-4 py-2"
+		class="col-span-3 flex items-center gap-2 border-b border-edge bg-panel px-4 py-2"
 		aria-label="Karshipta"
 	>
 		<img src={logoMark} alt="" class="h-3 w-auto" aria-hidden="true" />
 		<span class="font-display text-xs font-medium tracking-[0.25em]">KARSHIPTA</span>
-		<span class="text-fg-muted ml-auto font-mono text-[10px] tabular-nums">
+		<span class="ml-auto font-mono text-[10px] text-fg-muted tabular-nums">
 			{fleetLabel.toUpperCase()}
 			{fleet.wardIds.length}
 		</span>
 		{#if fleet.readonly}
 			<span
-				class="border-edge text-fg-muted rounded border px-1.5 py-0.5 font-mono text-[10px]"
+				class="rounded border border-edge px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
 				role="status"
 				aria-label="Read-only session"
 			>
@@ -134,7 +134,7 @@
 			</span>
 		{/if}
 		<button
-			class="text-fg-muted hover:text-fg flex h-6 w-6 items-center justify-center rounded hover:bg-white/5"
+			class="flex h-6 w-6 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
 			onclick={() => themeStore.toggle()}
 			aria-label="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
 			title="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
@@ -168,7 +168,7 @@
 			aria-label="Gateway connection, currently {linkLabel}"
 		>
 			<span class="inline-block h-2 w-2 rounded-full {linkTone}"></span>
-			<span class="text-fg-muted font-mono text-[10px]">{linkLabel}</span>
+			<span class="font-mono text-[10px] text-fg-muted">{linkLabel}</span>
 		</button>
 	</header>
 
@@ -206,7 +206,7 @@
 					type="button"
 					onclick={confirmPlacement}
 					disabled={placingLocating}
-					class="bg-accent text-ink rounded px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+					class="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-50"
 				>
 					Deploy here
 				</button>

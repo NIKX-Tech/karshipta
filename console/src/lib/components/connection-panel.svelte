@@ -25,13 +25,13 @@
 <svelte:window {onkeydown} />
 
 <section
-	class="border-edge bg-panel absolute top-11 right-3 z-40 w-72 rounded border p-3"
+	class="absolute top-11 right-3 z-40 w-72 rounded border border-edge bg-panel p-3"
 	aria-label="Gateway connection"
 >
 	<div class="flex items-center justify-between">
-		<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">GATEWAY</h3>
+		<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">GATEWAY</h3>
 		<button
-			class="text-fg-muted hover:text-fg rounded px-1 text-sm leading-none"
+			class="rounded px-1 text-sm leading-none text-fg-muted hover:text-fg"
 			aria-label="Close connection panel"
 			onclick={onclose}
 		>
@@ -46,7 +46,7 @@
 			bind:value={urlInput}
 			disabled={fleet.gatewayConnected}
 			placeholder={DEFAULT_GATEWAY_URL}
-			class="border-edge bg-ink mt-1 w-full rounded border px-2 py-1 font-mono text-xs disabled:opacity-50"
+			class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
 		/>
 	</label>
 
@@ -60,7 +60,7 @@
 		{/if}
 	</div>
 
-	<p class="text-fg-muted mt-2 text-[10px]">
+	<p class="mt-2 text-[10px] text-fg-muted">
 		Real hardware and simulated (PX4 SITL) wards both connect through a running gateway. See
 		<a
 			href="https://github.com/NIKX-Tech/karshipta/blob/main/docs/quickstart.md"

@@ -76,25 +76,25 @@
 	<div class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
 		{#if ward.source === 'demo'}
-			<span class="text-fg-muted text-[9px] font-medium tracking-widest">DEMO</span>
+			<span class="text-[9px] font-medium tracking-widest text-fg-muted">DEMO</span>
 		{/if}
 		{#if synthetic}
 			<span
-				class="text-synthetic text-[9px] font-medium tracking-widest"
+				class="text-[9px] font-medium tracking-widest text-synthetic"
 				title="No autopilot behind this ward; demo telemetry standing in for one"
 			>
 				SIM
 			</span>
 		{/if}
 		{#if state?.flight?.armed}
-			<span class="text-armed text-[9px] font-medium tracking-widest">ARMED</span>
+			<span class="text-[9px] font-medium tracking-widest text-armed">ARMED</span>
 		{/if}
 		{#if effectiveReadonly}
-			<span class="text-fg-muted text-[9px] font-medium tracking-widest">VIEW ONLY</span>
+			<span class="text-[9px] font-medium tracking-widest text-fg-muted">VIEW ONLY</span>
 		{/if}
 		<span
 			class="ml-auto inline-block h-2 w-2 rounded-full {connected
-				? 'bg-accent animate-pulse'
+				? 'animate-pulse bg-accent'
 				: 'bg-critical'}"
 			role="status"
 			aria-label={connected ? 'Link live' : 'Link lost'}
@@ -102,7 +102,7 @@
 		></span>
 		{#if !effectiveReadonly}
 			<button
-				class="text-fg-muted hover:text-critical px-0.5 text-xs leading-none disabled:cursor-not-allowed disabled:opacity-30"
+				class="px-0.5 text-xs leading-none text-fg-muted hover:text-critical disabled:cursor-not-allowed disabled:opacity-30"
 				aria-label="Remove {wardId}"
 				title={removable ? 'Remove ward' : 'Land and disarm before removing'}
 				disabled={!removable || removePending}
@@ -113,7 +113,7 @@
 		{/if}
 	</div>
 	{#if state}
-		<p class="text-fg-muted mt-1 truncate font-mono text-[10px] tabular-nums">
+		<p class="mt-1 truncate font-mono text-[10px] text-fg-muted tabular-nums">
 			{#if modeLabel}{modeLabel} &middot;
 			{/if}{state.position?.altitudeRelM.toFixed(0) ?? '?'} m &middot; {batteryPct === undefined ||
 			batteryPct < 0
@@ -121,6 +121,6 @@
 				: `${batteryPct.toFixed(0)}%`}
 		</p>
 	{:else}
-		<p class="text-fg-muted mt-1 text-[10px]">Waiting for telemetry</p>
+		<p class="mt-1 text-[10px] text-fg-muted">Waiting for telemetry</p>
 	{/if}
 </div>
