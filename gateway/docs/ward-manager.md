@@ -38,6 +38,12 @@ and fleet persistence are all facade methods on this class.
 - Publish `WardState` for every registered ward at a shared rate
   (`start_publishing`) and send `WardInfo` to a newly connected client
   (`send_ward_info`).
+- Answer an upstream envelope from a read-only viewer connection
+  (`reject_viewer_envelope`, gateway issue #20) with the same reasoned
+  ack/event a normal precondition failure would produce, without ever
+  reaching `dispatch_command`/`handle_add_ward`/etc. Deciding *whether* a
+  connection is a viewer is `Transport`'s job (`Transport::role()`); this
+  class only owns what happens once `main.cpp` has already made that call.
 
 ## Explicitly out of scope
 
@@ -74,6 +80,7 @@ and fleet persistence are all facade methods on this class.
 | `is_started`/`is_connected`/`list_status`/`list_ward_ids` | Read-only fleet queries. |
 | `remove_ward(ward_id)` / `remove_all()` | Applies `stop`'s ground-safety rules, then erases. |
 | `handle_add_ward`/`handle_remove_ward` | Wire entry points: `AddWard`/`RemoveWard` in, `WardConfigAck` out. Never throw. |
+| `reject_viewer_envelope(client, Envelope)` | Answers a viewer connection's upstream `Envelope` with a REJECTED `CommandAck`/`WardConfigAck` (plus a WARNING `Event` for `Command`) or a WARNING `Event` (mission family, which has no ack type), always message `"read-only session"`. Never touches `managed_wards_` - it is a protocol-level answer, not a ward operation. |
 
 ## Persistence
 
@@ -175,6 +182,13 @@ a real socket:
   `EXTENDED_SYS_STATE`/`InAir` via the `TelemetryServer` plugin) - a real
   connect, then a `RemoveWard` for a genuinely airborne ward comes back
   REJECTED ("ward is in the air") and the ward stays registered.
+- `RejectViewerEnvelopeRejects{Command,AddWard,RemoveWard,MissionUpload,
+  MissionDownloadRequest}With{Ack,Event}`: one test per upstream `Envelope`
+  kind, each asserting the reasoned rejection's exact shape (`CommandAck`'s
+  companion `Event`, message always `"read-only session"`) and that the
+  ward-level state (`list_ward_ids()`, an existing ward's
+  registration) never changed - proof the envelope never reached
+  `dispatch_command`/`handle_add_ward`/etc.
 
 ## Manual verification
 

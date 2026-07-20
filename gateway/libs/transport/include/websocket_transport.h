@@ -70,6 +70,14 @@ class WebsocketTransport final : public Transport {
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Marked kViewer if the client's connection URI carried the query
+    // parameter role=viewer (e.g. ws://host:port/?role=viewer), kOperator
+    // otherwise (including plain ws://host:port with no query string, so
+    // every console that predates viewer mode keeps full operator access).
+    // kViewer for an unrecognized/disconnected client, same fail-safe
+    // default as the base interface.
+    [[nodiscard]] ClientRole role(ClientId client) const override;
+
     // Not synchronized against IXWebSocket's callback threads: must be called
     // before start(), never while the server is running.
     void on_receive(ReceiveCallback callback) override;
@@ -102,6 +110,10 @@ class WebsocketTransport final : public Transport {
     // callback only identifies the connection by its ix::WebSocket&. Keyed
     // by raw pointer purely for identity; ownership lives in clients_.
     std::unordered_map<ix::WebSocket*, ClientId> client_ids_;
+    // Role each client was marked with at Open, parsed once from its
+    // connection URI's query string and fixed thereafter (see role()).
+    // Erased alongside clients_/client_ids_ on Close.
+    std::unordered_map<ClientId, ClientRole> client_roles_;
     std::atomic<ClientId> next_client_id_{1};
 
     ReceiveCallback on_receive_;

@@ -143,6 +143,10 @@ void RelayTransport::broadcast(const std::vector<uint8_t>& bytes) {
     if (id != 0) send(id, bytes);
 }
 
+Transport::ClientRole RelayTransport::role(ClientId /*client*/) const {
+    return ClientRole::kOperator;
+}
+
 void RelayTransport::on_receive(ReceiveCallback callback) {
     assert(!running_ && "on_receive must be set before start()");
     on_receive_ = std::move(callback);

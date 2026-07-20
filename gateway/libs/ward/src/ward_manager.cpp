@@ -40,6 +40,11 @@ constexpr float kTelemetryRateHz = 5.0f;
 // autopilot-family field to derive this from.
 constexpr auto kAutopilotName = "PX4";
 
+// Rejection reason for every upstream envelope from a viewer connection
+// (gateway issue #20). Fixed wording, not a formatted message: a viewer's
+// attempt is a role check, not something whose detail varies per ward.
+constexpr auto kReadOnlySessionMessage = "read-only session";
+
 uint64_t unix_epoch_ms() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch())
@@ -462,6 +467,84 @@ void WardManager::handle_mission_download_request(
     }
     target->enqueue_download();
     clear_busy_and_notify(request.ward_id());
+}
+
+void WardManager::reject_viewer_envelope(const Transport::ClientId client,
+                                          const karshipta::v1::Envelope& envelope) {
+    switch (envelope.payload_case()) {
+        case karshipta::v1::Envelope::kCommand: {
+            const auto& command = envelope.command();
+            spdlog::warn("viewer client {} attempted command '{}' on ward_id '{}', rejecting",
+                         client, command.command_id(), command.ward_id());
+            karshipta::v1::CommandAck ack;
+            ack.set_command_id(command.command_id());
+            ack.set_ward_id(command.ward_id());
+            ack.set_status(karshipta::v1::COMMAND_STATUS_REJECTED);
+            ack.set_message(kReadOnlySessionMessage);
+            broadcast_command_ack(ack);
+            // gateway rule 5: a viewer overstepping its role is an event a
+            // human should see, same as any other rejected command.
+            broadcast_rejection_event(ack);
+            break;
+        }
+        case karshipta::v1::Envelope::kAddWard: {
+            const auto& request = envelope.add_ward();
+            spdlog::warn("viewer client {} attempted add_ward '{}', rejecting", client,
+                         request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_ward_config_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_status(karshipta::v1::WARD_CONFIG_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kRemoveWard: {
+            const auto& request = envelope.remove_ward();
+            spdlog::warn("viewer client {} attempted remove_ward '{}', rejecting", client,
+                         request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_ward_config_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_status(karshipta::v1::WARD_CONFIG_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kMissionUpload: {
+            const auto& mission = envelope.mission_upload();
+            spdlog::warn("viewer client {} attempted mission_upload on ward_id '{}', rejecting",
+                         client, mission.ward_id());
+            broadcast_mission_event(mission.ward_id(), "MISSION_UPLOAD_REJECTED",
+                                     kReadOnlySessionMessage);
+            break;
+        }
+        case karshipta::v1::Envelope::kMissionFileUpload: {
+            const auto& upload = envelope.mission_file_upload();
+            spdlog::warn(
+                "viewer client {} attempted mission_file_upload on ward_id '{}', rejecting",
+                client, upload.ward_id());
+            broadcast_mission_event(upload.ward_id(), "MISSION_UPLOAD_REJECTED",
+                                     kReadOnlySessionMessage);
+            break;
+        }
+        case karshipta::v1::Envelope::kMissionDownloadRequest: {
+            const auto& request = envelope.mission_download_request();
+            spdlog::warn(
+                "viewer client {} attempted mission_download_request on ward_id '{}', "
+                "rejecting",
+                client, request.ward_id());
+            broadcast_mission_event(request.ward_id(), "MISSION_DOWNLOAD_REJECTED",
+                                     kReadOnlySessionMessage);
+            break;
+        }
+        default:
+            spdlog::warn("viewer client {} sent unexpected upstream payload kind {}, ignoring",
+                         client, static_cast<int>(envelope.payload_case()));
+            break;
+    }
 }
 
 void WardManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
