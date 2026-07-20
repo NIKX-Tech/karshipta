@@ -4,7 +4,10 @@
  * the transport, the wire types, and the display components. Onboarding
  * UI (empty-state, add-vehicle dialogs, connection panel) stays app-shell
  * only for now: it encodes this repo's self-host UX opinions, not a
- * general-purpose primitive yet.
+ * general-purpose primitive yet. LocationPickerBar is a deliberate, narrow
+ * exception: it's generic map-interaction chrome pairing with FleetMap's
+ * own onMapClick escape hatch, not a self-host-vs-hosted opinion, so both
+ * this app and a consuming app can share the same click-to-place UX.
  *
  * `protobufPackage` and `MessageFns` are deliberately not re-exported here:
  * ts-proto redeclares both per generated file, so re-exporting them from
@@ -82,6 +85,12 @@ export {
 // demo engine: a self-contained fake fleet, useful for any app's dev/demo mode
 export { FakeGateway, FAKE_FLEET_CENTER, type DemoEngine } from './fake/fleet-sim';
 
+// theme (light/dark, shared with any consuming app - see theme.css)
+export { themeStore, type Theme } from './theme.svelte';
+
+// browser geolocation (shared by initial map centering and demo-vehicle placement)
+export { locateOrFallback, type LatLon } from './geolocation';
+
 // geozones (optional airspace-awareness layer)
 export { geozoneStore } from './geozones/geozone-store.svelte';
 export { OpenAipGeozoneSource } from './geozones/openaip';
@@ -89,6 +98,7 @@ export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './
 
 // display components
 export { default as FleetMap } from './components/fleet-map.svelte';
+export { default as LocationPickerBar } from './components/location-picker-bar.svelte';
 export { default as VehicleCard } from './components/vehicle-card.svelte';
 export { default as VehicleDetail } from './components/vehicle-detail.svelte';
 export { default as CommandPanel } from './components/command-panel.svelte';

@@ -4,11 +4,13 @@
 
 	interface Props {
 		onopenconnection: () => void;
+		/** starts the click-to-place demo vehicle placement flow (see routes/+page.svelte) */
+		onstartdemoplacement: () => void;
 		/** 'full' is the big centered empty-state prompt; 'compact' is the always-visible fleet-rail control */
 		variant?: 'full' | 'compact';
 	}
 
-	const { onopenconnection, variant = 'full' }: Props = $props();
+	const { onopenconnection, onstartdemoplacement, variant = 'full' }: Props = $props();
 
 	const SIMULATED_WARNING_THRESHOLD = 1;
 
@@ -46,7 +48,7 @@
 
 	function addDemo() {
 		compactMenuOpen = false;
-		fleet.addDemoVehicle();
+		onstartdemoplacement();
 	}
 </script>
 

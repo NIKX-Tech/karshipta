@@ -10,7 +10,8 @@ import {
 import { VehicleConfigStatus, type AddVehicle } from '$lib/gen/karshipta/v1/fleet';
 import type { VehicleType } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
-import type { DemoEngine } from '$lib/fake/fleet-sim';
+import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
+import type { LatLon } from '$lib/geolocation';
 
 /** where a vehicle's data comes from: the local demo engine or a connected gateway */
 export type VehicleSource = 'demo' | 'gateway';
@@ -60,6 +61,15 @@ const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
 const TRACKER_LINGER_MS = 6_000;
 const GATEWAY_URL_STORAGE_KEY = 'karshipta.gatewayUrl';
+/**
+ * Each demo vehicle's home location, not just how many there were: a plain
+ * count (this key's previous shape) loses exactly the thing spawnVehicle
+ * now needs to reproduce a vehicle where the operator actually put it -
+ * respawning N vehicles with no location silently drops them all back to
+ * FAKE_FLEET_CENTER, which is what happened before this fix (deploy in
+ * Amsterdam, refresh, vehicle is back in Zurich).
+ */
+const DEMO_VEHICLE_HOMES_STORAGE_KEY = 'karshipta.demoVehicleHomes';
 
 export function isTerminal(status: CommandStatus): boolean {
 	return (
@@ -79,6 +89,26 @@ export function isConfigTerminal(status: VehicleConfigStatus): boolean {
 function readStoredGatewayUrl(): string | undefined {
 	if (typeof localStorage === 'undefined') return undefined;
 	return localStorage.getItem(GATEWAY_URL_STORAGE_KEY) ?? undefined;
+}
+
+function readStoredDemoVehicleHomes(): LatLon[] {
+	if (typeof localStorage === 'undefined') return [];
+	const raw = localStorage.getItem(DEMO_VEHICLE_HOMES_STORAGE_KEY);
+	if (!raw) return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter(
+			(point): point is LatLon =>
+				typeof point === 'object' &&
+				point !== null &&
+				typeof (point as LatLon).lat === 'number' &&
+				typeof (point as LatLon).lon === 'number'
+		);
+	} catch {
+		// stale/corrupt data (e.g. the old plain-count shape this key replaced) - start empty, not crash
+		return [];
+	}
 }
 
 /**
@@ -123,11 +153,26 @@ class FleetStore {
 	private gatewayTransport: FleetTransport | undefined;
 	// timers are bookkeeping, not state
 	private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	// each live demo vehicle's home location, keyed by id - bookkeeping for
+	// persistDemoVehicleHomes(), not state components read directly
+	private demoVehicleHomes: Record<string, LatLon> = {};
 
-	/** wires the always-available local demo engine; call once at app start */
+	/**
+	 * Wires the always-available local demo engine; call once at app start.
+	 * Respawns whatever demo fleet was persisted from a previous session
+	 * (see addDemoVehicle/removeDemoVehicle), each at its original home
+	 * location, so a browser refresh doesn't wipe a locally-run operator's
+	 * fleet back to empty or move it back to FAKE_FLEET_CENTER - the
+	 * vehicles come back on a fresh patrol (armed, not mid-mission), not
+	 * with their exact prior flight state restored.
+	 */
 	bindDemoEngine(engine: DemoEngine): void {
 		this.demoEngine = engine;
 		engine.start();
+		for (const home of readStoredDemoVehicleHomes()) {
+			const vehicleId = engine.spawnVehicle(home);
+			this.demoVehicleHomes[vehicleId] = home;
+		}
 	}
 
 	connectGateway(url: string): void {
@@ -343,14 +388,18 @@ class FleetStore {
 	}
 
 	/** spawns a new demo vehicle purely client-side; never touches a network */
-	addDemoVehicle(): void {
-		this.demoEngine?.spawnVehicle();
+	addDemoVehicle(location?: LatLon): void {
+		const vehicleId = this.demoEngine?.spawnVehicle(location);
+		if (vehicleId) this.demoVehicleHomes[vehicleId] = location ?? FAKE_FLEET_CENTER;
+		this.persistDemoVehicleHomes();
 	}
 
 	removeDemoVehicle(vehicleId: string): void {
 		this.demoEngine?.despawnVehicle(vehicleId);
 		delete this.vehicles[vehicleId];
+		delete this.demoVehicleHomes[vehicleId];
 		if (this.selectedVehicleId === vehicleId) this.select(undefined);
+		this.persistDemoVehicleHomes();
 	}
 
 	applyEnvelope(envelope: Envelope, source: VehicleSource): void {
@@ -516,6 +565,16 @@ class FleetStore {
 			setTimeout(() => {
 				delete this.vehicleConfigRequests[requestId];
 			}, TRACKER_LINGER_MS);
+		}
+	}
+
+	private persistDemoVehicleHomes(): void {
+		if (typeof localStorage === 'undefined') return;
+		const homes = Object.values(this.demoVehicleHomes);
+		if (homes.length > 0) {
+			localStorage.setItem(DEMO_VEHICLE_HOMES_STORAGE_KEY, JSON.stringify(homes));
+		} else {
+			localStorage.removeItem(DEMO_VEHICLE_HOMES_STORAGE_KEY);
 		}
 	}
 
