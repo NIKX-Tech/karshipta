@@ -1,6 +1,6 @@
 /**
  * Shared by both the initial map center (see routes/+page.svelte) and
- * demo-vehicle placement: both just need "a point, with a fallback" and
+ * demo-ward placement: both just need "a point, with a fallback" and
  * don't share any state, so this is a plain function, not a store.
  */
 export interface LatLon {

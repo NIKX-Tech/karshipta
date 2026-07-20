@@ -1,6 +1,6 @@
 # CLAUDE.md: karshipta/gateway
 
-You are assisting development of the Karshipta gateway: a C++20 service that bridges MAVLink vehicles (via MAVSDK) to WebSocket clients using protobuf-encoded Envelope frames.
+You are assisting development of the Karshipta gateway: a C++20 service that bridges MAVLink wards (via MAVSDK) to WebSocket clients using protobuf-encoded Envelope frames.
 
 ## Non-negotiable rules
 
@@ -22,7 +22,7 @@ You are assisting development of the Karshipta gateway: a C++20 service that bri
 
 - MAVSDK v2: `Mavsdk` object discovers `System`s from connection URLs; use plugins Telemetry, Action, Mission. Subscribe-based telemetry callbacks arrive on MAVSDK threads: marshal to our own event loop before touching shared state.
 - PX4 SITL via docker exposes MAVLink on udp 14540 (offboard/SDK port). Multiple instances increment ports (14540, 14541, ...).
-- Telemetry publish target: 2 to 10 Hz per vehicle. Batch nothing yet; one Envelope per WebSocket binary frame.
+- Telemetry publish target: 2 to 10 Hz per ward. Batch nothing yet; one Envelope per WebSocket binary frame.
 - The web console (SvelteKit, TypeScript) consumes the exact same proto files via ts-proto. Wire compatibility is the whole game.
 
 ## Commit and text hygiene

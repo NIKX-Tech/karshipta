@@ -1,21 +1,21 @@
 # TelemetryInfo
 
-`libs/vehicle/include/telemetry.h`, `libs/vehicle/src/telemetry.cpp`
+`libs/ward/include/telemetry.h`, `libs/ward/src/telemetry.cpp`
 
 ## Overview
 
 `TelemetryInfo` wraps MAVSDK's `Telemetry` plugin for exactly **one**
-already-connected vehicle: position, battery, flight mode, and pre-arm
-health. It reads through a `VehicleConnection&` rather than owning a
+already-connected ward: position, battery, flight mode, and pre-arm
+health. It reads through a `WardConnection&` rather than owning a
 `System` itself, and lazily constructs the underlying `mavsdk::Telemetry`
 plugin the first time any method is called, once that connection has
 succeeded. It does not perform discovery, retries, or link-state tracking
-(`VehicleConnection`'s job); it does not send commands (a future
+(`WardConnection`'s job); it does not send commands (a future
 `Action`-plugin class's job).
 
 ## Responsibilities
 
-- Lazily bind a `mavsdk::Telemetry` plugin to `VehicleConnection::get_system()`
+- Lazily bind a `mavsdk::Telemetry` plugin to `WardConnection::get_system()`
   once the connection is live (`ensure_telemetry()`), and keep the shared
   `Mavsdk` core alive for as long as that plugin exists
   (`mavsdk_keepalive_`).
@@ -30,19 +30,19 @@ succeeded. It does not perform discovery, retries, or link-state tracking
 ## Explicitly out of scope
 
 - **Connection lifecycle** (connect/retry/disconnect/link state). Owned by
-  `VehicleConnection`; `TelemetryInfo` only reads `is_connected()`,
+  `WardConnection`; `TelemetryInfo` only reads `is_connected()`,
   `get_system()`, and `get_mavsdk()` from it.
 - **Commands** (arm/disarm/takeoff/land/rtl/goto). A separate class, using
-  MAVSDK's `Action` plugin against the same `VehicleConnection`.
+  MAVSDK's `Action` plugin against the same `WardConnection`.
 - **Publishing to the wire.** `TelemetryInfo` currently only logs via
-  spdlog; translating its data into `VehicleState` protobuf `Envelope`
+  spdlog; translating its data into `WardState` protobuf `Envelope`
   frames is M2 work, not this class's job.
 
 ## Public API
 
 | Member | Behavior |
 |---|---|
-| `explicit TelemetryInfo(VehicleConnection&)` | Binds to a connection. Does not create the `Telemetry` plugin yet; that happens lazily on first use. |
+| `explicit TelemetryInfo(WardConnection&)` | Binds to a connection. Does not create the `Telemetry` plugin yet; that happens lazily on first use. |
 | `~TelemetryInfo()` | Unsubscribes every position/flight-mode/battery subscription this instance still holds. |
 | `void subscribe_position() const` | Logs `altitude=... latitude=... longitude=...` on every position update. Stores the returned `PositionHandle`. |
 | `void unsubscribe_position() const` | Cancels the stored `PositionHandle`, if any. No-op if never subscribed. |
@@ -57,14 +57,14 @@ succeeded. It does not perform discovery, retries, or link-state tracking
 
 ## Design: lazy plugin construction against a live connection
 
-Unlike `VehicleConnection`, `TelemetryInfo` can be constructed before its
-vehicle is connected:
+Unlike `WardConnection`, `TelemetryInfo` can be constructed before its
+ward is connected:
 
 ```cpp
-VehicleConnection vehicle(core, "udp://:14540");
-TelemetryInfo telemetry(vehicle);       // fine, even before connect()
+WardConnection ward(core, "udp://:14540");
+TelemetryInfo telemetry(ward);       // fine, even before connect()
 
-vehicle.connect();
+ward.connect();
 telemetry.subscribe_position();   // ensure_telemetry() lazily builds
                                          // the Telemetry plugin here
 ```
@@ -79,16 +79,16 @@ Every public method funnels through `ensure_telemetry() const`, which:
    (kept in `mavsdk_keepalive_`) and constructs `telemetry_` against
    `connection_.get_system()`.
 
-This mirrors `VehicleConnection`'s own "receive a shared core, don't build
+This mirrors `WardConnection`'s own "receive a shared core, don't build
 one" pattern: `TelemetryInfo` does not extend the `Mavsdk` core's lifetime
 beyond normal `shared_ptr` reference counting, but it does guarantee the
 core stays alive for as long as `telemetry_` does, independent of whether
 `connection_` itself is later destroyed or disconnected (see
-`VehicleConnection::disconnect()`'s note that `shared_ptr` holders like this
-one are unaffected by the owning `VehicleConnection` going away).
+`WardConnection::disconnect()`'s note that `shared_ptr` holders like this
+one are unaffected by the owning `WardConnection` going away).
 
 `ensure_telemetry()` never re-binds once `telemetry_` exists, even across a
-disconnect/reconnect of the underlying `VehicleConnection`. If the link
+disconnect/reconnect of the underlying `WardConnection`. If the link
 drops and comes back, callers must construct a new `TelemetryInfo` (or add
 explicit rebind support) rather than expect this one to notice.
 
@@ -138,9 +138,9 @@ mutable std::atomic<mavsdk::Telemetry::FlightMode> last_flight_mode_;
 `ensure_telemetry()`) and `position_handle_`/`flight_mode_handle_`/
 `battery_handle_` (written by the `subscribe_*()`/`unsubscribe_*()` pairs
 and read by `~TelemetryInfo()`) are guarded by `mutex_`, mirroring
-`VehicleActions::init_mutex_`. This makes it safe for `subscribe_*()`,
+`WardActions::init_mutex_`. This makes it safe for `subscribe_*()`,
 `unsubscribe_*()`, and the destructor to run from different threads, which
-is a real possibility once `VehicleManager` drives telemetry setup/teardown
+is a real possibility once `WardManager` drives telemetry setup/teardown
 alongside the command executor.
 
 The frequently-polled one-shot getters (`get_position()`, `is_armed()`,
@@ -156,30 +156,30 @@ calls.
 ## RAII and ownership rules
 
 ```cpp
-explicit TelemetryInfo(VehicleConnection& connection);
+explicit TelemetryInfo(WardConnection& connection);
 ~TelemetryInfo();  // unsubscribes position/flight-mode/battery if still active
 ```
 
 - **No default construction, no copy/move declared** (implicitly deleted by
   the reference member `connection_`): a `TelemetryInfo` cannot exist
-  without a `VehicleConnection` to read from, and cannot be copied or moved
+  without a `WardConnection` to read from, and cannot be copied or moved
   out from under a live subscription whose callback may capture `this`.
-  Mirrors `VehicleConnection`'s own move-deleted rationale.
+  Mirrors `WardConnection`'s own move-deleted rationale.
 - **Does not own `connection_`.** The caller must keep the referenced
-  `VehicleConnection` alive for at least as long as this `TelemetryInfo`.
+  `WardConnection` alive for at least as long as this `TelemetryInfo`.
 - **Destructor never throws** and unconditionally unsubscribes whatever is
   still active, so normal return, early return, and exception unwinding all
   leave no dangling MAVSDK subscription behind.
 
 ## Constraints and preconditions
 
-- **Requires a successful `VehicleConnection::connect()` before any method
+- **Requires a successful `WardConnection::connect()` before any method
   does real work.** Every public method calls `ensure_telemetry()` first;
   if the connection isn't up yet, methods either return a default value
   (`0.0f`, `false`) or log an error and return, never throw.
 - **Does not rebind across reconnects.** Once `telemetry_` is constructed
   against a `System`, it stays bound to that `System` even if the owning
-  `VehicleConnection` disconnects and reconnects.
+  `WardConnection` disconnects and reconnects.
 - **Safe for concurrent calls to `subscribe_*()`/`unsubscribe_*()`/the
   destructor** from different threads (guarded by `mutex_`, see Thread
   safety above). The one-shot getters take the same `mutex_` via
@@ -189,18 +189,18 @@ explicit TelemetryInfo(VehicleConnection& connection);
 
 ## Automated tests
 
-`gateway/tests/vehicle/telemetry_test.cpp` (GoogleTest, no SITL/Docker
+`gateway/tests/ward/telemetry_test.cpp` (GoogleTest, no SITL/Docker
 container needed):
 
 - `SubscribeAndUnsubscribeAreNoOpsWithoutConnection`,
   `GettersReturnSafeDefaultsWithoutConnection`,
   `DestructorSafeWithoutConnection`: against a never-connected
-  `VehicleConnection`, every `subscribe_*()`/`unsubscribe_*()` and getter
+  `WardConnection`, every `subscribe_*()`/`unsubscribe_*()` and getter
   fails fast with a safe default rather than touching MAVSDK or hanging.
 - `SubscribeThenUnsubscribeTwiceDoesNotLeaveDanglingHandle`,
   `DestructorUnsubscribesActivePositionSubscription`: against a real
   connection (a heartbeat-only fake autopilot, same pattern as
-  `vehicle_connection_test.cpp`'s `make_fake_autopilot`), subscribing then
+  `ward_connection_test.cpp`'s `make_fake_autopilot`), subscribing then
   unsubscribing twice does not touch MAVSDK's `unsubscribe_position()` with a
   stale handle, and the destructor safely unsubscribes every still-active
   subscription. Neither test exercises the actual data path (no telemetry is
@@ -236,7 +236,7 @@ once per second, interleaved lines like:
 [info] battery remaining=100% voltage=12.59V
 ```
 
-until SITL is stopped, at which point `vehicle.is_connected()` goes false
+until SITL is stopped, at which point `ward.is_connected()` goes false
 and the program logs `link lost, exiting`.
 
 ## Removed on review: blocking waits

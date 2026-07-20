@@ -42,7 +42,7 @@ cmake --build gateway/build -j
 ./gateway/build/src/karshipta_gateway   # needs PX4 SITL running, see docs/quickstart.md
 ```
 
-Build tests with `-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`. Milestone plan in `gateway/BRIEF.md`; running it end to end against a real simulated vehicle and the console is in [docs/quickstart.md](docs/quickstart.md).
+Build tests with `-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`. Milestone plan in `gateway/BRIEF.md`; running it end to end against a real simulated ward and the console is in [docs/quickstart.md](docs/quickstart.md).
 
 ### Schema
 

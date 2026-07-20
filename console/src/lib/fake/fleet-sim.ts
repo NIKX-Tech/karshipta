@@ -2,8 +2,8 @@ import {
 	FlightMode,
 	GpsFixType,
 	Severity,
-	VehicleOrigin,
-	VehicleType
+	WardOrigin,
+	WardClass
 } from '$lib/gen/karshipta/v1/common';
 import {
 	CommandStatus,
@@ -42,16 +42,16 @@ const DEFAULT_TAKEOFF_ALT_M = 20;
 
 export const FAKE_FLEET_CENTER = { lat: HOME_LAT_DEG, lon: HOME_LON_DEG };
 
-/** owner-facing contract for spawning/removing demo vehicles from the UI */
+/** owner-facing contract for spawning/removing demo wards from the UI */
 export interface DemoEngine extends FleetTransport {
-	/** spawns one demo vehicle with a procedurally varied patrol centered at
+	/** spawns one demo ward with a procedurally varied patrol centered at
 	 * `location` (defaults to FAKE_FLEET_CENTER); returns its id */
-	spawnVehicle(location?: LatLon): string;
-	despawnVehicle(vehicleId: string): void;
+	spawnWard(location?: LatLon): string;
+	despawnWard(wardId: string): void;
 }
 
-interface VehicleSpec {
-	vehicleId: string;
+interface WardSpec {
+	wardId: string;
 	radiusM: number;
 	periodS: number;
 	cruiseAltM: number;
@@ -66,13 +66,13 @@ const SPAWN_PERIOD_MIN_S = 40;
 const SPAWN_PERIOD_STEP_S = 25;
 const SPAWN_ALT_MIN_M = 20;
 const SPAWN_ALT_STEP_M = 15;
-/** golden-angle-ish spread so consecutively spawned vehicles don't overlap */
+/** golden-angle-ish spread so consecutively spawned wards don't overlap */
 const SPAWN_PHASE_STEP_RAD = 2.4;
 
-/** procedurally varied patrol so each newly spawned demo vehicle looks distinct */
-function nextSpec(vehicleId: string, spawnIndex: number, home: LatLon): VehicleSpec {
+/** procedurally varied patrol so each newly spawned demo ward looks distinct */
+function nextSpec(wardId: string, spawnIndex: number, home: LatLon): WardSpec {
 	return {
-		vehicleId,
+		wardId,
 		radiusM: SPAWN_RADIUS_MIN_M + (spawnIndex % 4) * SPAWN_RADIUS_STEP_M,
 		periodS: SPAWN_PERIOD_MIN_S + (spawnIndex % 3) * SPAWN_PERIOD_STEP_S,
 		cruiseAltM: SPAWN_ALT_MIN_M + (spawnIndex % 5) * SPAWN_ALT_STEP_M,
@@ -82,7 +82,7 @@ function nextSpec(vehicleId: string, spawnIndex: number, home: LatLon): VehicleS
 	};
 }
 
-/** what the vehicle does when it reaches its current target */
+/** what the ward does when it reaches its current target */
 type Arrival = 'hold' | 'land' | 'mission-item';
 
 interface Target {
@@ -92,11 +92,11 @@ interface Target {
 	speedMS: number;
 	onArrival: Arrival;
 	commandId: string;
-	commandVehicleId: string;
+	commandWardId: string;
 }
 
-interface SimVehicle {
-	spec: VehicleSpec;
+interface SimWard {
+	spec: WardSpec;
 	armed: boolean;
 	inAir: boolean;
 	mode: FlightMode;
@@ -126,7 +126,7 @@ interface MissionRun {
 	paused: boolean;
 }
 
-function initialVehicle(spec: VehicleSpec): SimVehicle {
+function initialWard(spec: WardSpec): SimWard {
 	return {
 		spec,
 		armed: true,
@@ -150,12 +150,15 @@ function initialVehicle(spec: VehicleSpec): SimVehicle {
 
 /**
  * The console's local demo engine: spawns/despawns purely client-side,
- * never touches a network. Vehicles are added one at a time from the UI
+ * never touches a network. Wards are added one at a time from the UI
  * (never automatically), each getting a procedurally varied patrol so a
- * freshly spawned fleet still looks distinct.
+ * freshly spawned fleet still looks distinct. Every demo ward is a
+ * flight-capable multirotor (a MAVLink SITL stand-in), so its WardState
+ * always carries a populated `flight` field; a non-flight ward has no
+ * simulator counterpart yet.
  */
 export class FakeGateway implements DemoEngine {
-	private vehicles = new Map<string, SimVehicle>();
+	private wards = new Map<string, SimWard>();
 	private missions = new Map<string, Mission>();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private spawnCount = 0;
@@ -172,35 +175,35 @@ export class FakeGateway implements DemoEngine {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
-		this.vehicles.clear();
+		this.wards.clear();
 		this.missions.clear();
 		this.spawnCount = 0;
 	}
 
-	spawnVehicle(location?: LatLon): string {
-		const vehicleId = `demo-${this.spawnCount + 1}`;
-		const spec = nextSpec(vehicleId, this.spawnCount, location ?? FAKE_FLEET_CENTER);
+	spawnWard(location?: LatLon): string {
+		const wardId = `demo-${this.spawnCount + 1}`;
+		const spec = nextSpec(wardId, this.spawnCount, location ?? FAKE_FLEET_CENTER);
 		this.spawnCount += 1;
-		this.vehicles.set(vehicleId, initialVehicle(spec));
+		this.wards.set(wardId, initialWard(spec));
 		this.onEnvelope({
 			payload: {
-				$case: 'vehicleInfo',
-				vehicleInfo: {
-					vehicleId,
-					type: VehicleType.VEHICLE_TYPE_MULTIROTOR,
+				$case: 'wardInfo',
+				wardInfo: {
+					wardId,
+					wardClass: WardClass.WARD_CLASS_MULTIROTOR,
 					autopilot: 'PX4',
 					firmwareVersion: 'demo-fake',
 					mavlinkSystemId: 0,
-					origin: VehicleOrigin.VEHICLE_ORIGIN_SYNTHETIC
+					origin: WardOrigin.WARD_ORIGIN_SYNTHETIC
 				}
 			}
 		});
-		return vehicleId;
+		return wardId;
 	}
 
-	despawnVehicle(vehicleId: string): void {
-		this.vehicles.delete(vehicleId);
-		this.missions.delete(vehicleId);
+	despawnWard(wardId: string): void {
+		this.wards.delete(wardId);
+		this.missions.delete(wardId);
 	}
 
 	send(envelope: Envelope): void {
@@ -220,15 +223,15 @@ export class FakeGateway implements DemoEngine {
 	}
 
 	private handleMissionUpload(mission: Mission): void {
-		const vehicle = this.vehicles.get(mission.vehicleId);
-		if (!vehicle) {
-			console.warn(`fake gateway: mission upload for unknown vehicle ${mission.vehicleId}`);
+		const ward = this.wards.get(mission.wardId);
+		if (!ward) {
+			console.warn(`fake gateway: mission upload for unknown ward ${mission.wardId}`);
 			return;
 		}
-		this.missions.set(mission.vehicleId, mission);
-		vehicle.missionRun = undefined;
+		this.missions.set(mission.wardId, mission);
+		ward.missionRun = undefined;
 		this.event(
-			vehicle,
+			ward,
 			Severity.SEVERITY_INFO,
 			'MISSION_UPLOADED',
 			`mission "${mission.name}" uploaded: ${mission.items.length} items, ${mission.repeatCount} repeats`
@@ -236,9 +239,9 @@ export class FakeGateway implements DemoEngine {
 	}
 
 	private handleCommand(command: Command): void {
-		const vehicle = this.vehicles.get(command.vehicleId);
-		if (!vehicle) {
-			this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, 'unknown vehicle');
+		const ward = this.wards.get(command.wardId);
+		if (!ward) {
+			this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, 'unknown ward');
 			return;
 		}
 		const action = command.action;
@@ -248,115 +251,114 @@ export class FakeGateway implements DemoEngine {
 		}
 		switch (action.$case) {
 			case 'arm':
-				if (vehicle.armed) {
-					this.reject(command, vehicle, 'already armed');
-				} else if (vehicle.batteryPct < LOW_BATTERY_PCT) {
-					this.reject(command, vehicle, 'battery too low to arm');
+				if (ward.armed) {
+					this.reject(command, ward, 'already armed');
+				} else if (ward.batteryPct < LOW_BATTERY_PCT) {
+					this.reject(command, ward, 'battery too low to arm');
 				} else {
-					vehicle.armed = true;
-					vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+					ward.armed = true;
+					ward.mode = FlightMode.FLIGHT_MODE_HOLD;
 					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'armed');
 				}
 				break;
 			case 'disarm':
-				if (!vehicle.armed) {
-					this.reject(command, vehicle, 'not armed');
-				} else if (vehicle.inAir && !action.disarm.force) {
-					this.reject(command, vehicle, 'vehicle is in air; use force to override');
+				if (!ward.armed) {
+					this.reject(command, ward, 'not armed');
+				} else if (ward.inAir && !action.disarm.force) {
+					this.reject(command, ward, 'ward is in air; use force to override');
 				} else {
-					this.interruptMission(vehicle, 'disarm command');
-					if (vehicle.inAir) {
+					this.interruptMission(ward, 'disarm command');
+					if (ward.inAir) {
 						this.event(
-							vehicle,
+							ward,
 							Severity.SEVERITY_CRITICAL,
 							'FORCED_DISARM',
 							'forced disarm while in air'
 						);
-						vehicle.inAir = false;
-						vehicle.altM = 0;
+						ward.inAir = false;
+						ward.altM = 0;
 					}
-					this.stopMotion(vehicle);
-					vehicle.armed = false;
-					vehicle.mode = FlightMode.FLIGHT_MODE_MANUAL;
+					this.stopMotion(ward);
+					ward.armed = false;
+					ward.mode = FlightMode.FLIGHT_MODE_MANUAL;
 					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'disarmed');
 				}
 				break;
 			case 'takeoff': {
-				if (!vehicle.armed) {
-					this.reject(command, vehicle, 'not armed');
+				if (!ward.armed) {
+					this.reject(command, ward, 'not armed');
 					break;
 				}
-				if (vehicle.inAir) {
-					this.reject(command, vehicle, 'already in air');
+				if (ward.inAir) {
+					this.reject(command, ward, 'already in air');
 					break;
 				}
 				const altM =
 					action.takeoff.altitudeRelM > 0 ? action.takeoff.altitudeRelM : DEFAULT_TAKEOFF_ALT_M;
-				vehicle.inAir = true;
-				vehicle.mode = FlightMode.FLIGHT_MODE_TAKEOFF;
-				this.setTarget(vehicle, command, vehicle.northM, vehicle.eastM, altM, 0, 'hold');
+				ward.inAir = true;
+				ward.mode = FlightMode.FLIGHT_MODE_TAKEOFF;
+				this.setTarget(ward, command, ward.northM, ward.eastM, altM, 0, 'hold');
 				this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, `taking off to ${altM} m`);
 				break;
 			}
 			case 'land':
-				if (!vehicle.inAir) {
-					this.reject(command, vehicle, 'not in air');
+				if (!ward.inAir) {
+					this.reject(command, ward, 'not in air');
 				} else {
-					this.interruptMission(vehicle, 'land command');
-					vehicle.mode = FlightMode.FLIGHT_MODE_LAND;
-					this.setTarget(vehicle, command, vehicle.northM, vehicle.eastM, 0, 0, 'land');
+					this.interruptMission(ward, 'land command');
+					ward.mode = FlightMode.FLIGHT_MODE_LAND;
+					this.setTarget(ward, command, ward.northM, ward.eastM, 0, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'landing');
 				}
 				break;
 			case 'rtl':
-				if (!vehicle.inAir) {
-					this.reject(command, vehicle, 'not in air');
+				if (!ward.inAir) {
+					this.reject(command, ward, 'not in air');
 				} else {
-					this.interruptMission(vehicle, 'RTL command');
-					vehicle.mode = FlightMode.FLIGHT_MODE_RETURN;
-					this.setTarget(vehicle, command, 0, 0, vehicle.altM, 0, 'land');
+					this.interruptMission(ward, 'RTL command');
+					ward.mode = FlightMode.FLIGHT_MODE_RETURN;
+					this.setTarget(ward, command, 0, 0, ward.altM, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'returning to launch');
 				}
 				break;
 			case 'goto': {
-				if (!vehicle.inAir) {
-					this.reject(command, vehicle, 'not in air');
+				if (!ward.inAir) {
+					this.reject(command, ward, 'not in air');
 					break;
 				}
 				const target = action.goto.target;
 				if (!target) {
-					this.reject(command, vehicle, 'goto has no target');
+					this.reject(command, ward, 'goto has no target');
 					break;
 				}
-				this.interruptMission(vehicle, 'goto command');
-				const northM = (target.latitudeDeg - vehicle.spec.homeLatDeg) * METERS_PER_DEG_LAT;
+				this.interruptMission(ward, 'goto command');
+				const northM = (target.latitudeDeg - ward.spec.homeLatDeg) * METERS_PER_DEG_LAT;
 				const eastM =
-					(target.longitudeDeg - vehicle.spec.homeLonDeg) *
-					metersPerDegLon(vehicle.spec.homeLatDeg);
-				const altM = target.altitudeRelM > 0 ? target.altitudeRelM : vehicle.altM;
-				vehicle.mode = FlightMode.FLIGHT_MODE_OFFBOARD;
-				this.setTarget(vehicle, command, northM, eastM, altM, action.goto.speedMS, 'hold');
+					(target.longitudeDeg - ward.spec.homeLonDeg) * metersPerDegLon(ward.spec.homeLatDeg);
+				const altM = target.altitudeRelM > 0 ? target.altitudeRelM : ward.altM;
+				ward.mode = FlightMode.FLIGHT_MODE_OFFBOARD;
+				this.setTarget(ward, command, northM, eastM, altM, action.goto.speedMS, 'hold');
 				this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'flying to target');
 				break;
 			}
 			case 'startMission': {
-				const mission = this.missions.get(command.vehicleId);
+				const mission = this.missions.get(command.wardId);
 				if (!mission) {
-					this.reject(command, vehicle, 'no mission uploaded');
+					this.reject(command, ward, 'no mission uploaded');
 					break;
 				}
-				if (!vehicle.armed) {
-					this.reject(command, vehicle, 'not armed');
+				if (!ward.armed) {
+					this.reject(command, ward, 'not armed');
 					break;
 				}
-				if (vehicle.missionRun && vehicle.missionRun.paused) {
-					vehicle.missionRun.paused = false;
-					vehicle.missionRun.startCommandId = command.commandId;
+				if (ward.missionRun && ward.missionRun.paused) {
+					ward.missionRun.paused = false;
+					ward.missionRun.startCommandId = command.commandId;
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'mission resumed');
-					this.flyToCurrentItem(vehicle);
+					this.flyToCurrentItem(ward);
 					break;
 				}
-				vehicle.missionRun = {
+				ward.missionRun = {
 					mission,
 					itemIndex: 0,
 					passesLeft: mission.repeatCount,
@@ -364,22 +366,22 @@ export class FakeGateway implements DemoEngine {
 					holdUntilMs: 0,
 					paused: false
 				};
-				vehicle.inAir = true;
+				ward.inAir = true;
 				this.ack(
 					command,
 					CommandStatus.COMMAND_STATUS_EXECUTING,
 					`mission "${mission.name}" started`
 				);
-				this.flyToCurrentItem(vehicle);
+				this.flyToCurrentItem(ward);
 				break;
 			}
 			case 'pauseMission':
-				if (!vehicle.missionRun || vehicle.missionRun.paused) {
-					this.reject(command, vehicle, 'no mission running');
+				if (!ward.missionRun || ward.missionRun.paused) {
+					this.reject(command, ward, 'no mission running');
 				} else {
-					vehicle.missionRun.paused = true;
-					this.stopMotion(vehicle);
-					vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+					ward.missionRun.paused = true;
+					this.stopMotion(ward);
+					ward.mode = FlightMode.FLIGHT_MODE_HOLD;
 					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'mission paused');
 				}
 				break;
@@ -391,7 +393,7 @@ export class FakeGateway implements DemoEngine {
 	}
 
 	private setTarget(
-		vehicle: SimVehicle,
+		ward: SimWard,
 		command: Command,
 		northM: number,
 		eastM: number,
@@ -401,87 +403,86 @@ export class FakeGateway implements DemoEngine {
 	): void {
 		// a newer maneuver preempts the current one; its command still gets a
 		// terminal ack so the console tracker never dangles
-		const previous = vehicle.target;
+		const previous = ward.target;
 		if (previous && previous.commandId !== command.commandId) {
 			this.onEnvelope({
 				payload: {
 					$case: 'commandAck',
 					commandAck: {
 						commandId: previous.commandId,
-						vehicleId: previous.commandVehicleId,
+						wardId: previous.commandWardId,
 						status: CommandStatus.COMMAND_STATUS_REJECTED,
 						message: 'superseded by a newer command'
 					}
 				}
 			});
 		}
-		vehicle.patrolling = false;
-		vehicle.target = {
+		ward.patrolling = false;
+		ward.target = {
 			northM,
 			eastM,
 			altM,
 			speedMS: speedMS > 0 ? speedMS : CRUISE_SPEED_M_S,
 			onArrival,
 			commandId: command.commandId,
-			commandVehicleId: command.vehicleId
+			commandWardId: command.wardId
 		};
 	}
 
-	private stopMotion(vehicle: SimVehicle): void {
-		vehicle.patrolling = false;
-		vehicle.target = undefined;
-		vehicle.velocityNorth = 0;
-		vehicle.velocityEast = 0;
-		vehicle.velocityDown = 0;
+	private stopMotion(ward: SimWard): void {
+		ward.patrolling = false;
+		ward.target = undefined;
+		ward.velocityNorth = 0;
+		ward.velocityEast = 0;
+		ward.velocityDown = 0;
 	}
 
-	private interruptMission(vehicle: SimVehicle, reason: string): void {
-		const run = vehicle.missionRun;
+	private interruptMission(ward: SimWard, reason: string): void {
+		const run = ward.missionRun;
 		if (!run) return;
-		vehicle.missionRun = undefined;
-		this.stopMotion(vehicle);
+		ward.missionRun = undefined;
+		this.stopMotion(ward);
 		this.onEnvelope({
 			payload: {
 				$case: 'commandAck',
 				commandAck: {
 					commandId: run.startCommandId,
-					vehicleId: vehicle.spec.vehicleId,
+					wardId: ward.spec.wardId,
 					status: CommandStatus.COMMAND_STATUS_REJECTED,
 					message: `mission interrupted: ${reason}`
 				}
 			}
 		});
-		this.event(vehicle, Severity.SEVERITY_WARNING, 'MISSION_INTERRUPTED', reason);
+		this.event(ward, Severity.SEVERITY_WARNING, 'MISSION_INTERRUPTED', reason);
 	}
 
-	private flyToCurrentItem(vehicle: SimVehicle): void {
-		const run = vehicle.missionRun;
+	private flyToCurrentItem(ward: SimWard): void {
+		const run = ward.missionRun;
 		if (!run || run.paused) return;
 		const item = run.mission.items[run.itemIndex];
 		if (!item || item.action !== MissionAction.MISSION_ACTION_WAYPOINT || !item.position) {
 			// the editor only produces waypoints; skip anything else observably
 			if (item) {
 				this.event(
-					vehicle,
+					ward,
 					Severity.SEVERITY_WARNING,
 					'MISSION_ITEM_SKIPPED',
 					`item ${item.seq} not supported by the simulator`
 				);
 			}
-			this.advanceMission(vehicle);
+			this.advanceMission(ward);
 			return;
 		}
-		const northM = (item.position.latitudeDeg - vehicle.spec.homeLatDeg) * METERS_PER_DEG_LAT;
+		const northM = (item.position.latitudeDeg - ward.spec.homeLatDeg) * METERS_PER_DEG_LAT;
 		const eastM =
-			(item.position.longitudeDeg - vehicle.spec.homeLonDeg) *
-			metersPerDegLon(vehicle.spec.homeLatDeg);
-		const altM = item.position.altitudeRelM > 0 ? item.position.altitudeRelM : vehicle.altM;
-		vehicle.mode = FlightMode.FLIGHT_MODE_MISSION;
+			(item.position.longitudeDeg - ward.spec.homeLonDeg) * metersPerDegLon(ward.spec.homeLatDeg);
+		const altM = item.position.altitudeRelM > 0 ? item.position.altitudeRelM : ward.altM;
+		ward.mode = FlightMode.FLIGHT_MODE_MISSION;
 		this.setTarget(
-			vehicle,
+			ward,
 			{
 				commandId: run.startCommandId,
-				vehicleId: vehicle.spec.vehicleId,
+				wardId: ward.spec.wardId,
 				timestampMs: Date.now(),
 				action: undefined
 			},
@@ -492,29 +493,29 @@ export class FakeGateway implements DemoEngine {
 			'mission-item'
 		);
 		// current_seq means the item being executed right now
-		this.emitProgress(vehicle, run, item.seq, false);
+		this.emitProgress(ward, run, item.seq, false);
 	}
 
 	/** step past the current item: next item, next pass, or finish */
-	private advanceMission(vehicle: SimVehicle): void {
-		const run = vehicle.missionRun;
+	private advanceMission(ward: SimWard): void {
+		const run = ward.missionRun;
 		if (!run) return;
 		run.itemIndex += 1;
 		if (run.itemIndex < run.mission.items.length) {
-			this.flyToCurrentItem(vehicle);
+			this.flyToCurrentItem(ward);
 			return;
 		}
 		if (run.passesLeft > 0) {
 			run.passesLeft -= 1;
 			run.itemIndex = 0;
-			this.flyToCurrentItem(vehicle);
+			this.flyToCurrentItem(ward);
 			return;
 		}
-		vehicle.missionRun = undefined;
-		vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
-		this.emitProgress(vehicle, run, run.mission.items.length - 1, true);
+		ward.missionRun = undefined;
+		ward.mode = FlightMode.FLIGHT_MODE_HOLD;
+		this.emitProgress(ward, run, run.mission.items.length - 1, true);
 		this.event(
-			vehicle,
+			ward,
 			Severity.SEVERITY_INFO,
 			'MISSION_FINISHED',
 			`mission "${run.mission.name}" finished`
@@ -524,7 +525,7 @@ export class FakeGateway implements DemoEngine {
 				$case: 'commandAck',
 				commandAck: {
 					commandId: run.startCommandId,
-					vehicleId: vehicle.spec.vehicleId,
+					wardId: ward.spec.wardId,
 					status: CommandStatus.COMMAND_STATUS_SUCCESS,
 					message: 'mission finished'
 				}
@@ -533,7 +534,7 @@ export class FakeGateway implements DemoEngine {
 	}
 
 	private emitProgress(
-		vehicle: SimVehicle,
+		ward: SimWard,
 		run: MissionRun,
 		currentSeq: number,
 		finished: boolean
@@ -542,7 +543,7 @@ export class FakeGateway implements DemoEngine {
 			payload: {
 				$case: 'missionProgress',
 				missionProgress: {
-					vehicleId: vehicle.spec.vehicleId,
+					wardId: ward.spec.wardId,
 					missionId: run.mission.missionId,
 					currentSeq,
 					totalItems: run.mission.items.length,
@@ -554,127 +555,121 @@ export class FakeGateway implements DemoEngine {
 
 	private tick(): void {
 		const nowMs = Date.now();
-		for (const vehicle of this.vehicles.values()) {
-			const run = vehicle.missionRun;
-			if (
-				run &&
-				!run.paused &&
-				!vehicle.target &&
-				run.holdUntilMs > 0 &&
-				nowMs >= run.holdUntilMs
-			) {
+		for (const ward of this.wards.values()) {
+			const run = ward.missionRun;
+			if (run && !run.paused && !ward.target && run.holdUntilMs > 0 && nowMs >= run.holdUntilMs) {
 				run.holdUntilMs = 0;
-				this.advanceMission(vehicle);
+				this.advanceMission(ward);
 			}
-			this.advance(vehicle);
-			this.drainBattery(vehicle);
-			this.onEnvelope(stateEnvelope(vehicle, nowMs));
+			this.advance(ward);
+			this.drainBattery(ward);
+			this.onEnvelope(stateEnvelope(ward, nowMs));
 		}
 	}
 
-	private advance(vehicle: SimVehicle): void {
-		if (vehicle.patrolling) {
-			const angularVel = (2 * Math.PI) / vehicle.spec.periodS;
-			vehicle.thetaRad += angularVel * TICK_S;
-			vehicle.northM = vehicle.spec.radiusM * Math.cos(vehicle.thetaRad);
-			vehicle.eastM = vehicle.spec.radiusM * Math.sin(vehicle.thetaRad);
-			vehicle.velocityNorth = -vehicle.spec.radiusM * angularVel * Math.sin(vehicle.thetaRad);
-			vehicle.velocityEast = vehicle.spec.radiusM * angularVel * Math.cos(vehicle.thetaRad);
-			vehicle.velocityDown = 0;
-			vehicle.headingDeg = headingFrom(vehicle.velocityNorth, vehicle.velocityEast);
+	private advance(ward: SimWard): void {
+		if (ward.patrolling) {
+			const angularVel = (2 * Math.PI) / ward.spec.periodS;
+			ward.thetaRad += angularVel * TICK_S;
+			ward.northM = ward.spec.radiusM * Math.cos(ward.thetaRad);
+			ward.eastM = ward.spec.radiusM * Math.sin(ward.thetaRad);
+			ward.velocityNorth = -ward.spec.radiusM * angularVel * Math.sin(ward.thetaRad);
+			ward.velocityEast = ward.spec.radiusM * angularVel * Math.cos(ward.thetaRad);
+			ward.velocityDown = 0;
+			ward.headingDeg = headingFrom(ward.velocityNorth, ward.velocityEast);
 			return;
 		}
-		const target = vehicle.target;
+		const target = ward.target;
 		if (!target) return;
 
-		const dNorth = target.northM - vehicle.northM;
-		const dEast = target.eastM - vehicle.eastM;
-		const dAlt = target.altM - vehicle.altM;
+		const dNorth = target.northM - ward.northM;
+		const dEast = target.eastM - ward.eastM;
+		const dAlt = target.altM - ward.altM;
 		const horizontal = Math.hypot(dNorth, dEast);
 
 		if (horizontal < ARRIVAL_RADIUS_M && Math.abs(dAlt) < 0.5) {
-			vehicle.northM = target.northM;
-			vehicle.eastM = target.eastM;
-			vehicle.altM = target.altM;
-			this.stopMotion(vehicle);
-			this.arrive(vehicle, target);
+			ward.northM = target.northM;
+			ward.eastM = target.eastM;
+			ward.altM = target.altM;
+			this.stopMotion(ward);
+			this.arrive(ward, target);
 			return;
 		}
 
 		const stepH = Math.min(target.speedMS * TICK_S, horizontal);
 		if (horizontal > 0) {
-			vehicle.northM += (dNorth / horizontal) * stepH;
-			vehicle.eastM += (dEast / horizontal) * stepH;
-			vehicle.velocityNorth = (dNorth / horizontal) * target.speedMS;
-			vehicle.velocityEast = (dEast / horizontal) * target.speedMS;
-			vehicle.headingDeg = headingFrom(dNorth, dEast);
+			ward.northM += (dNorth / horizontal) * stepH;
+			ward.eastM += (dEast / horizontal) * stepH;
+			ward.velocityNorth = (dNorth / horizontal) * target.speedMS;
+			ward.velocityEast = (dEast / horizontal) * target.speedMS;
+			ward.headingDeg = headingFrom(dNorth, dEast);
 		} else {
-			vehicle.velocityNorth = 0;
-			vehicle.velocityEast = 0;
+			ward.velocityNorth = 0;
+			ward.velocityEast = 0;
 		}
 		const stepV = Math.min(CLIMB_RATE_M_S * TICK_S, Math.abs(dAlt));
-		vehicle.altM += Math.sign(dAlt) * stepV;
-		vehicle.velocityDown = -Math.sign(dAlt) * (stepV > 0 ? CLIMB_RATE_M_S : 0);
+		ward.altM += Math.sign(dAlt) * stepV;
+		ward.velocityDown = -Math.sign(dAlt) * (stepV > 0 ? CLIMB_RATE_M_S : 0);
 	}
 
-	private arrive(vehicle: SimVehicle, target: Target): void {
+	private arrive(ward: SimWard, target: Target): void {
 		const pseudoCommand: Command = {
 			commandId: target.commandId,
-			vehicleId: target.commandVehicleId,
+			wardId: target.commandWardId,
 			timestampMs: Date.now(),
 			action: undefined
 		};
 		switch (target.onArrival) {
 			case 'mission-item': {
-				const run = vehicle.missionRun;
+				const run = ward.missionRun;
 				if (!run) break;
 				const item = run.mission.items[run.itemIndex];
 				if (item && item.holdTimeS > 0) {
 					// stay here; the tick loop advances when the hold elapses
 					run.holdUntilMs = Date.now() + item.holdTimeS * 1000;
 				} else {
-					this.advanceMission(vehicle);
+					this.advanceMission(ward);
 				}
 				break;
 			}
 			case 'hold':
-				vehicle.mode = FlightMode.FLIGHT_MODE_HOLD;
+				ward.mode = FlightMode.FLIGHT_MODE_HOLD;
 				this.ack(pseudoCommand, CommandStatus.COMMAND_STATUS_SUCCESS, 'holding position');
 				break;
 			case 'land':
-				if (vehicle.altM <= 0.01) {
-					vehicle.altM = 0;
-					vehicle.inAir = false;
-					vehicle.armed = false;
-					vehicle.mode = FlightMode.FLIGHT_MODE_MANUAL;
-					this.event(vehicle, Severity.SEVERITY_INFO, 'LANDED', 'landed and disarmed');
+				if (ward.altM <= 0.01) {
+					ward.altM = 0;
+					ward.inAir = false;
+					ward.armed = false;
+					ward.mode = FlightMode.FLIGHT_MODE_MANUAL;
+					this.event(ward, Severity.SEVERITY_INFO, 'LANDED', 'landed and disarmed');
 					this.ack(pseudoCommand, CommandStatus.COMMAND_STATUS_SUCCESS, 'landed');
 				} else {
 					// reached the horizontal point; now descend in place
-					vehicle.mode = FlightMode.FLIGHT_MODE_LAND;
-					this.setTarget(vehicle, pseudoCommand, vehicle.northM, vehicle.eastM, 0, 0, 'land');
+					ward.mode = FlightMode.FLIGHT_MODE_LAND;
+					this.setTarget(ward, pseudoCommand, ward.northM, ward.eastM, 0, 0, 'land');
 				}
 				break;
 		}
 	}
 
-	private drainBattery(vehicle: SimVehicle): void {
-		const drain = vehicle.inAir ? BATTERY_DRAIN_AIR_PCT_PER_S : BATTERY_DRAIN_GROUND_PCT_PER_S;
-		vehicle.batteryPct = Math.max(0, vehicle.batteryPct - drain * TICK_S);
-		if (!vehicle.lowBatteryReported && vehicle.batteryPct < LOW_BATTERY_PCT) {
-			vehicle.lowBatteryReported = true;
+	private drainBattery(ward: SimWard): void {
+		const drain = ward.inAir ? BATTERY_DRAIN_AIR_PCT_PER_S : BATTERY_DRAIN_GROUND_PCT_PER_S;
+		ward.batteryPct = Math.max(0, ward.batteryPct - drain * TICK_S);
+		if (!ward.lowBatteryReported && ward.batteryPct < LOW_BATTERY_PCT) {
+			ward.lowBatteryReported = true;
 			this.event(
-				vehicle,
+				ward,
 				Severity.SEVERITY_WARNING,
 				'LOW_BATTERY',
-				`battery at ${vehicle.batteryPct.toFixed(0)}%`
+				`battery at ${ward.batteryPct.toFixed(0)}%`
 			);
 		}
 	}
 
-	private reject(command: Command, vehicle: SimVehicle, reason: string): void {
+	private reject(command: Command, ward: SimWard, reason: string): void {
 		this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, reason);
-		this.event(vehicle, Severity.SEVERITY_WARNING, 'COMMAND_REJECTED', reason);
+		this.event(ward, Severity.SEVERITY_WARNING, 'COMMAND_REJECTED', reason);
 	}
 
 	private ack(command: Command, status: CommandStatus, message: string): void {
@@ -683,7 +678,7 @@ export class FakeGateway implements DemoEngine {
 				$case: 'commandAck',
 				commandAck: {
 					commandId: command.commandId,
-					vehicleId: command.vehicleId,
+					wardId: command.wardId,
 					status,
 					message
 				}
@@ -691,12 +686,12 @@ export class FakeGateway implements DemoEngine {
 		});
 	}
 
-	private event(vehicle: SimVehicle, severity: Severity, code: string, message: string): void {
+	private event(ward: SimWard, severity: Severity, code: string, message: string): void {
 		this.onEnvelope({
 			payload: {
 				$case: 'event',
 				event: {
-					vehicleId: vehicle.spec.vehicleId,
+					wardId: ward.spec.wardId,
 					timestampMs: Date.now(),
 					severity,
 					code,
@@ -715,33 +710,35 @@ function headingFrom(north: number, east: number): number {
 	return ((Math.atan2(east, north) * 180) / Math.PI + 360) % 360;
 }
 
-function stateEnvelope(vehicle: SimVehicle, nowMs: number): Envelope {
+function stateEnvelope(ward: SimWard, nowMs: number): Envelope {
 	return {
 		payload: {
-			$case: 'vehicleState',
-			vehicleState: {
-				vehicleId: vehicle.spec.vehicleId,
+			$case: 'wardState',
+			wardState: {
+				wardId: ward.spec.wardId,
 				timestampMs: nowMs,
 				position: {
-					latitudeDeg: vehicle.spec.homeLatDeg + vehicle.northM / METERS_PER_DEG_LAT,
-					longitudeDeg:
-						vehicle.spec.homeLonDeg + vehicle.eastM / metersPerDegLon(vehicle.spec.homeLatDeg),
-					altitudeMslM: HOME_ALT_MSL_M + vehicle.altM,
-					altitudeRelM: vehicle.altM
+					latitudeDeg: ward.spec.homeLatDeg + ward.northM / METERS_PER_DEG_LAT,
+					longitudeDeg: ward.spec.homeLonDeg + ward.eastM / metersPerDegLon(ward.spec.homeLatDeg),
+					altitudeMslM: HOME_ALT_MSL_M + ward.altM,
+					altitudeRelM: ward.altM
 				},
 				velocity: {
-					northMS: vehicle.velocityNorth,
-					eastMS: vehicle.velocityEast,
-					downMS: vehicle.velocityDown
+					northMS: ward.velocityNorth,
+					eastMS: ward.velocityEast,
+					downMS: ward.velocityDown
 				},
-				headingDeg: vehicle.headingDeg,
-				battery: { voltageV: 15.8, remainingPct: vehicle.batteryPct },
+				headingDeg: ward.headingDeg,
+				battery: { voltageV: 15.8, remainingPct: ward.batteryPct },
 				gps: { fixType: GpsFixType.GPS_FIX_TYPE_FIX_3D, numSatellites: 14, hdop: 0.8 },
-				flightMode: vehicle.mode,
-				armed: vehicle.armed,
-				inAir: vehicle.inAir,
 				healthOk: true,
-				connected: true
+				connected: true,
+				flight: {
+					flightMode: ward.mode,
+					armed: ward.armed,
+					inAir: ward.inAir
+				},
+				tags: []
 			}
 		}
 	};

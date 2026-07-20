@@ -7,16 +7,21 @@
 	import { locateOrFallback } from '$lib/geolocation';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
-	import VehicleCard from '$lib/components/vehicle-card.svelte';
-	import VehicleDetail from '$lib/components/vehicle-detail.svelte';
+	import WardCard from '$lib/components/ward-card.svelte';
+	import WardDetail from '$lib/components/ward-detail.svelte';
 	import EventsFeed from '$lib/components/events-feed.svelte';
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
-	import AddVehicleMenu from '$lib/components/add-vehicle-menu.svelte';
+	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
 	import LocationPickerBar from '$lib/components/location-picker-bar.svelte';
 	import logoMark from '$lib/assets/logo-mark.svg';
 
+	const DEFAULT_FLEET_LABEL = 'Fleet';
+
 	let connectionPanelOpen = $state(false);
+	// Overridable display label for "fleet" (e.g. a livestock-tracking deploy
+	// might prefer "Herd"); purely cosmetic, does not rename any schema field.
+	let fleetLabel = $state(DEFAULT_FLEET_LABEL);
 
 	// The map's initial camera position: centered on the operator's own
 	// location by default, falling back to FAKE_FLEET_CENTER on denial or
@@ -27,7 +32,7 @@
 	let mapCenterLat = $state<number | undefined>(undefined);
 	let mapCenterLon = $state<number | undefined>(undefined);
 
-	// Demo vehicle placement: geolocation as the default, a map click as the
+	// Demo ward placement: geolocation as the default, a map click as the
 	// override, matching the pattern already proven in karshipta-cloud.
 	let placing = $state(false);
 	let placingLocating = $state(false);
@@ -51,7 +56,7 @@
 	}
 
 	function confirmPlacement() {
-		fleet.addDemoVehicle({ lat: placeLat, lon: placeLon });
+		fleet.addDemoWard({ lat: placeLat, lon: placeLon });
 		placing = false;
 	}
 
@@ -66,9 +71,9 @@
 	// onMount only runs after the first render already committed, and by
 	// then a persisted demo fleet (see fleet-store.svelte.ts) has already
 	// painted the empty-state wizard for a frame before flipping over to
-	// the restored vehicles - a real, reported flash, not a style nit. This
-	// runs before that first render instead, so fleet.vehicleIds already
-	// reflects any restored vehicles the very first time the template reads
+	// the restored wards - a real, reported flash, not a style nit. This
+	// runs before that first render instead, so fleet.wardIds already
+	// reflects any restored wards the very first time the template reads
 	// it. Guarded because this script body also runs during prerendering,
 	// where window doesn't exist and starting the demo engine's tick
 	// interval would be wrong.
@@ -83,6 +88,7 @@
 	onMount(() => {
 		themeStore.init();
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
+		fleetLabel = env.PUBLIC_FLEET_LABEL || DEFAULT_FLEET_LABEL;
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
@@ -115,7 +121,8 @@
 		<img src={logoMark} alt="" class="h-3 w-auto" aria-hidden="true" />
 		<span class="font-display text-xs font-medium tracking-[0.25em]">KARSHIPTA</span>
 		<span class="text-fg-muted ml-auto font-mono text-[10px] tabular-nums">
-			FLEET {fleet.vehicleIds.length}
+			{fleetLabel.toUpperCase()}
+			{fleet.wardIds.length}
 		</span>
 		{#if fleet.readonly}
 			<span
@@ -165,14 +172,14 @@
 		</button>
 	</header>
 
-	<aside class="flex flex-col gap-2 overflow-y-auto p-3" aria-label="Fleet">
-		<AddVehicleMenu
+	<aside class="flex flex-col gap-2 overflow-y-auto p-3" aria-label={fleetLabel}>
+		<AddWardMenu
 			variant="compact"
 			onopenconnection={() => (connectionPanelOpen = true)}
 			onstartdemoplacement={startPlacement}
 		/>
-		{#each fleet.vehicleIds as vehicleId (vehicleId)}
-			<VehicleCard {vehicleId} vehicle={fleet.vehicles[vehicleId]} />
+		{#each fleet.wardIds as wardId (wardId)}
+			<WardCard {wardId} ward={fleet.wards[wardId]} />
 		{/each}
 	</aside>
 
@@ -187,7 +194,7 @@
 			/>
 		{/if}
 		<EventsFeed />
-		{#if fleet.vehicleIds.length === 0 && !placing}
+		{#if fleet.wardIds.length === 0 && !placing}
 			<EmptyState
 				onopenconnection={() => (connectionPanelOpen = true)}
 				onstartdemoplacement={startPlacement}
@@ -214,8 +221,8 @@
 		{/if}
 	</div>
 
-	{#if fleet.selectedVehicleId}
-		<VehicleDetail vehicleId={fleet.selectedVehicleId} />
+	{#if fleet.selectedWardId}
+		<WardDetail wardId={fleet.selectedWardId} />
 	{/if}
 
 	{#if connectionPanelOpen}

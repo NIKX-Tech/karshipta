@@ -33,7 +33,7 @@ to tell which one is active.
 
 - **Envelope encoding/decoding.** `Transport` carries raw bytes; building or
   parsing a `karshipta::v1::Envelope` from those bytes is the caller's job
-  (currently `main.cpp`; will move into a `Gateway`/`VehicleManager` type
+  (currently `main.cpp`; will move into a `Gateway`/`WardManager` type
   later).
 - **Acting on received frames.** `on_receive` fires with the raw bytes; as
   of M2 the gateway only logs them. Turning a `Command` envelope into a
@@ -76,7 +76,7 @@ to tell which one is active.
 ## Design: safe-bind config and the LAN escape hatch
 
 The gateway has no authentication (gateway hardening issue #16): whoever can
-open a WebSocket to `host:port` can command every connected vehicle.
+open a WebSocket to `host:port` can command every connected ward.
 `WebsocketTransport::from_config()` exists so that fact drives a safe
 default instead of an opt-in one, loading `gateway/config/gateway.yaml`:
 
@@ -188,13 +188,13 @@ WebsocketTransport(std::string host, uint16_t port);
   multi-subscriber fan-out.
 - **`ClientId` is only unique within one `WebsocketTransport` instance's
   lifetime**, not globally, and is not the same value as any MAVLink or
-  vehicle id.
+  ward id.
 
 ## M2 test client
 
 `gateway/tools/websocket_test_client.py` connects to a running gateway,
-decodes each Envelope frame, and prints one line per `VehicleInfo`/
-`VehicleState`. See the setup and usage comment at the top of that file.
+decodes each Envelope frame, and prints one line per `WardInfo`/
+`WardState`. See the setup and usage comment at the top of that file.
 
 ## Automated tests
 
@@ -229,7 +229,7 @@ cmake --build gateway/build
 ./gateway/build/src/karshipta_gateway.exe
 ```
 
-With a vehicle connected, the log includes:
+With a ward connected, the log includes:
 
 ```
 [info] websocket server listening on ws://127.0.0.1:8765
@@ -245,8 +245,8 @@ client's connection:
 [info] client 1 connected from 127.0.0.1
 ```
 
-and the client receives one 19-byte binary frame immediately (`VehicleInfo`)
-followed by an 88-byte binary frame roughly every 200 ms (`VehicleState` at
+and the client receives one 19-byte binary frame immediately (`WardInfo`)
+followed by an 88-byte binary frame roughly every 200 ms (`WardState` at
 ~5 Hz), both `karshipta::v1::Envelope` messages. Verified against the real
 gateway process (connected to a live MAVLink source) using the committed
 test client, `gateway/tools/ws_client.py` (setup lines in its docstring):
