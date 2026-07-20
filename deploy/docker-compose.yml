@@ -1,5 +1,5 @@
 # Karshipta demo environment.
-# v0: SITL vehicles only. Gateway and console services are enabled as their
+# v0: SITL wards only. Gateway and console services are enabled as their
 # Dockerfiles land (gateway M6, console demo milestone).
 #
 # Note for M4: multi-instance PX4 SITL port layout is finalized in that

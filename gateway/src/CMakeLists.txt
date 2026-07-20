@@ -13,7 +13,7 @@ target_link_libraries(karshipta_gateway
         PRIVATE
             MAVSDK::mavsdk
             spdlog::spdlog
-            vehicle
+            ward
             transport
             karshipta_proto
             karshipta_warnings
