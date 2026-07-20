@@ -406,6 +406,36 @@ void WardManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
     clear_busy_and_notify(mission.ward_id());
 }
 
+std::optional<std::string> WardManager::dispatch_mission_upload_and_start(
+    const karshipta::v1::Mission& mission) {
+    std::optional<std::string> rejection_reason;
+    WardMission* target = nullptr;
+    {
+        std::lock_guard lock(wards_mutex_);
+        auto* ward = find_locked(mission.ward_id());
+        if (ward == nullptr) {
+            rejection_reason = "unknown ward_id: " + mission.ward_id();
+        } else if (ward->executor == nullptr) {
+            rejection_reason = "ward is stopped";
+        } else if (ward->busy) {
+            rejection_reason = "ward is busy, retry shortly";
+        } else {
+            ward->busy = true;
+            ward->pending_auto_start_mission_id = mission.mission_id();
+            target = ward->mission.get();
+        }
+    }
+    if (rejection_reason) {
+        spdlog::warn("fleet mission assignment upload rejected for ward '{}': {}",
+                     mission.ward_id(), *rejection_reason);
+        broadcast_mission_event(mission.ward_id(), "MISSION_UPLOAD_REJECTED", *rejection_reason);
+        return rejection_reason;
+    }
+    target->enqueue_upload(mission);
+    clear_busy_and_notify(mission.ward_id());
+    return std::nullopt;
+}
+
 void WardManager::handle_mission_file_upload(const karshipta::v1::MissionFileUpload& upload) {
     std::optional<std::string> rejection_reason;
     MissionImporter* importer = nullptr;
@@ -763,6 +793,12 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
         // pattern so a concurrent remove_ward() can't destroy the executor
         // out from under this deferred call.
         std::vector<std::pair<std::string, CommandExecutor*>> pending_rtl;
+        // Same deferred-unlocked-enqueue shape as pending_rtl, but for a
+        // fleet mission assignment's auto-start (see
+        // ManagedWard::pending_auto_start_mission_id): populated below when
+        // a ward's own just-drained upload result matches the mission_id it
+        // was armed with.
+        std::vector<std::pair<std::string, CommandExecutor*>> pending_start;
         {
             // Cheap in-memory work only (TelemetryInfo's/WardMission's
             // getters are cached reads, not MAVSDK round-trips): safe to
@@ -805,10 +841,34 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
                 }
 
                 if (const auto upload_result = ward.mission->take_upload_result()) {
+                    // A fleet mission assignment arms this before enqueuing
+                    // its upload; consume it here regardless of outcome so a
+                    // failed upload never leaves a stale armed mission_id
+                    // behind for some later, unrelated upload to accidentally
+                    // match.
+                    const bool auto_start = ward.pending_auto_start_mission_id &&
+                                             *ward.pending_auto_start_mission_id ==
+                                                 upload_result->mission_id;
+                    if (auto_start) ward.pending_auto_start_mission_id.reset();
+
                     if (upload_result->result != mavsdk::Mission::Result::Success) {
                         deferred_mission_broadcasts.push_back(
                             {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
                              WardMission::result_name(upload_result->result)});
+                    } else if (auto_start) {
+                        if (ward.executor != nullptr && !ward.busy) {
+                            ward.busy = true;
+                            pending_start.emplace_back(id, ward.executor.get());
+                        } else {
+                            // Narrow race (ward stopped/mid-transition in the
+                            // instant between the upload landing and this
+                            // tick): logged so it's at least observable,
+                            // matching the pending_rtl race note just above.
+                            spdlog::warn(
+                                "ward '{}' fleet mission assignment uploaded but the ward is "
+                                "busy or stopped; mission not started this cycle",
+                                id);
+                        }
                     }
                 }
 
@@ -834,6 +894,16 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
             rtl.set_timestamp_ms(unix_epoch_ms());
             rtl.mutable_rtl();
             executor->enqueue(rtl);
+            clear_busy_and_notify(ward_id);
+        }
+        for (auto& [ward_id, executor] : pending_start) {
+            karshipta::v1::Command start;
+            start.set_command_id("gateway-fleet-mission-start-" + ward_id + "-" +
+                                  std::to_string(unix_epoch_ms()));
+            start.set_ward_id(ward_id);
+            start.set_timestamp_ms(unix_epoch_ms());
+            start.mutable_start_mission();
+            executor->enqueue(start);
             clear_busy_and_notify(ward_id);
         }
         for (auto& broadcast : deferred_mission_broadcasts) {

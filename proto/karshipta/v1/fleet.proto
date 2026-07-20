@@ -99,11 +99,16 @@ enum FleetAckStatus {
 }
 
 // Answer to CreateFleet / RenameFleet / DeleteFleet / AddWardToFleet /
-// RemoveWardFromFleet, correlated by request_id.
+// RemoveWardFromFleet, correlated by request_id. fleet_id lets any
+// connected client (not just the requester, which already knows it from
+// its own local tracker) learn which fleet a broadcast ack refers to -
+// essential for delete, which has no updated Fleet object to broadcast
+// alongside it. Mirrors WardConfigAck.ward_id.
 message FleetAck {
   string request_id = 1;
   FleetAckStatus status = 2;
   string message = 3;
+  string fleet_id = 4;
 }
 
 // ---------- Zones (console -> gateway) ----------
@@ -161,10 +166,13 @@ enum ZoneAckStatus {
 }
 
 // Answer to CreateZone / UpdateZone / DeleteZone, correlated by request_id.
+// zone_id mirrors FleetAck.fleet_id, same reason: the only way any client
+// other than the requester learns which zone a broadcast delete-ack removed.
 message ZoneAck {
   string request_id = 1;
   ZoneAckStatus status = 2;
   string message = 3;
+  string zone_id = 4;
 }
 
 // ---------- Fleet-wide mission assignment (console -> gateway) ----------
