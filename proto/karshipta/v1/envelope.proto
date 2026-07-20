@@ -8,9 +8,14 @@ import "karshipta/v1/fleet.proto";
 
 // Every WebSocket frame is exactly one binary-encoded Envelope.
 // Gateway -> console: ward_info, ward_state, event, command_ack,
-//                     mission_progress, ward_config_ack, mission_download.
+//                     mission_progress, ward_config_ack, mission_download,
+//                     fleet, zone, fleet_ack, zone_ack.
 // Console -> gateway: command, mission_upload, add_ward, remove_ward,
-//                     mission_file_upload, mission_download_request.
+//                     mission_file_upload, mission_download_request,
+//                     create_fleet, rename_fleet, delete_fleet,
+//                     add_ward_to_fleet, remove_ward_from_fleet,
+//                     create_zone, update_zone, delete_zone,
+//                     fleet_mission_assignment.
 message Envelope {
   oneof payload {
     // downstream (gateway to console)
@@ -21,6 +26,10 @@ message Envelope {
     MissionProgress mission_progress = 5;
     WardConfigAck ward_config_ack = 6;
     Mission mission_download = 14;         // response to mission_download_request
+    Fleet fleet = 17;                      // sync on connect, one message per fleet
+    Zone zone = 18;                        // sync on connect, one message per zone
+    FleetAck fleet_ack = 19;
+    ZoneAck zone_ack = 20;
 
     // upstream (console to gateway)
     Command command = 10;
@@ -29,5 +38,14 @@ message Envelope {
     RemoveWard remove_ward = 13;
     MissionFileUpload mission_file_upload = 15;
     MissionDownloadRequest mission_download_request = 16;
+    CreateFleet create_fleet = 21;
+    RenameFleet rename_fleet = 22;
+    DeleteFleet delete_fleet = 23;
+    AddWardToFleet add_ward_to_fleet = 24;
+    RemoveWardFromFleet remove_ward_from_fleet = 25;
+    CreateZone create_zone = 26;
+    UpdateZone update_zone = 27;
+    DeleteZone delete_zone = 28;
+    FleetMissionAssignment fleet_mission_assignment = 29;
   }
 }
