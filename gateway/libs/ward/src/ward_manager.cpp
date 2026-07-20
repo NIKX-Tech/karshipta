@@ -1079,11 +1079,24 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
         return *error;
     }
 
-    std::lock_guard lock(wards_mutex_);
-    stop_worker(*ward);
-    managed_wards_.erase(ward_id);
-    persist_locked();
-    spdlog::info("ward_id '{}' removed (total={})", ward_id, managed_wards_.size());
+    // extract(), not erase(): erase() would destroy the ManagedWard (and
+    // therefore run WardConnection::~WardConnection() -> mavsdk's
+    // remove_connection(), TelemetryInfo::~TelemetryInfo()'s unsubscribe, and
+    // WardMission::~WardMission()'s own worker join) right here, under
+    // wards_mutex_. None of those calls are bounded or interruptible, so
+    // one slow teardown would stall every other ward's dispatch_command,
+    // the publish tick, and add/remove requests behind this lock. extract()
+    // only relocates the node out of the map (same out-of-lock-destruction
+    // idea as retired_executor above); `node` actually destructs once it goes
+    // out of scope below, after the lock has already been released.
+    std::map<std::string, ManagedWard>::node_type node;
+    {
+        std::lock_guard lock(wards_mutex_);
+        stop_worker(*ward);
+        node = managed_wards_.extract(ward_id);
+        persist_locked();
+        spdlog::info("ward_id '{}' removed (total={})", ward_id, managed_wards_.size());
+    }
     return std::nullopt;
 }
 
