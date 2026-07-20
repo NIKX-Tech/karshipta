@@ -4,19 +4,19 @@
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 
 	interface Props {
-		vehicleId: string;
+		wardId: string;
 	}
 
-	const { vehicleId }: Props = $props();
+	const { wardId }: Props = $props();
 
 	let confirmStart = $state(false);
 
-	const draft = $derived(
-		fleet.missionDraft?.vehicleId === vehicleId ? fleet.missionDraft : undefined
-	);
-	const uploaded = $derived(fleet.uploadedMissions[vehicleId]);
-	const progress = $derived(fleet.missionProgress[vehicleId]);
-	const vehicleState = $derived(fleet.vehicles[vehicleId]?.state);
+	const draft = $derived(fleet.missionDraft?.wardId === wardId ? fleet.missionDraft : undefined);
+	const uploaded = $derived(fleet.uploadedMissions[wardId]);
+	const progress = $derived(fleet.missionProgress[wardId]);
+	// This panel only renders while the ward has a flight field (see
+	// ward-detail.svelte's gating), so flight is always set here.
+	const flightState = $derived(fleet.wards[wardId]?.state?.flight);
 
 	const startWarning = $derived.by(() => {
 		if (!uploaded) return undefined;
@@ -33,11 +33,11 @@
 	});
 </script>
 
-<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Mission for {vehicleId}">
+<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Mission for {wardId}">
 	<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">MISSION</h3>
 
 	{#if !draft}
-		<button class="mission-button mt-2" onclick={() => fleet.startPlanning(vehicleId)}>
+		<button class="mission-button mt-2" onclick={() => fleet.startPlanning(wardId)}>
 			{uploaded ? 'Plan new mission' : 'Plan mission'}
 		</button>
 	{:else}
@@ -102,15 +102,15 @@
 		<div class="mt-2 flex gap-1.5">
 			<button
 				class="mission-button"
-				disabled={!vehicleState?.armed}
-				title={vehicleState?.armed ? undefined : 'arm first'}
+				disabled={!flightState?.armed}
+				title={flightState?.armed ? undefined : 'arm first'}
 				onclick={() => (confirmStart = true)}
 			>
 				Start
 			</button>
 			<button
 				class="mission-button"
-				onclick={() => fleet.sendCommand(vehicleId, { $case: 'pauseMission', pauseMission: {} })}
+				onclick={() => fleet.sendCommand(wardId, { $case: 'pauseMission', pauseMission: {} })}
 			>
 				Pause
 			</button>
@@ -130,12 +130,12 @@
 
 {#if confirmStart}
 	<ConfirmDialog
-		title={`Start mission on ${vehicleId}`}
-		body={`The vehicle will fly ${uploaded?.items.length ?? 0} waypoints${(uploaded?.repeatCount ?? 0) > 0 ? ` and repeat ${uploaded?.repeatCount} more times` : ''}.`}
+		title={`Start mission on ${wardId}`}
+		body={`The ward will fly ${uploaded?.items.length ?? 0} waypoints${(uploaded?.repeatCount ?? 0) > 0 ? ` and repeat ${uploaded?.repeatCount} more times` : ''}.`}
 		warning={startWarning}
 		confirmLabel="Start"
 		onconfirm={() => {
-			fleet.sendCommand(vehicleId, { $case: 'startMission', startMission: {} });
+			fleet.sendCommand(wardId, { $case: 'startMission', startMission: {} });
 			confirmStart = false;
 		}}
 		oncancel={() => (confirmStart = false)}

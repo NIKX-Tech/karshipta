@@ -48,7 +48,7 @@ a guess. A `RelayTransport` can be built two ways:
   `RelayCredentials` directly.
 - `RelayTransport::from_config(relay_url, config_path)`: load
   `device_id`/`private_key_path` from a YAML file at `config_path` (same
-  shape and error-handling pattern as `VehicleManager`'s fleet persistence:
+  shape and error-handling pattern as `WardManager`'s fleet persistence:
   missing file or fields are logged and treated as empty, never fatal).
 
 Either way, an all-empty `RelayCredentials` is valid: it keeps
@@ -88,6 +88,7 @@ There is nothing meaningful to load from static config for it yet.
 | `void send(ClientId, const std::vector<uint8_t>&) override` | No-op unless `client` matches the current connection id. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Equivalent to `send` to that id: there is only ever one today. |
 | `const RelayCredentials& credentials() const` | Read-only accessor; no setter, credentials are fixed for the instance's lifetime. |
+| `ClientRole role(ClientId) const override` | Always `kOperator` (gateway issue #20): relayly pairing has no per-peer role concept yet, so there is nothing to mark a peer viewer with. Revisit once peer identity exists past the Noise XX handshake. |
 
 ## Design: one link today, not yet N relayly peers
 
@@ -140,6 +141,8 @@ debug builds).
   instance.
 - `FromConfigLoadsFieldsFromFile`: a YAML file with `device_id`/
   `private_key_path` is loaded into the resulting `credentials()`.
+- `RoleIsAlwaysOperator`: `role()` reads `kOperator` for any client id,
+  connected or not.
 
 ## Next steps (tracked, not started)
 

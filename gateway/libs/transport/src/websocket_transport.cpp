@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <filesystem>
+#include <functional>
 
 namespace {
 
@@ -16,21 +17,55 @@ constexpr uint16_t kDefaultPort = 8765;
 // Deliberately exact-match only (not a CIDR/subnet check): the values a
 // config file is expected to spell out for "this machine only" are exactly
 // these three. Anything else, including 0.0.0.0, is treated as a wider bind
-// subject to the allow_lan_bind escape hatch.
+// subject to the allow_lan_bind/container_bind escape hatches.
 bool is_loopback_host(const std::string& host) {
     return host == "127.0.0.1" || host == "localhost" || host == "::1";
 }
 
+// Reads the role=viewer query parameter off a connection URI (e.g.
+// "/?role=viewer"), gateway issue #20. Deliberately minimal: exact key/value
+// match only, no percent-decoding or multi-value handling, since this is a
+// same-origin operator/console setting, not a public-facing form. Anything
+// other than an exact "role=viewer" pair, including no query string at all,
+// keeps the connection an operator: existing consoles that predate viewer
+// mode carry no query parameter and must not lose command access.
+Transport::ClientRole parse_role_from_uri(const std::string& uri) {
+    const auto query_pos = uri.find('?');
+    if (query_pos == std::string::npos) return Transport::ClientRole::kOperator;
+
+    const std::string query = uri.substr(query_pos + 1);
+    std::size_t start = 0;
+    while (start <= query.size()) {
+        const auto amp_pos = query.find('&', start);
+        const std::string pair = query.substr(start, amp_pos == std::string::npos
+                                                           ? std::string::npos
+                                                           : amp_pos - start);
+        if (pair == "role=viewer") return Transport::ClientRole::kViewer;
+        if (amp_pos == std::string::npos) break;
+        start = amp_pos + 1;
+    }
+    return Transport::ClientRole::kOperator;
+}
+
 }  // namespace
+
+// /.dockerenv is created by the Docker runtime itself (not user-controlled
+// inside the image), so this cannot be spoofed by a container_bind: true
+// left in a config file that ends up on a bare-metal run.
+bool is_running_in_container() {
+    std::error_code exists_error;
+    return std::filesystem::exists("/.dockerenv", exists_error) && !exists_error;
+}
 
 WebsocketTransport::WebsocketTransport(std::string host, const uint16_t port)
     : host_(std::move(host)), port_(port) {}
 
 std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
-    const std::string& config_path) {
+    const std::string& config_path, const std::function<bool()>& is_in_container) {
     std::string host = kDefaultHost;
     uint16_t port = kDefaultPort;
     bool allow_lan_bind = false;
+    bool container_bind = false;
 
     std::error_code exists_error;
     if (!std::filesystem::exists(config_path, exists_error) || exists_error) {
@@ -45,6 +80,8 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
                 if (websocket["port"]) port = websocket["port"].as<uint16_t>();
                 if (websocket["allow_lan_bind"])
                     allow_lan_bind = websocket["allow_lan_bind"].as<bool>();
+                if (websocket["container_bind"])
+                    container_bind = websocket["container_bind"].as<bool>();
             }
         } catch (const YAML::Exception& parse_error) {
             spdlog::error(
@@ -53,10 +90,34 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
             host = kDefaultHost;
             port = kDefaultPort;
             allow_lan_bind = false;
+            container_bind = false;
         }
     }
 
-    if (!is_loopback_host(host) && !allow_lan_bind) {
+    if (is_loopback_host(host)) {
+        // Nothing to gate: fall through and bind as requested.
+    } else if (allow_lan_bind) {
+        spdlog::warn(
+            "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
+            "network with NO AUTHENTICATION. Anyone who can reach this address can command "
+            "every connected ward. Only do this on a trusted, isolated network; prefer the "
+            "relay transport for cross-machine access.",
+            host, port);
+    } else if (container_bind && is_in_container()) {
+        spdlog::warn(
+            "gateway is binding to {}:{} because websocket.container_bind is set and this "
+            "process detected it is running inside a container. This is reachable only through "
+            "whatever ports the container runtime publishes to the host, not directly from the "
+            "LAN; see gateway/docs/websocket-transport.md.",
+            host, port);
+    } else if (container_bind) {
+        spdlog::warn(
+            "gateway config '{}' sets websocket.container_bind: true, but this process is not "
+            "running inside a container; ignoring and forcing 127.0.0.1 instead. "
+            "container_bind is only meant for containerized deployments, not bare-metal runs.",
+            config_path);
+        host = kDefaultHost;
+    } else {
         spdlog::warn(
             "gateway config '{}' requests websocket.host='{}', but websocket.allow_lan_bind is "
             "off; forcing 127.0.0.1 instead. Cross-machine access is meant to go through the "
@@ -65,13 +126,6 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
             "need a bare LAN bind.",
             config_path, host);
         host = kDefaultHost;
-    } else if (!is_loopback_host(host) && allow_lan_bind) {
-        spdlog::warn(
-            "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
-            "network with NO AUTHENTICATION. Anyone who can reach this address can command "
-            "every connected vehicle. Only do this on a trusted, isolated network; prefer the "
-            "relay transport for cross-machine access.",
-            host, port);
     }
 
     return std::make_unique<WebsocketTransport>(std::move(host), port);
@@ -106,13 +160,16 @@ void WebsocketTransport::start() {
                         break;
                     }
                     const ClientId id = next_client_id_.fetch_add(1);
+                    const ClientRole role = parse_role_from_uri(msg->openInfo.uri);
                     {
                         std::lock_guard lock(clients_mutex_);
                         clients_[id] = shared_socket;
                         client_ids_[&web_socket] = id;
+                        client_roles_[id] = role;
                     }
-                    spdlog::info("client {} connected from {}", id,
-                                 connection_state->getRemoteIp());
+                    spdlog::info("client {} connected from {} as {}", id,
+                                 connection_state->getRemoteIp(),
+                                 role == ClientRole::kViewer ? "viewer" : "operator");
                     if (on_connect_) on_connect_(id);
                     break;
                 }
@@ -127,6 +184,7 @@ void WebsocketTransport::start() {
                             found = true;
                             clients_.erase(id);
                             client_ids_.erase(it);
+                            client_roles_.erase(id);
                         }
                     }
                     if (found) {
@@ -180,6 +238,7 @@ void WebsocketTransport::stop() {
         std::lock_guard lock(clients_mutex_);
         clients_.clear();
         client_ids_.clear();
+        client_roles_.clear();
     }
     ix::uninitNetSystem();
     running_ = false;
@@ -213,6 +272,12 @@ void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
     for (const auto& web_socket : targets) {
         web_socket->sendBinary(payload);
     }
+}
+
+Transport::ClientRole WebsocketTransport::role(const ClientId client) const {
+    std::lock_guard lock(clients_mutex_);
+    const auto it = client_roles_.find(client);
+    return it == client_roles_.end() ? ClientRole::kViewer : it->second;
 }
 
 void WebsocketTransport::on_receive(ReceiveCallback callback) {

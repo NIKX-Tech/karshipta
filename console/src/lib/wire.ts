@@ -12,19 +12,14 @@
 export {
 	GeoPoint,
 	VelocityNed,
-	VehicleType,
+	WardClass,
 	FlightMode,
 	GpsFixType,
 	Severity,
-	VehicleOrigin
+	WardOrigin
 } from './gen/karshipta/v1/common';
 export { Envelope } from './gen/karshipta/v1/envelope';
-export {
-	AddVehicle,
-	RemoveVehicle,
-	VehicleConfigAck,
-	VehicleConfigStatus
-} from './gen/karshipta/v1/fleet';
+export { AddWard, RemoveWard, WardConfigAck, WardConfigStatus } from './gen/karshipta/v1/fleet';
 export {
 	ArmCommand,
 	DisarmCommand,
@@ -42,4 +37,11 @@ export {
 	MissionProgress,
 	MissionAction
 } from './gen/karshipta/v1/command';
-export { VehicleInfo, Battery, Gps, VehicleState, Event } from './gen/karshipta/v1/telemetry';
+export {
+	WardInfo,
+	Battery,
+	Gps,
+	FlightState,
+	WardState,
+	Event
+} from './gen/karshipta/v1/telemetry';

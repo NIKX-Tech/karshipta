@@ -2,6 +2,22 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
+		<script>
+			// Sets the theme attribute before first paint so a saved 'light'
+			// choice doesn't flash dark first: themeStore.init() only runs in
+			// onMount, which is after that first paint already happened. Key
+			// must match STORAGE_KEY in theme.svelte.ts; duplicated here since
+			// this parser-blocking script can't import a TS module.
+			(function () {
+				try {
+					if (localStorage.getItem('karshipta:theme') === 'light') {
+						document.documentElement.dataset.theme = 'light';
+					}
+				} catch (error) {
+					// localStorage unavailable (e.g. private mode); dark default stands
+				}
+			})();
+		</script>
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
 		%sveltekit.head%

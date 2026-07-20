@@ -28,12 +28,16 @@ to tell which one is active.
   `on_disconnect`) with that `ClientId`, never an `ix::` type.
 - Be safe to call from multiple threads for `send`/`broadcast`: IXWebSocket
   delivers each connection's events on its own thread from an internal pool.
+- Mark each connection's `ClientRole` (operator or viewer, gateway issue #20)
+  once at connect time and report it back via `role()`. Deciding what to *do*
+  with that role (rejecting a viewer's upstream envelopes) is not this
+  class's job - see `WardManager::reject_viewer_envelope`.
 
 ## Explicitly out of scope
 
 - **Envelope encoding/decoding.** `Transport` carries raw bytes; building or
   parsing a `karshipta::v1::Envelope` from those bytes is the caller's job
-  (currently `main.cpp`; will move into a `Gateway`/`VehicleManager` type
+  (currently `main.cpp`; will move into a `Gateway`/`WardManager` type
   later).
 - **Acting on received frames.** `on_receive` fires with the raw bytes; as
   of M2 the gateway only logs them. Turning a `Command` envelope into a
@@ -51,11 +55,13 @@ to tell which one is active.
 | `using ReceiveCallback = std::function<void(ClientId, const std::vector<uint8_t>&)>` | Fired once per received binary frame. |
 | `using ConnectCallback = std::function<void(ClientId)>` | Fired when a client connects. |
 | `using DisconnectCallback = std::function<void(ClientId)>` | Fired when a client disconnects. |
+| `enum class ClientRole { kOperator, kViewer }` | Whether a connection may send state-changing envelopes or is read-only (gateway issue #20). Decided once, at connect time. |
 | `virtual void start()` | Starts listening (or, for a relay transport, connecting out). Idempotent. |
 | `virtual void stop()` | Stops and drops every client. Idempotent. |
 | `virtual bool is_running() const` | |
 | `virtual void send(ClientId, const std::vector<uint8_t>&)` | Sends to one client. No-op if that client is no longer connected. |
 | `virtual void broadcast(const std::vector<uint8_t>&)` | Sends to every currently connected client. |
+| `virtual ClientRole role(ClientId) const` | The role a currently-connected client was marked with. `kViewer` (the unprivileged default) for an unknown/disconnected client. |
 | `virtual void on_receive(ReceiveCallback)` | Replaces the current receive callback. |
 | `virtual void on_connect(ConnectCallback)` | Replaces the current connect callback. |
 | `virtual void on_disconnect(DisconnectCallback)` | Replaces the current disconnect callback. |
@@ -71,12 +77,13 @@ to tell which one is active.
 | `void stop() override` | Stops the server, clears the client maps, and calls `ix::uninitNetSystem()`. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_`; no-op if not found. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current `shared_ptr<ix::WebSocket>` list under the lock, then sends outside it. |
+| `ClientRole role(ClientId) const override` | Looks up `client_roles_` under `clients_mutex_`; `kViewer` if the id is not currently connected. |
 | `const std::string& host() const` / `uint16_t port() const` | Read-only accessors for the address this instance was built with. |
 
 ## Design: safe-bind config and the LAN escape hatch
 
 The gateway has no authentication (gateway hardening issue #16): whoever can
-open a WebSocket to `host:port` can command every connected vehicle.
+open a WebSocket to `host:port` can command every connected ward.
 `WebsocketTransport::from_config()` exists so that fact drives a safe
 default instead of an opt-in one, loading `gateway/config/gateway.yaml`:
 
@@ -85,28 +92,48 @@ websocket:
   host: 127.0.0.1
   port: 8765
   allow_lan_bind: false
+  container_bind: false
 ```
 
 - A missing config file, or `websocket` section, falls back to
   `(127.0.0.1, 8765)`.
 - A `host` that is not exactly `127.0.0.1`, `localhost`, or `::1` (this
   includes `0.0.0.0`, and any specific LAN address) is treated as a wider
-  bind and gated by `allow_lan_bind`:
-  - `allow_lan_bind: false` (the default): the requested host is **ignored**
-    and the transport binds to `127.0.0.1` anyway, with a logged warning
-    explaining why and how to opt in.
+  bind and gated by `allow_lan_bind` and `container_bind`, checked in that
+  order:
   - `allow_lan_bind: true`: the requested host is honored, but every startup
     logs a loud `SECURITY:`-prefixed warning that the resulting server is
     unauthenticated and reachable from other machines.
+  - `container_bind: true`, and this process detects it is actually running
+    inside a container (checks for `/.dockerenv`): the requested host is
+    honored, with a narrower logged warning. This exists for the
+    `deploy/docker-compose.yml` demo (`deploy/gateway-config.yaml`): a
+    container's own loopback is not reachable from the host at all, so the
+    `127.0.0.1` default is unusable there, but the resulting bind is still
+    only reachable through whatever ports the container runtime publishes
+    to the host, not directly from the LAN the way `allow_lan_bind` is
+    reachable from other machines. Requesting `container_bind: true` while
+    not actually running in a container (e.g. that config file copied to a
+    bare-metal run) is ignored, with a logged warning, and falls back to
+    `127.0.0.1` like the default case below.
+  - Neither escape hatch set (the default): the requested host is
+    **ignored** and the transport binds to `127.0.0.1` anyway, with a
+    logged warning explaining why and how to opt in.
 - **Cross-machine access is meant to go through `RelayTransport` instead**
   (`gateway/docs/relay-transport.md`), not a LAN-exposed plain websocket.
   `allow_lan_bind` exists for cases (LAN testing, a trusted isolated
   network) where that is not yet practical, not as the recommended path.
+  `container_bind` is narrower still: it is meant only for the
+  docker-compose demo, not as a general substitute for `allow_lan_bind`.
 
 This policy lives in `from_config()`, not the plain constructor: the
 constructor still binds wherever it is told, unconditionally, since tests
 construct `WebsocketTransport` directly against `127.0.0.1` on ephemeral
 ports and should not go through config-file loading to do it.
+`from_config()` also takes an injectable `is_in_container` predicate
+(defaulting to the free function `is_running_in_container()`) purely so
+tests can assert both branches of the container check without depending on
+`/.dockerenv`.
 
 ## Design: mapping IXWebSocket connections to `ClientId`
 
@@ -141,6 +168,34 @@ so a client disconnecting concurrently and being erased from the server's
 own set cannot free the socket while a send against it is in flight.
 `Message` events are dropped unless `msg->binary` is true; text frames are
 logged and ignored, since the wire protocol is binary Envelope frames only.
+
+## Design: marking a connection as a viewer
+
+Gateway issue #20 (read-only viewer mode, console half tracked separately as
+issue #19) needed a way to mark a connection at the transport boundary,
+deliberately kept simple since the enforcement point (`WardManager`, see
+that class's docs) is what actually matters, not the marking mechanism:
+`WebsocketTransport` reads a `role=viewer` query parameter off the
+connection's URI (e.g. `ws://host:port/?role=viewer`), available on the
+`Open` message as `msg->openInfo.uri`. Anything else, including no query
+string at all, is `kOperator` - existing consoles that predate viewer mode
+carry no query parameter and must not lose command access. The parse
+(`parse_role_from_uri`) is deliberately minimal: exact `role=viewer` pair
+match only, no percent-decoding or multi-value handling, since this is a
+same-origin console setting, not a public-facing form.
+
+The role is stored in `client_roles_` (`ClientId -> ClientRole`) alongside
+`clients_`/`client_ids_`, set on `Open` and erased on `Close`, so `role()`
+only needs `clients_mutex_`, no extra synchronization. `role()` returns
+`kViewer` for an id it doesn't recognize: the fail-safe default is to treat
+an untracked connection as unprivileged, not to grant it operator access
+(this differs from the no-query-string default above, which is a
+backward-compatibility default for a real, just-connected client, not a
+security fallback for one that's gone missing).
+
+`RelayTransport::role()` always returns `kOperator`: relayly pairing has no
+per-peer role concept yet (see `relay-transport.md`), so there is nothing to
+mark a peer viewer with.
 
 ## Thread safety
 
@@ -188,13 +243,13 @@ WebsocketTransport(std::string host, uint16_t port);
   multi-subscriber fan-out.
 - **`ClientId` is only unique within one `WebsocketTransport` instance's
   lifetime**, not globally, and is not the same value as any MAVLink or
-  vehicle id.
+  ward id.
 
 ## M2 test client
 
 `gateway/tools/websocket_test_client.py` connects to a running gateway,
-decodes each Envelope frame, and prints one line per `VehicleInfo`/
-`VehicleState`. See the setup and usage comment at the top of that file.
+decodes each Envelope frame, and prints one line per `WardInfo`/
+`WardState`. See the setup and usage comment at the top of that file.
 
 ## Automated tests
 
@@ -207,6 +262,10 @@ server + real IXWebSocket client on loopback ports, deadline-guarded):
 - `BroadcastReachesEveryClientAndReceiveRoundTrips`: `broadcast()` reaches
   two clients; a client's binary frame reaches `on_receive` intact.
 - `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety.
+- `RoleDefaultsToOperatorWithNoQueryParam` / `RoleIsViewerWhenQueryParamRequestsIt`:
+  a plain connection reads `kOperator`; one whose URL carries `?role=viewer`
+  reads `kViewer`. `RoleIsViewerForUnknownClient`: an id nothing ever
+  connected with reads `kViewer`, the fail-safe default.
 
 `WebsocketTransportFromConfig` covers the safe-bind policy above:
 
@@ -229,7 +288,7 @@ cmake --build gateway/build
 ./gateway/build/src/karshipta_gateway.exe
 ```
 
-With a vehicle connected, the log includes:
+With a ward connected, the log includes:
 
 ```
 [info] websocket server listening on ws://127.0.0.1:8765
@@ -245,8 +304,8 @@ client's connection:
 [info] client 1 connected from 127.0.0.1
 ```
 
-and the client receives one 19-byte binary frame immediately (`VehicleInfo`)
-followed by an 88-byte binary frame roughly every 200 ms (`VehicleState` at
+and the client receives one 19-byte binary frame immediately (`WardInfo`)
+followed by an 88-byte binary frame roughly every 200 ms (`WardState` at
 ~5 Hz), both `karshipta::v1::Envelope` messages. Verified against the real
 gateway process (connected to a live MAVLink source) using the committed
 test client, `gateway/tools/ws_client.py` (setup lines in its docstring):

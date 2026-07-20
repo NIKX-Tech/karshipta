@@ -4,14 +4,14 @@ package karshipta.v1;
 
 import "karshipta/v1/common.proto";
 
-// Static identity of a vehicle, sent on connect and on change.
-message VehicleInfo {
-  string vehicle_id = 1;       // stable ID assigned by the gateway, e.g. "sitl-1"
-  VehicleType type = 2;
-  string autopilot = 3;        // "PX4", "ArduPilot"
-  string firmware_version = 4;
-  uint32 mavlink_system_id = 5;
-  VehicleOrigin origin = 6;
+// Static identity of a ward, sent on connect and on change.
+message WardInfo {
+  string ward_id = 1;          // stable ID assigned by the gateway, e.g. "sitl-1"
+  WardClass ward_class = 2;
+  string autopilot = 3;        // "PX4", "ArduPilot"; empty when this ward has no flight autopilot
+  string firmware_version = 4; // this ward's own firmware, if it reports one; independent of ward_class
+  uint32 mavlink_system_id = 5; // 0 when not connected via MAVLink; independent of ward_class, since a non-flight ward can still speak MAVLink
+  WardOrigin origin = 6;
 }
 
 message Battery {
@@ -25,25 +25,36 @@ message Gps {
   float hdop = 3;
 }
 
-// Live state of one vehicle. Published at 2 to 10 Hz per vehicle.
-message VehicleState {
-  string vehicle_id = 1;
-  uint64 timestamp_ms = 2;     // unix epoch milliseconds, gateway clock
-  GeoPoint position = 3;
-  VelocityNed velocity = 4;
-  float heading_deg = 5;       // 0 to 360, true north
-  Battery battery = 6;
-  Gps gps = 7;
-  FlightMode flight_mode = 8;
-  bool armed = 9;
-  bool in_air = 10;
-  bool health_ok = 11;         // aggregate of MAVSDK health checks
-  bool connected = 12;         // false when gateway lost the MAVLink link
+// Autopilot-specific state: only meaningful for a ward under active or
+// simulated flight control (a flight-mode state machine, an armed state, an
+// airborne state). Absent (unset) for non-flight wards - a livestock tag has
+// no autopilot to be "armed" or "in mission mode", even though it still
+// reports position, velocity, and heading like any moving ward (those stay
+// on WardState directly, not nested here, for exactly that reason).
+message FlightState {
+  FlightMode flight_mode = 1;
+  bool armed = 2;
+  bool in_air = 3;
 }
 
-// Human-relevant event from a vehicle or the gateway itself.
+// Live state of one ward. Published at 2 to 10 Hz per ward.
+message WardState {
+  string ward_id = 1;
+  uint64 timestamp_ms = 2;     // unix epoch milliseconds, gateway clock
+  GeoPoint position = 3;
+  VelocityNed velocity = 4;    // any moving ward has this, not flight-specific
+  float heading_deg = 5;       // direction of travel, 0 to 360 true north; any moving ward has this
+  Battery battery = 6;
+  Gps gps = 7;
+  bool health_ok = 8;          // true when the ward is reporting normally (autopilot health checks for flight wards, basic reporting sanity for others)
+  bool connected = 9;          // false when the gateway lost the ward's link
+  FlightState flight = 10;     // unset for non-flight wards
+  repeated string tags = 11;   // operator-defined labels, e.g. "herd-3", "north-region"
+}
+
+// Human-relevant event from a ward or the gateway itself.
 message Event {
-  string vehicle_id = 1;       // empty = gateway-level event
+  string ward_id = 1;          // empty = gateway-level event
   uint64 timestamp_ms = 2;
   Severity severity = 3;
   string code = 4;             // machine-readable, e.g. "LOW_BATTERY", "LINK_LOST"
