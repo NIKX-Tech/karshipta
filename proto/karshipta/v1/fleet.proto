@@ -3,6 +3,7 @@ syntax = "proto3";
 package karshipta.v1;
 
 import "karshipta/v1/common.proto";
+import "karshipta/v1/command.proto";
 
 // ---------- Fleet management (console -> gateway) ----------
 //
@@ -44,4 +45,144 @@ message WardConfigAck {
   string ward_id = 2;
   WardConfigStatus status = 3;
   string message = 4;            // reason when rejected
+}
+
+// ---------- Fleet grouping (console -> gateway) ----------
+//
+// A Fleet is a named, persistent group of Wards, not itself a physical
+// thing - it is a saved selection (fleet-mission-model.md). Membership is
+// many to many: a Ward can belong to more than one Fleet. The gateway owns
+// persistence (SQLite, not the YAML fleet_state.yaml wards already use -
+// this is relational, not a flat list) and syncs the current set to every
+// client on connect, one Fleet message per fleet.
+
+message Fleet {
+  string fleet_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string ward_ids = 4;  // many-to-many membership
+}
+
+message CreateFleet {
+  string request_id = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message RenameFleet {
+  string request_id = 1;
+  string fleet_id = 2;
+  string name = 3;
+}
+
+message DeleteFleet {
+  string request_id = 1;
+  string fleet_id = 2;
+}
+
+message AddWardToFleet {
+  string request_id = 1;
+  string fleet_id = 2;
+  string ward_id = 3;
+}
+
+message RemoveWardFromFleet {
+  string request_id = 1;
+  string fleet_id = 2;
+  string ward_id = 3;
+}
+
+enum FleetAckStatus {
+  FLEET_ACK_STATUS_UNSPECIFIED = 0;
+  FLEET_ACK_STATUS_ACCEPTED = 1;
+  FLEET_ACK_STATUS_REJECTED = 2;  // reason in message
+}
+
+// Answer to CreateFleet / RenameFleet / DeleteFleet / AddWardToFleet /
+// RemoveWardFromFleet, correlated by request_id.
+message FleetAck {
+  string request_id = 1;
+  FleetAckStatus status = 2;
+  string message = 3;
+}
+
+// ---------- Zones (console -> gateway) ----------
+//
+// A Zone is a named polygon: keep-in (operational/safe area) or keep-out
+// (no-fly). v0 is advisory only - a mission waypoint inside a keep-out Zone
+// or outside every keep-in Zone warns the console operator before upload,
+// it does not block it. Enforcement pushed to the autopilot (MAVSDK
+// geofence) is a later, separately-tracked item (fleet-mission-model.md).
+// Geometry (vertices) is fixed at creation; only name/type/altitude bounds
+// can change afterward, matching the console's v0 editing scope.
+
+enum ZoneType {
+  ZONE_TYPE_UNSPECIFIED = 0;
+  ZONE_TYPE_KEEP_IN = 1;
+  ZONE_TYPE_KEEP_OUT = 2;
+}
+
+message Zone {
+  string zone_id = 1;
+  string name = 2;
+  ZoneType type = 3;
+  repeated karshipta.v1.GeoPoint vertices = 4;  // horizontal boundary; altitude fields on GeoPoint are unused here
+  optional float altitude_min_m = 5;            // unset = no lower bound
+  optional float altitude_max_m = 6;            // unset = no upper bound
+}
+
+message CreateZone {
+  string request_id = 1;
+  string name = 2;
+  ZoneType type = 3;
+  repeated karshipta.v1.GeoPoint vertices = 4;  // at least 3 required
+  optional float altitude_min_m = 5;
+  optional float altitude_max_m = 6;
+}
+
+message UpdateZone {
+  string request_id = 1;
+  string zone_id = 2;
+  string name = 3;
+  ZoneType type = 4;
+  optional float altitude_min_m = 5;
+  optional float altitude_max_m = 6;
+}
+
+message DeleteZone {
+  string request_id = 1;
+  string zone_id = 2;
+}
+
+enum ZoneAckStatus {
+  ZONE_ACK_STATUS_UNSPECIFIED = 0;
+  ZONE_ACK_STATUS_ACCEPTED = 1;
+  ZONE_ACK_STATUS_REJECTED = 2;  // reason in message
+}
+
+// Answer to CreateZone / UpdateZone / DeleteZone, correlated by request_id.
+message ZoneAck {
+  string request_id = 1;
+  ZoneAckStatus status = 2;
+  string message = 3;
+}
+
+// ---------- Fleet-wide mission assignment (console -> gateway) ----------
+//
+// Deliberately simple v0 semantics (fleet-mission-model.md): one mission
+// template, uploaded as an independent copy to each selected Ward and
+// started together. No per-ward variation, no area splitting, no role
+// assignment, no cross-fleet composition - that is real multi-agent task
+// allocation, an explicitly separate, later feature.
+//
+// The template omits Mission's own mission_id/ward_id fields on purpose:
+// those are meaningless before fan-out. The gateway builds one independent
+// Mission (fresh mission_id, the recipient's ward_id) per selected ward.
+message FleetMissionAssignment {
+  string request_id = 1;
+  string fleet_id = 2;
+  repeated string ward_ids = 3;  // the chosen subset of the fleet's wards
+  string mission_name = 4;
+  repeated karshipta.v1.MissionItem items = 5;
+  uint32 repeat_count = 6;
 }

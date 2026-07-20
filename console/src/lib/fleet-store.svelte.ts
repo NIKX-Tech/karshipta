@@ -460,7 +460,23 @@ class FleetStore {
 			case 'removeWard':
 			case 'missionFileUpload':
 			case 'missionDownloadRequest':
+			case 'createFleet':
+			case 'renameFleet':
+			case 'deleteFleet':
+			case 'addWardToFleet':
+			case 'removeWardFromFleet':
+			case 'createZone':
+			case 'updateZone':
+			case 'deleteZone':
+			case 'fleetMissionAssignment':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
+				break;
+			// Real downstream payloads, not yet wired: fleetGroups/zoneStore
+			// (and their sync/ack handling) land with the Fleet and Zones tabs.
+			case 'fleet':
+			case 'zone':
+			case 'fleetAck':
+			case 'zoneAck':
 				break;
 			default: {
 				const unhandled: never = payload;

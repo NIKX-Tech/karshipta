@@ -98,7 +98,13 @@ foreach(proto_file ${KARSHIPTA_PROTO_FILES})
   add_custom_command(
     OUTPUT "${gen_src}" "${gen_hdr}"
     COMMAND protobuf::protoc
-    ARGS --cpp_out "${KARSHIPTA_PROTO_GEN_DIR}" -I "${KARSHIPTA_PROTO_DIR}" "${proto_file}"
+    # --experimental_allow_proto3_optional: fleet.proto uses proto3 `optional`
+    # fields (Zone's altitude bounds). Harmless no-op on protobuf 3.15+, where
+    # the feature graduated out of experimental; required on older protoc
+    # (e.g. Ubuntu 22.04's apt protobuf-compiler, still 3.12.x) or this flag
+    # rejects the file outright instead of just warning.
+    ARGS --cpp_out "${KARSHIPTA_PROTO_GEN_DIR}" -I "${KARSHIPTA_PROTO_DIR}"
+         --experimental_allow_proto3_optional "${proto_file}"
     DEPENDS "${proto_file}" protobuf::protoc
     COMMENT "Generating protobuf C++ for karshipta/v1/${proto_name}.proto"
     VERBATIM
