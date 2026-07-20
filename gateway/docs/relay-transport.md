@@ -48,7 +48,7 @@ a guess. A `RelayTransport` can be built two ways:
   `RelayCredentials` directly.
 - `RelayTransport::from_config(relay_url, config_path)`: load
   `device_id`/`private_key_path` from a YAML file at `config_path` (same
-  shape and error-handling pattern as `VehicleManager`'s fleet persistence:
+  shape and error-handling pattern as `WardManager`'s fleet persistence:
   missing file or fields are logged and treated as empty, never fatal).
 
 Either way, an all-empty `RelayCredentials` is valid: it keeps

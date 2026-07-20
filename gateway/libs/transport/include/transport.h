@@ -8,7 +8,7 @@
 // Abstraction over how Envelope bytes reach a console client. Two
 // implementations are expected: a plain WebSocket server (this one) and an
 // outbound relay transport (BRIEF.md M4). Code above this interface (main,
-// a future Gateway/VehicleManager) must talk to Transport only and must never
+// a future Gateway/WardManager) must talk to Transport only and must never
 // see WebSocket or relay types.
 class Transport {
    public:
@@ -22,7 +22,7 @@ class Transport {
     // read-only viewer mode). Decided once, at the transport boundary, when
     // the connection is established (see WebsocketTransport's query-param
     // handling); fixed for the connection's lifetime. Enforcement lives
-    // above this interface (see VehicleManager::reject_viewer_envelope), not
+    // above this interface (see WardManager::reject_viewer_envelope), not
     // in Transport itself: Transport only reports the role, it does not act
     // on it.
     enum class ClientRole { kOperator, kViewer };

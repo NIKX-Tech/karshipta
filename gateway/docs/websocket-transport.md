@@ -31,13 +31,13 @@ to tell which one is active.
 - Mark each connection's `ClientRole` (operator or viewer, gateway issue #20)
   once at connect time and report it back via `role()`. Deciding what to *do*
   with that role (rejecting a viewer's upstream envelopes) is not this
-  class's job - see `VehicleManager::reject_viewer_envelope`.
+  class's job - see `WardManager::reject_viewer_envelope`.
 
 ## Explicitly out of scope
 
 - **Envelope encoding/decoding.** `Transport` carries raw bytes; building or
   parsing a `karshipta::v1::Envelope` from those bytes is the caller's job
-  (currently `main.cpp`; will move into a `Gateway`/`VehicleManager` type
+  (currently `main.cpp`; will move into a `Gateway`/`WardManager` type
   later).
 - **Acting on received frames.** `on_receive` fires with the raw bytes; as
   of M2 the gateway only logs them. Turning a `Command` envelope into a
@@ -83,7 +83,7 @@ to tell which one is active.
 ## Design: safe-bind config and the LAN escape hatch
 
 The gateway has no authentication (gateway hardening issue #16): whoever can
-open a WebSocket to `host:port` can command every connected vehicle.
+open a WebSocket to `host:port` can command every connected ward.
 `WebsocketTransport::from_config()` exists so that fact drives a safe
 default instead of an opt-in one, loading `gateway/config/gateway.yaml`:
 
@@ -92,28 +92,48 @@ websocket:
   host: 127.0.0.1
   port: 8765
   allow_lan_bind: false
+  container_bind: false
 ```
 
 - A missing config file, or `websocket` section, falls back to
   `(127.0.0.1, 8765)`.
 - A `host` that is not exactly `127.0.0.1`, `localhost`, or `::1` (this
   includes `0.0.0.0`, and any specific LAN address) is treated as a wider
-  bind and gated by `allow_lan_bind`:
-  - `allow_lan_bind: false` (the default): the requested host is **ignored**
-    and the transport binds to `127.0.0.1` anyway, with a logged warning
-    explaining why and how to opt in.
+  bind and gated by `allow_lan_bind` and `container_bind`, checked in that
+  order:
   - `allow_lan_bind: true`: the requested host is honored, but every startup
     logs a loud `SECURITY:`-prefixed warning that the resulting server is
     unauthenticated and reachable from other machines.
+  - `container_bind: true`, and this process detects it is actually running
+    inside a container (checks for `/.dockerenv`): the requested host is
+    honored, with a narrower logged warning. This exists for the
+    `deploy/docker-compose.yml` demo (`deploy/gateway-config.yaml`): a
+    container's own loopback is not reachable from the host at all, so the
+    `127.0.0.1` default is unusable there, but the resulting bind is still
+    only reachable through whatever ports the container runtime publishes
+    to the host, not directly from the LAN the way `allow_lan_bind` is
+    reachable from other machines. Requesting `container_bind: true` while
+    not actually running in a container (e.g. that config file copied to a
+    bare-metal run) is ignored, with a logged warning, and falls back to
+    `127.0.0.1` like the default case below.
+  - Neither escape hatch set (the default): the requested host is
+    **ignored** and the transport binds to `127.0.0.1` anyway, with a
+    logged warning explaining why and how to opt in.
 - **Cross-machine access is meant to go through `RelayTransport` instead**
   (`gateway/docs/relay-transport.md`), not a LAN-exposed plain websocket.
   `allow_lan_bind` exists for cases (LAN testing, a trusted isolated
   network) where that is not yet practical, not as the recommended path.
+  `container_bind` is narrower still: it is meant only for the
+  docker-compose demo, not as a general substitute for `allow_lan_bind`.
 
 This policy lives in `from_config()`, not the plain constructor: the
 constructor still binds wherever it is told, unconditionally, since tests
 construct `WebsocketTransport` directly against `127.0.0.1` on ephemeral
 ports and should not go through config-file loading to do it.
+`from_config()` also takes an injectable `is_in_container` predicate
+(defaulting to the free function `is_running_in_container()`) purely so
+tests can assert both branches of the container check without depending on
+`/.dockerenv`.
 
 ## Design: mapping IXWebSocket connections to `ClientId`
 
@@ -153,7 +173,7 @@ logged and ignored, since the wire protocol is binary Envelope frames only.
 
 Gateway issue #20 (read-only viewer mode, console half tracked separately as
 issue #19) needed a way to mark a connection at the transport boundary,
-deliberately kept simple since the enforcement point (`VehicleManager`, see
+deliberately kept simple since the enforcement point (`WardManager`, see
 that class's docs) is what actually matters, not the marking mechanism:
 `WebsocketTransport` reads a `role=viewer` query parameter off the
 connection's URI (e.g. `ws://host:port/?role=viewer`), available on the
@@ -223,13 +243,13 @@ WebsocketTransport(std::string host, uint16_t port);
   multi-subscriber fan-out.
 - **`ClientId` is only unique within one `WebsocketTransport` instance's
   lifetime**, not globally, and is not the same value as any MAVLink or
-  vehicle id.
+  ward id.
 
 ## M2 test client
 
 `gateway/tools/websocket_test_client.py` connects to a running gateway,
-decodes each Envelope frame, and prints one line per `VehicleInfo`/
-`VehicleState`. See the setup and usage comment at the top of that file.
+decodes each Envelope frame, and prints one line per `WardInfo`/
+`WardState`. See the setup and usage comment at the top of that file.
 
 ## Automated tests
 
@@ -268,7 +288,7 @@ cmake --build gateway/build
 ./gateway/build/src/karshipta_gateway.exe
 ```
 
-With a vehicle connected, the log includes:
+With a ward connected, the log includes:
 
 ```
 [info] websocket server listening on ws://127.0.0.1:8765
@@ -284,8 +304,8 @@ client's connection:
 [info] client 1 connected from 127.0.0.1
 ```
 
-and the client receives one 19-byte binary frame immediately (`VehicleInfo`)
-followed by an 88-byte binary frame roughly every 200 ms (`VehicleState` at
+and the client receives one 19-byte binary frame immediately (`WardInfo`)
+followed by an 88-byte binary frame roughly every 200 ms (`WardState` at
 ~5 Hz), both `karshipta::v1::Envelope` messages. Verified against the real
 gateway process (connected to a live MAVLink source) using the committed
 test client, `gateway/tools/ws_client.py` (setup lines in its docstring):

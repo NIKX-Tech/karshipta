@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <filesystem>
+#include <functional>
 
 namespace {
 
@@ -16,7 +17,7 @@ constexpr uint16_t kDefaultPort = 8765;
 // Deliberately exact-match only (not a CIDR/subnet check): the values a
 // config file is expected to spell out for "this machine only" are exactly
 // these three. Anything else, including 0.0.0.0, is treated as a wider bind
-// subject to the allow_lan_bind escape hatch.
+// subject to the allow_lan_bind/container_bind escape hatches.
 bool is_loopback_host(const std::string& host) {
     return host == "127.0.0.1" || host == "localhost" || host == "::1";
 }
@@ -48,14 +49,23 @@ Transport::ClientRole parse_role_from_uri(const std::string& uri) {
 
 }  // namespace
 
+// /.dockerenv is created by the Docker runtime itself (not user-controlled
+// inside the image), so this cannot be spoofed by a container_bind: true
+// left in a config file that ends up on a bare-metal run.
+bool is_running_in_container() {
+    std::error_code exists_error;
+    return std::filesystem::exists("/.dockerenv", exists_error) && !exists_error;
+}
+
 WebsocketTransport::WebsocketTransport(std::string host, const uint16_t port)
     : host_(std::move(host)), port_(port) {}
 
 std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
-    const std::string& config_path) {
+    const std::string& config_path, const std::function<bool()>& is_in_container) {
     std::string host = kDefaultHost;
     uint16_t port = kDefaultPort;
     bool allow_lan_bind = false;
+    bool container_bind = false;
 
     std::error_code exists_error;
     if (!std::filesystem::exists(config_path, exists_error) || exists_error) {
@@ -70,6 +80,8 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
                 if (websocket["port"]) port = websocket["port"].as<uint16_t>();
                 if (websocket["allow_lan_bind"])
                     allow_lan_bind = websocket["allow_lan_bind"].as<bool>();
+                if (websocket["container_bind"])
+                    container_bind = websocket["container_bind"].as<bool>();
             }
         } catch (const YAML::Exception& parse_error) {
             spdlog::error(
@@ -78,10 +90,34 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
             host = kDefaultHost;
             port = kDefaultPort;
             allow_lan_bind = false;
+            container_bind = false;
         }
     }
 
-    if (!is_loopback_host(host) && !allow_lan_bind) {
+    if (is_loopback_host(host)) {
+        // Nothing to gate: fall through and bind as requested.
+    } else if (allow_lan_bind) {
+        spdlog::warn(
+            "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
+            "network with NO AUTHENTICATION. Anyone who can reach this address can command "
+            "every connected ward. Only do this on a trusted, isolated network; prefer the "
+            "relay transport for cross-machine access.",
+            host, port);
+    } else if (container_bind && is_in_container()) {
+        spdlog::warn(
+            "gateway is binding to {}:{} because websocket.container_bind is set and this "
+            "process detected it is running inside a container. This is reachable only through "
+            "whatever ports the container runtime publishes to the host, not directly from the "
+            "LAN; see gateway/docs/websocket-transport.md.",
+            host, port);
+    } else if (container_bind) {
+        spdlog::warn(
+            "gateway config '{}' sets websocket.container_bind: true, but this process is not "
+            "running inside a container; ignoring and forcing 127.0.0.1 instead. "
+            "container_bind is only meant for containerized deployments, not bare-metal runs.",
+            config_path);
+        host = kDefaultHost;
+    } else {
         spdlog::warn(
             "gateway config '{}' requests websocket.host='{}', but websocket.allow_lan_bind is "
             "off; forcing 127.0.0.1 instead. Cross-machine access is meant to go through the "
@@ -90,13 +126,6 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
             "need a bare LAN bind.",
             config_path, host);
         host = kDefaultHost;
-    } else if (!is_loopback_host(host) && allow_lan_bind) {
-        spdlog::warn(
-            "SECURITY: gateway is binding to {}:{}, reachable from other machines on this "
-            "network with NO AUTHENTICATION. Anyone who can reach this address can command "
-            "every connected vehicle. Only do this on a trusted, isolated network; prefer the "
-            "relay transport for cross-machine access.",
-            host, port);
     }
 
     return std::make_unique<WebsocketTransport>(std::move(host), port);

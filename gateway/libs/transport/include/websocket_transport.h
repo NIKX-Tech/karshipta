@@ -2,6 +2,7 @@
 #define KARSHIPTA_GATEWAY_WEBSOCKET_TRANSPORT_H
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,6 +14,13 @@ namespace ix {
 class WebSocketServer;
 class WebSocket;
 }  // namespace ix
+
+// Detects whether this process is running inside a container (checks for
+// /.dockerenv). Exposed so WebsocketTransport::from_config()'s default
+// argument can reference it; call sites should not normally need it
+// directly. A free function, not a WebsocketTransport member, since it has
+// nothing to do with any one transport instance.
+bool is_running_in_container();
 
 // Plain WebSocket server implementation of Transport (BRIEF.md M2), built on
 // IXWebSocket. Binary frames only, no TLS: this is the local/simulated-fleet
@@ -26,18 +34,25 @@ class WebsocketTransport final : public Transport {
     // wherever asked, including a bare LAN-reachable address.
     WebsocketTransport(std::string host, uint16_t port);
 
-    // Builds host/port/from a YAML config file at config_path (keys:
-    // websocket.host, websocket.port, websocket.allow_lan_bind), enforcing a
-    // safe-by-default bind policy: a non-loopback host (anything other than
-    // 127.0.0.1/localhost/::1, including 0.0.0.0) is only honored if
-    // websocket.allow_lan_bind is true, and doing so logs a loud startup
-    // warning since the resulting server has no authentication (BRIEF.md
-    // M4/gateway hardening issue #16). Cross-machine access is meant to go
-    // through the relay transport instead (see gateway/docs/relay-transport.md),
-    // not a LAN-exposed plain websocket. A missing config file, or a
-    // non-loopback host with the escape hatch left off, falls back to
-    // (127.0.0.1, 8765) with a logged reason.
-    static std::unique_ptr<WebsocketTransport> from_config(const std::string& config_path);
+    // Builds host/port from a YAML config file at config_path (keys:
+    // websocket.host, websocket.port, websocket.allow_lan_bind,
+    // websocket.container_bind), enforcing a safe-by-default bind policy: a
+    // non-loopback host (anything other than 127.0.0.1/localhost/::1,
+    // including 0.0.0.0) is only honored if websocket.allow_lan_bind is
+    // true (logs a loud SECURITY warning; BRIEF.md M4/gateway hardening
+    // issue #16), or if websocket.container_bind is true and is_in_container
+    // reports true (logs a narrower warning; meant for the docker-compose
+    // demo, see gateway/docs/websocket-transport.md). Cross-machine access
+    // is meant to go through the relay transport instead (see
+    // gateway/docs/relay-transport.md), not a LAN-exposed plain websocket. A
+    // missing config file, or a non-loopback host with both escape hatches
+    // left off (or container_bind requested outside an actual container),
+    // falls back to (127.0.0.1, 8765) with a logged reason. is_in_container
+    // defaults to is_running_in_container() and exists as a parameter only
+    // so tests can inject a fixed answer instead of depending on /.dockerenv.
+    static std::unique_ptr<WebsocketTransport> from_config(
+        const std::string& config_path,
+        const std::function<bool()>& is_in_container = is_running_in_container);
 
     // Stops the server if still running, so no client callback can fire
     // against a destroyed WebsocketTransport.

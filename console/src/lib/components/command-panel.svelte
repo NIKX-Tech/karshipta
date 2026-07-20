@@ -5,10 +5,10 @@
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 
 	interface Props {
-		vehicleId: string;
+		wardId: string;
 	}
 
-	const { vehicleId }: Props = $props();
+	const { wardId }: Props = $props();
 
 	const COMMAND_STATUS_PREFIX = 'COMMAND_STATUS_';
 	const DEFAULT_TAKEOFF_ALT_M = 20;
@@ -23,21 +23,24 @@
 	let takeoffAltM = $state(DEFAULT_TAKEOFF_ALT_M);
 	let confirmation = $state<Confirmation | undefined>(undefined);
 
-	const vehicleState = $derived(fleet.vehicles[vehicleId]?.state);
-	const trackers = $derived(fleet.commandsFor(vehicleId).slice(0, 3));
+	// This panel only renders while the ward has a flight field (see
+	// ward-detail.svelte's gating), so flight is always set here, but the
+	// wire type still marks it optional (unset for non-flight wards).
+	const flightState = $derived(fleet.wards[wardId]?.state?.flight);
+	const trackers = $derived(fleet.commandsFor(wardId).slice(0, 3));
 	// debounce per command kind only; safety commands (land, rtl, disarm) must
 	// stay available to preempt an executing maneuver
 	const inflightKinds = $derived(
 		new Set(
 			fleet
-				.commandsFor(vehicleId)
+				.commandsFor(wardId)
 				.filter((tracker) => !isTerminal(tracker.status))
 				.map((tracker) => tracker.kind)
 		)
 	);
 
 	function send(action: NonNullable<Command['action']>) {
-		fleet.sendCommand(vehicleId, action);
+		fleet.sendCommand(wardId, action);
 	}
 
 	function confirmThenSend(confirmationRequest: Confirmation) {
@@ -49,9 +52,7 @@
 	}
 
 	// goto: map click supplies the point, then we confirm here
-	const pendingGoto = $derived(
-		fleet.selectedVehicleId === vehicleId ? fleet.pendingGoto : undefined
-	);
+	const pendingGoto = $derived(fleet.selectedWardId === wardId ? fleet.pendingGoto : undefined);
 	const gotoWarning = $derived.by(() => {
 		if (!pendingGoto) return undefined;
 		const zones = geozoneStore.zonesContaining(pendingGoto.latitudeDeg, pendingGoto.longitudeDeg);
@@ -60,29 +61,29 @@
 	});
 </script>
 
-<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Commands for {vehicleId}">
+<section class="border-edge bg-panel/90 rounded border p-3" aria-label="Commands for {wardId}">
 	<h3 class="text-fg-muted text-[10px] font-medium tracking-widest">COMMANDS</h3>
 
 	<div class="mt-2 grid grid-cols-3 gap-1.5">
 		<button
 			class="command-button"
-			disabled={!vehicleState || vehicleState.armed || inflightKinds.has('arm')}
-			title={!vehicleState ? 'no telemetry yet' : vehicleState.armed ? 'already armed' : undefined}
+			disabled={!flightState || flightState.armed || inflightKinds.has('arm')}
+			title={!flightState ? 'no telemetry yet' : flightState.armed ? 'already armed' : undefined}
 			onclick={() => send({ $case: 'arm', arm: {} })}
 		>
 			Arm
 		</button>
 		<button
 			class="command-button"
-			disabled={!vehicleState ||
-				!vehicleState.armed ||
-				vehicleState.inAir ||
+			disabled={!flightState ||
+				!flightState.armed ||
+				flightState.inAir ||
 				inflightKinds.has('takeoff')}
-			title={!vehicleState
+			title={!flightState
 				? 'no telemetry yet'
-				: vehicleState.inAir
+				: flightState.inAir
 					? 'already in air'
-					: !vehicleState.armed
+					: !flightState.armed
 						? 'arm first'
 						: undefined}
 			onclick={() => send({ $case: 'takeoff', takeoff: { altitudeRelM: takeoffAltM } })}
@@ -91,20 +92,20 @@
 		</button>
 		<button
 			class="command-button {fleet.gotoArming ? 'border-selected text-selected' : ''}"
-			disabled={!vehicleState || !vehicleState.inAir}
-			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
+			disabled={!flightState || !flightState.inAir}
+			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
 			onclick={() => (fleet.gotoArming ? fleet.cancelGoto() : fleet.armGoto())}
 		>
 			{fleet.gotoArming ? 'Pick point' : 'Goto'}
 		</button>
 		<button
 			class="command-button"
-			disabled={!vehicleState || !vehicleState.inAir}
-			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
+			disabled={!flightState || !flightState.inAir}
+			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
 			onclick={() =>
 				confirmThenSend({
-					title: `Land ${vehicleId}`,
-					body: 'The vehicle will descend and land at its current position.',
+					title: `Land ${wardId}`,
+					body: 'The ward will descend and land at its current position.',
 					confirmLabel: 'Land',
 					action: { $case: 'land', land: {} }
 				})}
@@ -113,12 +114,12 @@
 		</button>
 		<button
 			class="command-button"
-			disabled={!vehicleState || !vehicleState.inAir}
-			title={!vehicleState ? 'no telemetry yet' : !vehicleState.inAir ? 'not in air' : undefined}
+			disabled={!flightState || !flightState.inAir}
+			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
 			onclick={() =>
 				confirmThenSend({
-					title: `Return ${vehicleId} to launch`,
-					body: 'The vehicle will fly back to its home position and land.',
+					title: `Return ${wardId} to launch`,
+					body: 'The ward will fly back to its home position and land.',
 					confirmLabel: 'RTL',
 					action: { $case: 'rtl', rtl: {} }
 				})}
@@ -127,13 +128,13 @@
 		</button>
 		<button
 			class="command-button"
-			disabled={!vehicleState || !vehicleState.armed || inflightKinds.has('disarm')}
-			title={!vehicleState ? 'no telemetry yet' : !vehicleState.armed ? 'not armed' : undefined}
+			disabled={!flightState || !flightState.armed || inflightKinds.has('disarm')}
+			title={!flightState ? 'no telemetry yet' : !flightState.armed ? 'not armed' : undefined}
 			onclick={() => {
-				if (vehicleState?.inAir) {
+				if (flightState?.inAir) {
 					confirmThenSend({
-						title: `Force disarm ${vehicleId} in air`,
-						body: 'Motors stop immediately. The vehicle will fall. This is an emergency action.',
+						title: `Force disarm ${wardId} in air`,
+						body: 'Motors stop immediately. The ward will fall. This is an emergency action.',
 						confirmLabel: 'Force disarm',
 						action: { $case: 'disarm', disarm: { force: true } }
 					});
@@ -203,7 +204,7 @@
 {#if pendingGoto}
 	{@const point = pendingGoto}
 	<ConfirmDialog
-		title={`Goto for ${vehicleId}`}
+		title={`Goto for ${wardId}`}
 		body={`Fly to ${point.latitudeDeg.toFixed(6)}, ${point.longitudeDeg.toFixed(6)} at current altitude.`}
 		warning={gotoWarning}
 		confirmLabel="Fly"
