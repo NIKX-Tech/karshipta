@@ -1,7 +1,6 @@
 # Karshipta demo environment.
-# SITL wards and the gateway are wired up (gateway M6). The console joins
-# the compose file with its own Dockerfile in a later milestone (C6); until
-# then, run it separately (see README.md) pointed at ws://localhost:8765.
+# SITL wards, the gateway, and the console are all wired up: `docker compose
+# up` alone gets a browser-usable console at http://localhost:5173.
 #
 # Note for M4: multi-instance PX4 SITL port layout is finalized in that
 # milestone; the px4io/px4-sitl image maps MAVLink SDK ports per instance.
@@ -53,8 +52,18 @@ services:
       - "14540:14540/udp"
     depends_on: [sitl-1, sitl-2, sitl-3]
 
-  # console:
-  #   build: ../console
-  #   ports:
-  #     - "5173:5173"
-  #   depends_on: [gateway]
+  console:
+    build:
+      context: ..
+      dockerfile: console/Dockerfile
+      args:
+        # Baked into the static build at image-build time (see the
+        # Dockerfile's own comment: no server left at container-start to
+        # read a runtime env var from). Points at the gateway's published
+        # host port, not the compose network's internal DNS name - this
+        # value is read by the operator's browser on the host, never by
+        # anything inside the container network.
+        PUBLIC_GATEWAY_WS_URL: ws://localhost:8765
+    ports:
+      - "5173:80"
+    depends_on: [gateway]

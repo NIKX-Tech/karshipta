@@ -83,7 +83,7 @@ npm install && npm run proto:gen
 PUBLIC_GATEWAY_WS_URL=ws://localhost:8765 npm run dev -- --open
 ```
 
-The top bar reads `FLEET 1` with a `LIVE` link (not `SIM`), the fake fleet is
+The top bar reads `WARDS 1` with a `LIVE` link (not `SIM`), the fake fleet is
 gone, and `sitl-1` is the real SITL ward. Select it and try Arm, then
 Takeoff: the command tracker shows ACCEPTED then SUCCESS, and the ward
 climbs in SITL's own console output too. `PUBLIC_READONLY=true` opens a
