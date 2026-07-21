@@ -44,8 +44,10 @@ class FleetZoneStore {
     // Generates a fresh fleet_id (gateway-assigned; unlike ward_id, the
     // console never supplies one) and inserts the row.
     std::string create_fleet(const std::string& name, const std::string& description);
-    // Error string if fleet_id is unknown; nullopt on success.
-    std::optional<std::string> rename_fleet(const std::string& fleet_id, const std::string& name);
+    // Updates both name and description together (fleet.proto's RenameFleet
+    // comment). Error string if fleet_id is unknown; nullopt on success.
+    std::optional<std::string> rename_fleet(const std::string& fleet_id, const std::string& name,
+                                             const std::string& description);
     // Cascades: also removes every fleet_wards row for this fleet.
     std::optional<std::string> delete_fleet(const std::string& fleet_id);
     // Idempotent: adding a ward already in the fleet, or removing one that

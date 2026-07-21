@@ -315,6 +315,31 @@ TEST_F(FleetManagerTest, FleetMissionAssignmentFansOutRejectingEachUnknownWard) 
     EXPECT_EQ(envelopes[2].event().code(), "MISSION_UPLOAD_REJECTED");
 }
 
+TEST_F(FleetManagerTest, FleetMissionAssignmentAcceptsAdHocWardSelectionWithEmptyFleetId) {
+    karshipta::v1::FleetMissionAssignment request;
+    request.set_request_id("req-1");
+    // fleet_id left empty on purpose: an ad-hoc selection of individual
+    // wards, not tied to any saved Fleet.
+    request.add_ward_ids("alpha-1");
+    request.add_ward_ids("alpha-2");
+    request.set_mission_name("Sweep");
+
+    auto core = WardConnection::create_shared_core();
+    WardManager ward_manager(core, transport_);
+    manager_.handle_fleet_mission_assignment(request, ward_manager);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    // No whole-request rejection (empty fleet_id is not itself a rejection
+    // reason); each ward is still individually unknown to ward_manager, so
+    // one MISSION_UPLOAD_REJECTED event per ward, not FLEET_MISSION_
+    // ASSIGNMENT_REJECTED.
+    ASSERT_EQ(envelopes.size(), 2u);
+    EXPECT_TRUE(envelopes[0].has_event());
+    EXPECT_EQ(envelopes[0].event().code(), "MISSION_UPLOAD_REJECTED");
+    EXPECT_TRUE(envelopes[1].has_event());
+    EXPECT_EQ(envelopes[1].event().code(), "MISSION_UPLOAD_REJECTED");
+}
+
 // ---------- Viewer rejection ----------
 
 TEST_F(FleetManagerTest, RejectViewerEnvelopeAnswersCreateFleetWithRejectedAck) {

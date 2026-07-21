@@ -69,10 +69,14 @@ message CreateFleet {
   string description = 3;
 }
 
+// Despite the name (kept for wire stability), this updates both editable
+// fields at once: name and description. There is no separate message for
+// description alone - the console always edits them together.
 message RenameFleet {
   string request_id = 1;
   string fleet_id = 2;
   string name = 3;
+  string description = 4;
 }
 
 message DeleteFleet {
@@ -188,8 +192,8 @@ message ZoneAck {
 // Mission (fresh mission_id, the recipient's ward_id) per selected ward.
 message FleetMissionAssignment {
   string request_id = 1;
-  string fleet_id = 2;
-  repeated string ward_ids = 3;  // the chosen subset of the fleet's wards
+  string fleet_id = 2;           // empty = an ad-hoc ward selection, not tied to a saved Fleet
+  repeated string ward_ids = 3;  // the chosen subset of the fleet's wards, or the ad-hoc selection itself
   string mission_name = 4;
   repeated karshipta.v1.MissionItem items = 5;
   uint32 repeat_count = 6;

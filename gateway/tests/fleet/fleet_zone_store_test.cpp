@@ -39,12 +39,14 @@ TEST_F(FleetZoneStoreTest, CreateFleetReturnsIdAndListsIt) {
     EXPECT_EQ(fleets.front().ward_ids_size(), 0);
 }
 
-TEST_F(FleetZoneStoreTest, RenameFleetUpdatesNameAndRejectsUnknownId) {
-    const auto fleet_id = store_.create_fleet("Team A", "");
-    EXPECT_FALSE(store_.rename_fleet(fleet_id, "Team B").has_value());
-    EXPECT_EQ(store_.list_fleets().front().name(), "Team B");
+TEST_F(FleetZoneStoreTest, RenameFleetUpdatesNameAndDescriptionAndRejectsUnknownId) {
+    const auto fleet_id = store_.create_fleet("Team A", "Original description");
+    EXPECT_FALSE(store_.rename_fleet(fleet_id, "Team B", "Updated description").has_value());
+    const auto fleet = store_.list_fleets().front();
+    EXPECT_EQ(fleet.name(), "Team B");
+    EXPECT_EQ(fleet.description(), "Updated description");
 
-    const auto error = store_.rename_fleet("ghost", "New Name");
+    const auto error = store_.rename_fleet("ghost", "New Name", "");
     ASSERT_TRUE(error.has_value());
     EXPECT_NE(error->find("ghost"), std::string::npos) << *error;
 }

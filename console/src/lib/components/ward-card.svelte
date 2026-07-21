@@ -5,7 +5,7 @@
 	interface Props {
 		wardId: string;
 		ward: Ward;
-		/** See WardDetail: per-instance override of fleet.readonly, for a
+		/** See WardTab: per-instance override of fleet.readonly, for a
 		 * multi-tenant consumer showing owned and view-only wards in the
 		 * same list. Omitting it keeps the existing store-wide behavior. */
 		readonly?: boolean;

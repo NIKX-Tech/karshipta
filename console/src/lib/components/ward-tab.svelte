@@ -1,11 +1,7 @@
 <script lang="ts">
-	import {
-		flightModeToJSON,
-		gpsFixTypeToJSON,
-		wardClassToJSON,
-		WardOrigin
-	} from '$lib/gen/karshipta/v1/common';
+	import { wardClassToJSON, WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { formatBatteryLabel, formatModeLabel, formatGpsLabel } from '$lib/ward-format';
 	import CommandPanel from '$lib/components/command-panel.svelte';
 	import MissionPanel from '$lib/components/mission-panel.svelte';
 
@@ -28,8 +24,6 @@
 	const { wardId, readonly }: Props = $props();
 	const effectiveReadonly = $derived(readonly ?? fleet.readonly);
 
-	const FLIGHT_MODE_PREFIX = 'FLIGHT_MODE_';
-	const GPS_FIX_PREFIX = 'GPS_FIX_TYPE_';
 	const WARD_CLASS_PREFIX = 'WARD_CLASS_';
 
 	const ward = $derived(fleet.wards[wardId]);
@@ -42,25 +36,15 @@
 		info ? wardClassToJSON(info.wardClass).replace(WARD_CLASS_PREFIX, '').toLowerCase() : undefined
 	);
 
-	// Mode is a flight-autopilot concept - unset (undefined) for a ward with
-	// no flight field, e.g. a livestock tag with no autopilot state machine.
-	const modeLabel = $derived(
-		state?.flight
-			? flightModeToJSON(state.flight.flightMode).replace(FLIGHT_MODE_PREFIX, '')
-			: undefined
-	);
-	const gpsLabel = $derived(
-		state?.gps ? gpsFixTypeToJSON(state.gps.fixType).replace(GPS_FIX_PREFIX, '') : 'NO DATA'
-	);
+	const modeLabel = $derived(formatModeLabel(state?.flight));
+	const batteryLabel = $derived(formatBatteryLabel(state?.battery));
+	const gpsLabel = $derived(formatGpsLabel(state?.gps));
 	const groundSpeed = $derived(
 		state?.velocity ? Math.hypot(state.velocity.northMS, state.velocity.eastMS) : undefined
 	);
 </script>
 
-<section
-	class="flex h-full w-72 flex-col gap-3 overflow-y-auto border-l border-edge bg-panel p-3"
-	aria-label="Ward detail {wardId}"
->
+<div class="flex flex-col gap-3">
 	<header class="flex items-center gap-2">
 		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
 		{#if synthetic}
@@ -74,13 +58,6 @@
 		{#if state?.flight?.armed}
 			<span class="text-[10px] font-medium tracking-widest text-armed">ARMED</span>
 		{/if}
-		<button
-			class="ml-auto rounded px-1 text-sm leading-none text-fg-muted hover:text-fg"
-			aria-label="Close detail panel"
-			onclick={() => fleet.select(undefined)}
-		>
-			&#x2715;
-		</button>
 	</header>
 
 	{#if info}
@@ -107,11 +84,7 @@
 			<dt class="text-fg-muted">Heading</dt>
 			<dd class="font-mono tabular-nums">{state.headingDeg.toFixed(0)}&deg;</dd>
 			<dt class="text-fg-muted">Battery</dt>
-			<dd class="font-mono tabular-nums">
-				{state.battery && state.battery.remainingPct >= 0
-					? `${state.battery.remainingPct.toFixed(0)}% (${state.battery.voltageV.toFixed(1)} V)`
-					: 'unknown'}
-			</dd>
+			<dd class="font-mono tabular-nums">{batteryLabel}</dd>
 			<dt class="text-fg-muted">GPS</dt>
 			<dd class="font-mono tabular-nums">
 				{gpsLabel} &middot; {state.gps?.numSatellites ?? 0} sat
@@ -139,4 +112,4 @@
 		<CommandPanel {wardId} />
 		<MissionPanel {wardId} />
 	{/if}
-</section>
+</div>
