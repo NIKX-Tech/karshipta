@@ -49,10 +49,11 @@ coordination between Wards in v0, and no per-Ward mission variation within
 one assignment. A richer version (a different mission per Ward, composed
 across multiple Fleets in one assignment) was considered and rejected:
 that is real multi-agent task allocation, an explicitly separate, later
-feature, not to be built now. Because assignment stays this simple, it
-does not need its own tab in the console; it is an action inside the
-Fleet tab (pick a Fleet, pick a mission template, pick which of its Wards
-receive it).
+feature, not to be built now. Assignment does have its own console tab
+(Mission, on the right panel - see "Console layout" below): pick a Fleet
+*or* an ad-hoc set of individual Wards, plan a route, assign. fleet_id is
+optional on the wire for exactly this reason: an ad-hoc selection isn't
+tied to any saved Fleet at all.
 
 ## Organization and multi-tenancy
 
@@ -83,42 +84,71 @@ keeps flowing gateway to console directly, unchanged.
 
 ## Console layout
 
-A single collapsible vertical panel on the right, three tabs:
+Two collapsible vertical icon rails, one on each side of the map - not the
+single right-side panel originally drafted in this section (see "What
+shipped differently" below for why that changed).
 
 ```
-+----------------------------------------------------------+
-| Top bar: Karshipta logo, connection status, global actions|
-+------------------------------------------------+---------+
-|                                                  |  Ward   |
-|              Map (MapLibre)                     |  Fleet  |
-|              center stage                       |  Zones  |
-|                                                  | (tabs,  |
-|                                                  | collap- |
-|                                                  | sible)  |
-+------------------------------------------------+---------+
++------------------------------------------------------------------------+
+| Top bar: Karshipta logo, WARDS count, connection status, theme         |
++----+-------------------+-----------------------------+-------------+---+
+| =  | + Add Ward         |                             | WARD status | o |
+|    | + New Fleet          |         Map (MapLibre)      | strip       |->|
+|    |                        |         center stage        |-------------|[]|
+|    | Fleet groups            |                             | Ward /      |  |
+|    | (rename/delete/           |                            | Mission /   |  |
+|    | membership), then          |                           | Zones tabs  |  |
+|    | Unassigned                  |                          |             |  |
++----+-------------------------------+----------------------------------+---+
+ icon    left rail content                map              right panel   icon
+ rail    (ward directory, Fleet                            content       rail
+         CRUD lives here)
 ```
 
-**Ward tab:** the current selection's detail (telemetry, commands for
-flight-capable wards, tags for all wards) - what ward-detail.svelte
-already shows today, surfaced here instead of a separate always-visible
-panel.
+**Left rail:** the ward directory, always reachable via a collapsible icon
+rail (a directory-toggle icon, plus quick-add for wards and Fleets). Ward
+cards grouped by Fleet - a Ward in more than one Fleet appears under each,
+an always-present Unassigned group covers the rest. Fleet create/rename/
+delete and membership editing live here too, next to the wards they group,
+not in a separate tab on the other side of the screen.
 
-**Fleet tab:** list/tree of Fleets, create/rename/delete, add/remove
-Wards, and the mission-assignment action described above. No separate
-Missions tab.
+**Right panel, Ward tab:** the current selection's detail (telemetry,
+commands for flight-capable wards, tags for all wards) - what
+ward-detail.svelte showed as an always-visible panel before this reached
+implementation (ward-tab.svelte now), plus a small always-visible status
+strip (id, mode, armed, link, battery) shown above the tabs whenever a
+ward is selected, regardless of which tab is active - this is also this
+section's answer to the persistent-telemetry-strip question the original
+draft left open.
 
-**Zones tab:** list, create, edit Zones; the polygon-drawing tool lives
-here.
+**Right panel, Mission tab:** pick a Fleet *or* an ad-hoc set of
+individual Wards, plan a route by clicking the map, assign - see
+"Fleet-level missions" above.
+
+**Right panel, Zones tab:** list, create, edit Zones; the polygon-drawing
+tool lives here.
 
 **Map:** always center stage, always shows all Wards and all Zones
-regardless of which tab is open; the panel filters what is highlighted or
-editable, never what is visible.
+regardless of which tab or rail is open; the panels filter what is
+highlighted or editable, never what is visible.
 
-This supersedes an earlier three-region draft (left panel tree, right
-sidebar with separate Missions/Zones/Info tabs, bottom telemetry strip).
-Open question, to resolve when this is actually planned in file-level
-detail: what happens to a persistent telemetry strip, if anything, given
-the Ward tab now covers that role contextually instead.
+### What shipped differently
+
+This section's original draft (single right-side panel, Ward/Fleet/Zones
+tabs, mission-assignment folded into the Fleet tab) is superseded by two
+changes, both decided directly against the running console rather than on
+paper:
+
+- **Two rails, not one.** A single right panel put Fleet CRUD and ward
+  browsing in unrelated places - a left aside for browsing wards, a right
+  tab for managing the Fleets grouping them. Moving Fleet management into
+  the left rail, next to the ward list it groups, removed that split.
+- **A Mission tab, not a Fleet tab.** With Fleet CRUD moved left, the
+  right side's second tab became "Mission": specifically for planning and
+  assigning a mission to a Fleet or an ad-hoc set of wards, not fleet
+  management. This is also why FleetMissionAssignment.fleet_id is optional
+  on the wire (see "Fleet-level missions" above) - assignment was never
+  meant to require a saved Fleet to exist first.
 
 ## What is explicitly out of scope for this phase
 
