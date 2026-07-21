@@ -13,12 +13,17 @@ the README's quickstart is enough; skip this page.
 ## 1. Start a simulated ward (PX4 SITL)
 
 ```sh
-docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
+docker run --rm -it -p 14550:14550/udp px4io/px4-sitl:latest
 ```
 
-Leave this running. It exposes MAVLink on UDP port 14540, which is where the
-gateway connects. Wait for `INFO [px4] Startup script returned successfully`
-before moving on.
+Leave this running. Only 14550 is published: SITL's own MAVLink stream to
+the gateway is outbound from the container to the host machine's fixed
+gateway address, not something the host needs to reach in via a published
+port. Do not also publish 14540 - on Docker Desktop (macOS/Windows) its
+proxy binds that host port for itself, so a natively run gateway (which
+needs to bind that same host port to listen for SITL's stream) fails with
+"Address already in use" if it's published. Wait for
+`INFO [px4] Startup script returned successfully` before moving on.
 
 ## 2. Build and run the gateway
 
