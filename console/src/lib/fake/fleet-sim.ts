@@ -13,12 +13,18 @@ import {
 } from '$lib/gen/karshipta/v1/command';
 import {
 	FleetAckStatus,
+	ZoneAckStatus,
 	type AddWardToFleet,
 	type CreateFleet,
+	type CreateZone,
 	type DeleteFleet,
+	type DeleteZone,
 	type Fleet,
+	type FleetMissionAssignment,
 	type RemoveWardFromFleet,
-	type RenameFleet
+	type RenameFleet,
+	type UpdateZone,
+	type Zone
 } from '$lib/gen/karshipta/v1/fleet';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
@@ -75,6 +81,30 @@ function readStoredDemoFleets(): Fleet[] {
 				typeof (value as Fleet).fleetId === 'string' &&
 				typeof (value as Fleet).name === 'string' &&
 				Array.isArray((value as Fleet).wardIds)
+		);
+	} catch {
+		// stale/corrupt data - start empty, not crash
+		return [];
+	}
+}
+
+/** Demo-mode drawn zones, same persistence precedent as demo Fleets. */
+const DEMO_ZONES_STORAGE_KEY = 'karshipta.demoZones';
+
+function readStoredDemoZones(): Zone[] {
+	if (typeof localStorage === 'undefined') return [];
+	const raw = localStorage.getItem(DEMO_ZONES_STORAGE_KEY);
+	if (!raw) return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter(
+			(value): value is Zone =>
+				typeof value === 'object' &&
+				value !== null &&
+				typeof (value as Zone).zoneId === 'string' &&
+				typeof (value as Zone).name === 'string' &&
+				Array.isArray((value as Zone).vertices)
 		);
 	} catch {
 		// stale/corrupt data - start empty, not crash
@@ -204,17 +234,23 @@ export class FakeGateway implements DemoEngine {
 	private spawnCount = 0;
 	private fleets = new Map<string, Fleet>();
 	private fleetSpawnCount = 0;
+	private zones = new Map<string, Zone>();
+	private zoneSpawnCount = 0;
 
 	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {
 		for (const fleet of readStoredDemoFleets()) this.fleets.set(fleet.fleetId, fleet);
+		for (const zone of readStoredDemoZones()) this.zones.set(zone.zoneId, zone);
 	}
 
 	start(): void {
 		if (this.timer !== undefined) return;
 		// "connect" sync: mirrors the gateway's send_fleet_zone_snapshot, so a
-		// Fleet tab reload still shows whatever was persisted last session.
+		// Fleet/Zones tab reload still shows whatever was persisted last session.
 		for (const fleet of this.fleets.values()) {
 			this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+		}
+		for (const zone of this.zones.values()) {
+			this.onEnvelope({ payload: { $case: 'zone', zone } });
 		}
 		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
 	}
@@ -277,6 +313,18 @@ export class FakeGateway implements DemoEngine {
 				break;
 			case 'removeWardFromFleet':
 				this.handleRemoveWardFromFleet(envelope.payload.removeWardFromFleet);
+				break;
+			case 'fleetMissionAssignment':
+				this.handleFleetMissionAssignment(envelope.payload.fleetMissionAssignment);
+				break;
+			case 'createZone':
+				this.handleCreateZone(envelope.payload.createZone);
+				break;
+			case 'updateZone':
+				this.handleUpdateZone(envelope.payload.updateZone);
+				break;
+			case 'deleteZone':
+				this.handleDeleteZone(envelope.payload.deleteZone);
 				break;
 			default:
 				console.warn(
@@ -410,6 +458,115 @@ export class FakeGateway implements DemoEngine {
 			localStorage.setItem(DEMO_FLEETS_STORAGE_KEY, JSON.stringify(fleets));
 		} else {
 			localStorage.removeItem(DEMO_FLEETS_STORAGE_KEY);
+		}
+	}
+
+	/** Fans the mission out to each selected ward as an independent upload
+	 * plus start, mirroring the real gateway's FleetManager::
+	 * handle_fleet_mission_assignment. Unlike the real gateway, this engine
+	 * has no async upload delay, so upload-then-start can run back to back
+	 * with no race to guard against. */
+	private handleFleetMissionAssignment(request: FleetMissionAssignment): void {
+		if (request.wardIds.length === 0) {
+			console.warn('fake gateway: fleet_mission_assignment with no wards selected');
+			return;
+		}
+		for (const wardId of request.wardIds) {
+			if (!this.wards.has(wardId)) {
+				console.warn(`fake gateway: fleet_mission_assignment for unknown ward ${wardId}`);
+				continue;
+			}
+			const mission: Mission = {
+				missionId: `fleet-${request.fleetId || 'adhoc'}-${wardId}-${Date.now()}`,
+				wardId,
+				name: request.missionName,
+				repeatCount: request.repeatCount,
+				items: request.items
+			};
+			this.handleMissionUpload(mission);
+			this.handleCommand({
+				commandId: `fleet-start-${wardId}-${Date.now()}`,
+				wardId,
+				timestampMs: Date.now(),
+				action: { $case: 'startMission', startMission: {} }
+			});
+		}
+	}
+
+	private handleCreateZone(request: CreateZone): void {
+		const zoneId = `demo-zone-${this.zoneSpawnCount + 1}`;
+		this.zoneSpawnCount += 1;
+		const zone: Zone = {
+			zoneId,
+			name: request.name,
+			type: request.type,
+			vertices: request.vertices,
+			altitudeMinM: request.altitudeMinM,
+			altitudeMaxM: request.altitudeMaxM
+		};
+		this.zones.set(zoneId, zone);
+		this.persistDemoZones();
+		this.zoneAck(request.requestId, ZoneAckStatus.ZONE_ACK_STATUS_ACCEPTED, 'zone created', zoneId);
+		this.onEnvelope({ payload: { $case: 'zone', zone } });
+	}
+
+	private handleUpdateZone(request: UpdateZone): void {
+		const zone = this.zones.get(request.zoneId);
+		if (!zone) {
+			this.zoneAck(
+				request.requestId,
+				ZoneAckStatus.ZONE_ACK_STATUS_REJECTED,
+				`unknown zone_id: ${request.zoneId}`,
+				request.zoneId
+			);
+			return;
+		}
+		zone.name = request.name;
+		zone.type = request.type;
+		zone.altitudeMinM = request.altitudeMinM;
+		zone.altitudeMaxM = request.altitudeMaxM;
+		this.persistDemoZones();
+		this.zoneAck(
+			request.requestId,
+			ZoneAckStatus.ZONE_ACK_STATUS_ACCEPTED,
+			'zone updated',
+			zone.zoneId
+		);
+		this.onEnvelope({ payload: { $case: 'zone', zone } });
+	}
+
+	private handleDeleteZone(request: DeleteZone): void {
+		if (!this.zones.delete(request.zoneId)) {
+			this.zoneAck(
+				request.requestId,
+				ZoneAckStatus.ZONE_ACK_STATUS_REJECTED,
+				`unknown zone_id: ${request.zoneId}`,
+				request.zoneId
+			);
+			return;
+		}
+		this.persistDemoZones();
+		this.zoneAck(
+			request.requestId,
+			ZoneAckStatus.ZONE_ACK_STATUS_ACCEPTED,
+			'zone deleted',
+			request.zoneId
+		);
+	}
+
+	private zoneAck(requestId: string, status: ZoneAckStatus, message: string, zoneId: string): void {
+		this.onEnvelope({
+			payload: { $case: 'zoneAck', zoneAck: { requestId, status, message, zoneId } }
+		});
+	}
+
+	private persistDemoZones(): void {
+		if (typeof localStorage === 'undefined') return;
+		const zones = [...this.zones.values()];
+		if (zones.length > 0) {
+			localStorage.setItem(DEMO_ZONES_STORAGE_KEY, JSON.stringify(zones));
+		} else {
+			localStorage.removeItem(DEMO_ZONES_STORAGE_KEY);
 		}
 	}
 

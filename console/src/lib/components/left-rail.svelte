@@ -90,79 +90,82 @@
 	</div>
 
 	{#if !collapsed}
-		<aside
-			id="left-rail-content"
-			class="flex w-80 flex-col gap-2 overflow-y-auto p-3"
-			aria-label={fleetLabel}
-		>
-			<div class="flex gap-1.5">
-				<AddWardMenu variant="compact" {onopenconnection} {onstartdemoplacement} />
+		<aside id="left-rail-content" class="flex w-80 flex-col" aria-label={fleetLabel}>
+			<p
+				class="border-b border-edge px-3 py-2 font-mono text-[10px] font-medium tracking-widest text-fg-muted"
+			>
+				DIRECTORY
+			</p>
+			<div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+				<div class="flex gap-1.5">
+					<AddWardMenu variant="compact" {onopenconnection} {onstartdemoplacement} />
 
-				<div class="relative">
-					<button
-						type="button"
-						class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
-						aria-label="Create {fleetLabel}"
-						aria-expanded={createFleetOpen}
-						onclick={() => (createFleetOpen = !createFleetOpen)}
-					>
-						+ New {fleetLabel}
-					</button>
-					{#if createFleetOpen}
-						<form
-							class="absolute top-full left-0 z-30 mt-1 flex w-56 flex-col gap-1.5 rounded border border-edge bg-panel p-2"
-							aria-label="New {fleetLabel}"
-							onsubmit={submitCreateFleet}
+					<div class="relative">
+						<button
+							type="button"
+							class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
+							aria-label="Create {fleetLabel}"
+							aria-expanded={createFleetOpen}
+							onclick={() => (createFleetOpen = !createFleetOpen)}
 						>
-							<input
-								type="text"
-								bind:value={newFleetName}
-								required
-								placeholder="{fleetLabel} name"
-								class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-							/>
-							<input
-								type="text"
-								bind:value={newFleetDescription}
-								placeholder="Description (optional)"
-								class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-							/>
-							<div class="flex gap-1.5">
-								<button
-									type="submit"
-									class="rounded border border-accent/60 bg-accent/15 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/25"
-								>
-									Create
-								</button>
-								<button
-									type="button"
-									onclick={() => (createFleetOpen = false)}
-									class="rounded border border-edge px-2 py-1 text-xs text-fg-muted hover:text-fg"
-								>
-									Cancel
-								</button>
-							</div>
-						</form>
-					{/if}
+							+ New {fleetLabel}
+						</button>
+						{#if createFleetOpen}
+							<form
+								class="absolute top-full left-0 z-30 mt-1 flex w-56 flex-col gap-1.5 rounded border border-edge bg-panel p-2"
+								aria-label="New {fleetLabel}"
+								onsubmit={submitCreateFleet}
+							>
+								<input
+									type="text"
+									bind:value={newFleetName}
+									required
+									placeholder="{fleetLabel} name"
+									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
+								/>
+								<input
+									type="text"
+									bind:value={newFleetDescription}
+									placeholder="Description (optional)"
+									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
+								/>
+								<div class="flex gap-1.5">
+									<button
+										type="submit"
+										class="rounded border border-accent/60 bg-accent/15 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/25"
+									>
+										Create
+									</button>
+									<button
+										type="button"
+										onclick={() => (createFleetOpen = false)}
+										class="rounded border border-edge px-2 py-1 text-xs text-fg-muted hover:text-fg"
+									>
+										Cancel
+									</button>
+								</div>
+							</form>
+						{/if}
+					</div>
 				</div>
+
+				{#each fleetGroups.fleetIds as fleetId (fleetId)}
+					<FleetRow {fleetId} {fleetLabel} />
+				{/each}
+
+				{#if unassignedWardIds.length > 0}
+					<Disclosure
+						id={UNASSIGNED_GROUP_ID}
+						label="UNASSIGNED ({unassignedWardIds.length})"
+						expanded={isGroupExpanded(UNASSIGNED_GROUP_ID)}
+						onchange={(value) => (groupExpanded[UNASSIGNED_GROUP_ID] = value)}
+					>
+						{#each unassignedWardIds as wardId (wardId)}
+							<WardCard {wardId} ward={fleet.wards[wardId]} />
+						{/each}
+					</Disclosure>
+				{/if}
 			</div>
-
-			{#each fleetGroups.fleetIds as fleetId (fleetId)}
-				<FleetRow {fleetId} {fleetLabel} />
-			{/each}
-
-			{#if unassignedWardIds.length > 0}
-				<Disclosure
-					id={UNASSIGNED_GROUP_ID}
-					label="UNASSIGNED ({unassignedWardIds.length})"
-					expanded={isGroupExpanded(UNASSIGNED_GROUP_ID)}
-					onchange={(value) => (groupExpanded[UNASSIGNED_GROUP_ID] = value)}
-				>
-					{#each unassignedWardIds as wardId (wardId)}
-						<WardCard {wardId} ward={fleet.wards[wardId]} />
-					{/each}
-				</Disclosure>
-			{/if}
 		</aside>
 	{/if}
 </div>

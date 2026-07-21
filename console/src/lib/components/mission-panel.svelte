@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
+	import { checkMissionAgainstZones } from '$lib/zones/mission-zone-check';
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 	import WaypointList from '$lib/components/waypoint-list.svelte';
 
@@ -29,8 +30,11 @@
 				.map((zone) => zone.name);
 		});
 		const uniqueNames = [...new Set(names)];
-		if (uniqueNames.length === 0) return undefined;
-		return `Route crosses ${uniqueNames.join(', ')}.`;
+		const airspaceWarning =
+			uniqueNames.length > 0 ? `Route crosses ${uniqueNames.join(', ')}.` : undefined;
+		const points = uploaded.items.flatMap((item) => (item.position ? [item.position] : []));
+		const zoneWarning = checkMissionAgainstZones(points);
+		return [airspaceWarning, zoneWarning].filter(Boolean).join(' ') || undefined;
 	});
 </script>
 

@@ -13,6 +13,7 @@ import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
 import type { LatLon } from '$lib/geolocation';
 import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
+import { zoneStore } from '$lib/zones/zone-store.svelte';
 
 /** where a ward's data comes from: the local demo engine or a connected gateway */
 export type WardSource = 'demo' | 'gateway';
@@ -478,10 +479,11 @@ class FleetStore {
 			case 'fleetAck':
 				fleetGroups.applyFleetAck(payload.fleetAck);
 				break;
-			// Real downstream payloads, not yet wired: zoneStore (and its
-			// sync/ack handling) lands with the Zones tab.
 			case 'zone':
+				zoneStore.applyZone(payload.zone);
+				break;
 			case 'zoneAck':
+				zoneStore.applyZoneAck(payload.zoneAck);
 				break;
 			default: {
 				const unhandled: never = payload;
@@ -521,6 +523,7 @@ class FleetStore {
 		this.missionProgress = {};
 		this.cancelGoto();
 		fleetGroups.teardown();
+		zoneStore.teardown();
 	}
 
 	private channelFor(wardId: string): FleetTransport | undefined {

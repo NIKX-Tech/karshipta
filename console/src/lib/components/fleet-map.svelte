@@ -3,9 +3,11 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
+	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
+	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
 	import type { ViewportBounds } from '$lib/geozones/types';
 
@@ -102,6 +104,7 @@
 	);
 
 	let showGeozones = $state(true);
+	let showZones = $state(true);
 	let layersMenuOpen = $state(false);
 	let layersMenuEl: HTMLDivElement | undefined;
 
@@ -132,6 +135,12 @@
 	const GEOZONE_SOURCE = 'geozones';
 	const GEOZONE_FILL_LAYER = 'geozones-fill';
 	const GEOZONE_LINE_LAYER = 'geozones-line';
+	const ZONE_SOURCE = 'zones';
+	const ZONE_FILL_LAYER = 'zones-fill';
+	const ZONE_LINE_LAYER = 'zones-line';
+	const ZONE_DRAFT_SOURCE = 'zone-draft';
+	const ZONE_KEEP_IN_COLOR = '#22c55e';
+	const ZONE_KEEP_OUT_COLOR = '#ef4444';
 	const TRAIL_SOURCE = 'ward-trails';
 	/**
 	 * Older points age out so a long-idle tab doesn't grow this forever, but
@@ -170,6 +179,7 @@
 	// imperative per-ward marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
 	let waypointMarkers: maplibregl.Marker[] = [];
+	let zoneVertexMarkers: maplibregl.Marker[] = [];
 	let placementMarker: maplibregl.Marker | undefined;
 	let measureMarkers: maplibregl.Marker[] = [];
 	let measureLabelMarker: maplibregl.Marker | undefined;
@@ -328,6 +338,14 @@
 			'bottom-left'
 		);
 		created.on('click', (event) => {
+			// Drawing a zone boundary takes priority over everything else -
+			// the most "modal" of the map's click-driven tools, since a
+			// half-drawn polygon left dangling by some other click handler
+			// stealing the event would be confusing to recover from.
+			if (zoneStore.draft) {
+				zoneStore.addVertex(event.lngLat.lat, event.lngLat.lng);
+				return;
+			}
 			// exclusive while active: a click means "measure from/to here",
 			// not also arm a goto or override a placement point
 			if (measuring) {
@@ -461,6 +479,70 @@
 				},
 				ROUTE_SOURCE
 			);
+			// Operator-drawn safety zones: a parallel source/layer pair to
+			// geozones (distinct data, distinct concept - fleet-mission-model.md),
+			// stacked just below the route line so a planned route stays the
+			// most prominent thing on the map even when it crosses a zone.
+			created.addSource(ZONE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: ZONE_FILL_LAYER,
+					type: 'fill',
+					source: ZONE_SOURCE,
+					paint: {
+						'fill-color': [
+							'match',
+							['get', 'type'],
+							ZoneType.ZONE_TYPE_KEEP_IN,
+							ZONE_KEEP_IN_COLOR,
+							ZONE_KEEP_OUT_COLOR
+						],
+						'fill-opacity': 0.15
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addLayer(
+				{
+					id: ZONE_LINE_LAYER,
+					type: 'line',
+					source: ZONE_SOURCE,
+					paint: {
+						'line-color': [
+							'match',
+							['get', 'type'],
+							ZoneType.ZONE_TYPE_KEEP_IN,
+							ZONE_KEEP_IN_COLOR,
+							ZONE_KEEP_OUT_COLOR
+						],
+						'line-width': 2
+					}
+				},
+				ROUTE_SOURCE
+			);
+			// in-progress polygon being drawn: no beforeId, paints on top of
+			// everything (same convention as the measurement tool below) since
+			// it's the tool the operator is actively using right now
+			created.addSource(ZONE_DRAFT_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer({
+				id: `${ZONE_DRAFT_SOURCE}-fill`,
+				type: 'fill',
+				source: ZONE_DRAFT_SOURCE,
+				filter: ['==', ['geometry-type'], 'Polygon'],
+				paint: { 'fill-color': '#3b9eff', 'fill-opacity': 0.15 }
+			});
+			created.addLayer({
+				id: `${ZONE_DRAFT_SOURCE}-line`,
+				type: 'line',
+				source: ZONE_DRAFT_SOURCE,
+				paint: { 'line-color': '#3b9eff', 'line-width': 2, 'line-dasharray': [2, 1.5] }
+			});
 			// measurement line: no beforeId, so it paints above everything else
 			// (route, geozones, trails) - it's the tool the operator is actively
 			// using right now, not background context
@@ -497,6 +579,7 @@
 		return () => {
 			markers = {};
 			waypointMarkers = [];
+			zoneVertexMarkers = [];
 			placementMarker = undefined;
 			trails = {};
 			measureMarkers = [];
@@ -540,7 +623,12 @@
 		if (!map) return;
 		const planning = fleet.missionDraft?.wardId === fleet.selectedWardId && fleet.missionDraft;
 		map.getCanvas().style.cursor =
-			fleet.gotoArming || planning || fleetGroups.missionAssignmentDraft || crosshair || measuring
+			fleet.gotoArming ||
+			planning ||
+			fleetGroups.missionAssignmentDraft ||
+			zoneStore.draft ||
+			crosshair ||
+			measuring
 				? 'crosshair'
 				: '';
 	});
@@ -605,6 +693,89 @@
 				...zone.polygon,
 				properties: { category: zone.category, name: zone.name }
 			}))
+		});
+	});
+
+	// push saved operator-drawn zones into their source whenever the store updates
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ZONE_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: Object.values(zoneStore.zones)
+				.filter((zone) => zone.vertices.length >= 3)
+				.map((zone) => {
+					const ring = zone.vertices.map((vertex): [number, number] => [
+						vertex.longitudeDeg,
+						vertex.latitudeDeg
+					]);
+					ring.push(ring[0]);
+					return {
+						type: 'Feature',
+						properties: { type: zone.type, name: zone.name },
+						geometry: { type: 'Polygon', coordinates: [ring] }
+					};
+				})
+		});
+	});
+
+	// draw the zone currently being drawn: a growing line until the 3rd
+	// vertex, then a fillable closed polygon (the ring is only closed for
+	// rendering here - the operator's own vertex list, and what gets sent
+	// to CreateZone, never gains that duplicate closing point).
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const draft = zoneStore.draft;
+		const vertices = draft?.vertices ?? [];
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ZONE_DRAFT_SOURCE);
+		const coordinates: [number, number][] = vertices.map((vertex) => [
+			vertex.longitudeDeg,
+			vertex.latitudeDeg
+		]);
+		if (coordinates.length >= 3) {
+			source?.setData({
+				type: 'FeatureCollection',
+				features: [
+					{
+						type: 'Feature',
+						properties: {},
+						geometry: { type: 'Polygon', coordinates: [[...coordinates, coordinates[0]]] }
+					}
+				]
+			});
+		} else {
+			source?.setData({
+				type: 'FeatureCollection',
+				features:
+					coordinates.length >= 2
+						? [
+								{
+									type: 'Feature',
+									properties: {},
+									geometry: { type: 'LineString', coordinates }
+								}
+							]
+						: []
+			});
+		}
+
+		while (zoneVertexMarkers.length > coordinates.length) {
+			zoneVertexMarkers.pop()?.remove();
+		}
+		coordinates.forEach(([lon, lat], index) => {
+			let marker = zoneVertexMarkers[index];
+			if (!marker) {
+				const element = document.createElement('div');
+				element.className =
+					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('aria-label', `Zone vertex ${index + 1}`);
+				element.textContent = String(index + 1);
+				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
+				zoneVertexMarkers[index] = marker;
+			}
+			marker.setLngLat([lon, lat]);
 		});
 	});
 
@@ -937,10 +1108,35 @@
 							</label>
 						</div>
 					{/if}
+					<div class="border-t border-edge pt-2">
+						<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+							<input type="checkbox" bind:checked={showZones} class="accent-accent" />
+							Zones
+						</label>
+					</div>
 				</div>
 			{/if}
 		</div>
 	</div>
+
+	{#if zoneStore.zoneIds.length > 0 && showZones}
+		<ul
+			class="absolute left-4 flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1 {geozoneStore.active &&
+			showGeozones
+				? 'bottom-16'
+				: 'bottom-8'}"
+			aria-label="Zone legend"
+		>
+			<li class="flex items-center gap-1 text-[10px]">
+				<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_IN_COLOR}"></span>
+				Keep in
+			</li>
+			<li class="flex items-center gap-1 text-[10px]">
+				<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_OUT_COLOR}"></span>
+				Keep out
+			</li>
+		</ul>
+	{/if}
 
 	{#if geozoneStore.active && showGeozones}
 		<ul

@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
@@ -187,7 +188,12 @@
 			/>
 		{/if}
 		<EventsFeed />
-		{#if fleet.wardIds.length === 0 && !placing}
+		<!-- Zone drawing is the one map-click workflow that doesn't need an
+		     existing ward to start (an operator can plan safety areas before
+		     ever adding one); without this guard, EmptyState's centered card
+		     would sit on top of the canvas and silently eat every vertex
+		     click meant for it. -->
+		{#if fleet.wardIds.length === 0 && !placing && !zoneStore.draft}
 			<EmptyState
 				onopenconnection={() => (connectionPanelOpen = true)}
 				onstartdemoplacement={startPlacement}

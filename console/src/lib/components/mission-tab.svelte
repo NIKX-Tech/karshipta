@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
+	import { checkMissionAgainstZones } from '$lib/zones/mission-zone-check';
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 	import WaypointList from '$lib/components/waypoint-list.svelte';
 
@@ -23,6 +24,7 @@
 		if (draft.fleetId) return fleetGroups.fleets[draft.fleetId]?.name ?? draft.fleetId;
 		return `${draft.wardIds.length} ward${draft.wardIds.length === 1 ? '' : 's'}`;
 	});
+	const assignWarning = $derived(draft ? checkMissionAgainstZones(draft.waypoints) : undefined);
 
 	function selectFleet(fleetId: string) {
 		targetFleetId = targetFleetId === fleetId ? undefined : fleetId;
@@ -146,6 +148,7 @@
 		title="Assign mission"
 		body="{draft.wardIds.length} ward(s) will each fly an independent copy of this {draft.waypoints
 			.length}-waypoint route."
+		warning={assignWarning}
 		confirmLabel="Assign"
 		onconfirm={() => {
 			fleetGroups.assignMission(`mission-${new Date().toISOString().slice(11, 19)}`);

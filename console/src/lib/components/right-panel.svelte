@@ -4,6 +4,7 @@
 	import WardStatusStrip from '$lib/components/ward-status-strip.svelte';
 	import WardTab from '$lib/components/ward-tab.svelte';
 	import MissionTab from '$lib/components/mission-tab.svelte';
+	import ZonesTab from '$lib/components/zones-tab.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -13,14 +14,15 @@
 
 	const COLLAPSED_STORAGE_KEY = 'karshipta.rightPanelCollapsed';
 
-	// Zones lands in Step 7 - the icon rail stays reachable regardless of
-	// whether a ward is selected, which is the whole point of this
-	// restructure. Fleet management itself lives in the left rail
-	// (alongside the ward list it groups); this tab is specifically for
-	// assigning a mission to a Fleet or an ad-hoc set of wards.
+	// The icon rail stays reachable regardless of whether a ward is
+	// selected, which is the whole point of this restructure. Fleet
+	// management itself lives in the left rail (alongside the ward list it
+	// groups); Mission is for assigning a mission to a Fleet or an ad-hoc
+	// set of wards; Zones is the safety-area drawing tool.
 	const TABS: TabItem[] = [
 		{ id: 'ward', label: 'Ward' },
-		{ id: 'mission', label: 'Mission' }
+		{ id: 'mission', label: 'Mission' },
+		{ id: 'zones', label: 'Zones' }
 	];
 
 	function readStoredCollapsed(): boolean {
@@ -104,6 +106,16 @@
 			>
 				<MissionTab {fleetLabel} />
 			</div>
+
+			<div
+				role="tabpanel"
+				id="tabpanel-zones"
+				aria-labelledby="tab-zones"
+				class="min-h-0 flex-1 overflow-y-auto p-3"
+				hidden={activeTab !== 'zones'}
+			>
+				<ZonesTab />
+			</div>
 		</div>
 	{/if}
 
@@ -155,6 +167,20 @@
 					>
 						<path d="M22 2 11 13" />
 						<path d="M22 2 15 22l-4-9-9-4Z" />
+					</svg>
+				{:else if tab.id === 'zones'}
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M12 2 21 7.5v9L12 22l-9-5.5v-9Z" />
 					</svg>
 				{/if}
 			{/snippet}
