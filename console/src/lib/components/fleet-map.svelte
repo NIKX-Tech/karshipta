@@ -4,6 +4,7 @@
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
 	import type { ViewportBounds } from '$lib/geozones/types';
@@ -336,7 +337,12 @@
 						: [...measurePoints, [event.lngLat.lng, event.lngLat.lat]];
 				return;
 			}
-			if (fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId) {
+			// A fleet-wide mission assignment being planned takes priority over
+			// a solo ward's own draft; planRoute() cancels the latter before
+			// starting the former, so in practice at most one is ever active.
+			if (fleetGroups.missionAssignmentDraft) {
+				fleetGroups.addAssignmentWaypoint(event.lngLat.lat, event.lngLat.lng);
+			} else if (fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId) {
 				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
@@ -534,7 +540,9 @@
 		if (!map) return;
 		const planning = fleet.missionDraft?.wardId === fleet.selectedWardId && fleet.missionDraft;
 		map.getCanvas().style.cursor =
-			fleet.gotoArming || planning || crosshair || measuring ? 'crosshair' : '';
+			fleet.gotoArming || planning || fleetGroups.missionAssignmentDraft || crosshair || measuring
+				? 'crosshair'
+				: '';
 	});
 
 	// swap the raster tile source in place when the theme or satellite
@@ -600,18 +608,19 @@
 		});
 	});
 
-	// draw the mission draft of the selected ward: dashed blue route + numbered points
+	// draw the mission draft of the selected ward, or a fleet-wide mission
+	// assignment draft, as a dashed blue route + numbered points - mutually
+	// exclusive (planRoute() cancels the ward-scoped draft before starting
+	// the fleet-scoped one), so at most one ever has waypoints at a time.
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
-		const draft =
+		const wardDraft =
 			fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId
 				? fleet.missionDraft
 				: undefined;
-		const coordinates = (draft?.waypoints ?? []).map((waypoint) => [
-			waypoint.longitudeDeg,
-			waypoint.latitudeDeg
-		]);
+		const waypoints = wardDraft?.waypoints ?? fleetGroups.missionAssignmentDraft?.waypoints ?? [];
+		const coordinates = waypoints.map((waypoint) => [waypoint.longitudeDeg, waypoint.latitudeDeg]);
 		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ROUTE_SOURCE);
 		source?.setData({
 			type: 'Feature',

@@ -214,7 +214,7 @@
 		{/if}
 	</div>
 
-	<RightPanel />
+	<RightPanel {fleetLabel} />
 
 	{#if connectionPanelOpen}
 		<ConnectionPanel onclose={() => (connectionPanelOpen = false)} />

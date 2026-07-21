@@ -12,6 +12,7 @@ import type { WardClass } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
 import type { LatLon } from '$lib/geolocation';
+import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 
 /** where a ward's data comes from: the local demo engine or a connected gateway */
 export type WardSource = 'demo' | 'gateway';
@@ -471,11 +472,15 @@ class FleetStore {
 			case 'fleetMissionAssignment':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
-			// Real downstream payloads, not yet wired: fleetGroups/zoneStore
-			// (and their sync/ack handling) land with the Fleet and Zones tabs.
 			case 'fleet':
-			case 'zone':
+				fleetGroups.applyFleet(payload.fleet);
+				break;
 			case 'fleetAck':
+				fleetGroups.applyFleetAck(payload.fleetAck);
+				break;
+			// Real downstream payloads, not yet wired: zoneStore (and its
+			// sync/ack handling) lands with the Zones tab.
+			case 'zone':
 			case 'zoneAck':
 				break;
 			default: {
@@ -483,6 +488,20 @@ class FleetStore {
 				console.warn('fleet: ignoring unknown payload kind', unhandled);
 			}
 		}
+	}
+
+	/**
+	 * Sends an envelope through whichever channel is currently authoritative
+	 * for gateway-owned resources that have no per-ward channel of their own
+	 * (Fleet/Zone CRUD, fleet-wide mission assignment): the connected
+	 * gateway if there is one, otherwise the always-available demo engine.
+	 * Lets fleetGroups/zoneStore reach the wire without either holding its
+	 * own transport reference.
+	 */
+	sendUpstream(envelope: Envelope): void {
+		const channel = this.gatewayTransport ?? this.demoEngine;
+		if (!channel) throw new Error('no active channel');
+		channel.send(envelope);
 	}
 
 	/** full app teardown: stops both channels and wipes everything */
@@ -501,6 +520,7 @@ class FleetStore {
 		this.uploadedMissions = {};
 		this.missionProgress = {};
 		this.cancelGoto();
+		fleetGroups.teardown();
 	}
 
 	private channelFor(wardId: string): FleetTransport | undefined {

@@ -84,11 +84,11 @@
 	<div class="relative">
 		<button
 			class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
-			aria-label="Add ward"
+			aria-label="Add Ward"
 			aria-expanded={compactMenuOpen}
 			onclick={() => (compactMenuOpen = !compactMenuOpen)}
 		>
-			+ Add ward
+			+ Add Ward
 		</button>
 		{#if compactMenuOpen}
 			<div

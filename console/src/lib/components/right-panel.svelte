@@ -3,13 +3,25 @@
 	import Tabs, { type TabItem } from '$lib/components/ui/tabs.svelte';
 	import WardStatusStrip from '$lib/components/ward-status-strip.svelte';
 	import WardTab from '$lib/components/ward-tab.svelte';
+	import MissionTab from '$lib/components/mission-tab.svelte';
+
+	interface Props {
+		fleetLabel: string;
+	}
+
+	const { fleetLabel }: Props = $props();
 
 	const COLLAPSED_STORAGE_KEY = 'karshipta.rightPanelCollapsed';
 
-	// Single tab today (Ward); Step 6/7 append Fleet/Zones to this array -
-	// the icon rail stays reachable regardless of whether a ward is
-	// selected, which is the whole point of this restructure.
-	const TABS: TabItem[] = [{ id: 'ward', label: 'Ward' }];
+	// Zones lands in Step 7 - the icon rail stays reachable regardless of
+	// whether a ward is selected, which is the whole point of this
+	// restructure. Fleet management itself lives in the left rail
+	// (alongside the ward list it groups); this tab is specifically for
+	// assigning a mission to a Fleet or an ad-hoc set of wards.
+	const TABS: TabItem[] = [
+		{ id: 'ward', label: 'Ward' },
+		{ id: 'mission', label: 'Mission' }
+	];
 
 	function readStoredCollapsed(): boolean {
 		if (typeof localStorage === 'undefined') return true;
@@ -82,6 +94,16 @@
 					<p class="text-xs text-fg-muted">Select a ward to see its details.</p>
 				{/if}
 			</div>
+
+			<div
+				role="tabpanel"
+				id="tabpanel-mission"
+				aria-labelledby="tab-mission"
+				class="min-h-0 flex-1 overflow-y-auto p-3"
+				hidden={activeTab !== 'mission'}
+			>
+				<MissionTab {fleetLabel} />
+			</div>
 		</div>
 	{/if}
 
@@ -118,6 +140,21 @@
 					>
 						<circle cx="12" cy="12" r="7" />
 						<path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+					</svg>
+				{:else if tab.id === 'mission'}
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M22 2 11 13" />
+						<path d="M22 2 15 22l-4-9-9-4Z" />
 					</svg>
 				{/if}
 			{/snippet}

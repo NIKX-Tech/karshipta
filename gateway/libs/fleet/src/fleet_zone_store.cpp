@@ -164,10 +164,12 @@ std::string FleetZoneStore::create_fleet(const std::string& name, const std::str
 }
 
 std::optional<std::string> FleetZoneStore::rename_fleet(const std::string& fleet_id,
-                                                          const std::string& name) {
-    Statement update(db_, "UPDATE fleets SET name = ? WHERE fleet_id = ?;");
+                                                          const std::string& name,
+                                                          const std::string& description) {
+    Statement update(db_, "UPDATE fleets SET name = ?, description = ? WHERE fleet_id = ?;");
     update.bind(1, name);
-    update.bind(2, fleet_id);
+    update.bind(2, description);
+    update.bind(3, fleet_id);
     update.run();
     if (sqlite3_changes(db_) == 0) {
         return "unknown fleet_id: " + fleet_id;

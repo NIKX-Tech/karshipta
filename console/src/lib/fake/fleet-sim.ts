@@ -11,6 +11,15 @@ import {
 	type Command,
 	type Mission
 } from '$lib/gen/karshipta/v1/command';
+import {
+	FleetAckStatus,
+	type AddWardToFleet,
+	type CreateFleet,
+	type DeleteFleet,
+	type Fleet,
+	type RemoveWardFromFleet,
+	type RenameFleet
+} from '$lib/gen/karshipta/v1/fleet';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 import type { LatLon } from '$lib/geolocation';
@@ -41,6 +50,37 @@ const ARRIVAL_RADIUS_M = 2;
 const DEFAULT_TAKEOFF_ALT_M = 20;
 
 export const FAKE_FLEET_CENTER = { lat: HOME_LAT_DEG, lon: HOME_LON_DEG };
+
+/**
+ * Demo-mode Fleet grouping, persisted so it survives a reload the same way
+ * demo ward homes do (fleet-store.svelte.ts's DEMO_WARD_HOMES_STORAGE_KEY).
+ * Membership references ward ids like "demo-1"; those stay valid across a
+ * reload only because bindDemoEngine() always respawns the same persisted
+ * homes in the same order, which is exactly what already keeps their ids
+ * stable today.
+ */
+const DEMO_FLEETS_STORAGE_KEY = 'karshipta.demoFleets';
+
+function readStoredDemoFleets(): Fleet[] {
+	if (typeof localStorage === 'undefined') return [];
+	const raw = localStorage.getItem(DEMO_FLEETS_STORAGE_KEY);
+	if (!raw) return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter(
+			(value): value is Fleet =>
+				typeof value === 'object' &&
+				value !== null &&
+				typeof (value as Fleet).fleetId === 'string' &&
+				typeof (value as Fleet).name === 'string' &&
+				Array.isArray((value as Fleet).wardIds)
+		);
+	} catch {
+		// stale/corrupt data - start empty, not crash
+		return [];
+	}
+}
 
 /** owner-facing contract for spawning/removing demo wards from the UI */
 export interface DemoEngine extends FleetTransport {
@@ -162,11 +202,20 @@ export class FakeGateway implements DemoEngine {
 	private missions = new Map<string, Mission>();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private spawnCount = 0;
+	private fleets = new Map<string, Fleet>();
+	private fleetSpawnCount = 0;
 
-	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {}
+	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {
+		for (const fleet of readStoredDemoFleets()) this.fleets.set(fleet.fleetId, fleet);
+	}
 
 	start(): void {
 		if (this.timer !== undefined) return;
+		// "connect" sync: mirrors the gateway's send_fleet_zone_snapshot, so a
+		// Fleet tab reload still shows whatever was persisted last session.
+		for (const fleet of this.fleets.values()) {
+			this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+		}
 		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
 	}
 
@@ -214,11 +263,153 @@ export class FakeGateway implements DemoEngine {
 			case 'missionUpload':
 				this.handleMissionUpload(envelope.payload.missionUpload);
 				break;
+			case 'createFleet':
+				this.handleCreateFleet(envelope.payload.createFleet);
+				break;
+			case 'renameFleet':
+				this.handleRenameFleet(envelope.payload.renameFleet);
+				break;
+			case 'deleteFleet':
+				this.handleDeleteFleet(envelope.payload.deleteFleet);
+				break;
+			case 'addWardToFleet':
+				this.handleAddWardToFleet(envelope.payload.addWardToFleet);
+				break;
+			case 'removeWardFromFleet':
+				this.handleRemoveWardFromFleet(envelope.payload.removeWardFromFleet);
+				break;
 			default:
 				console.warn(
 					'fake gateway: ignoring unsupported upstream payload',
 					envelope.payload?.$case
 				);
+		}
+	}
+
+	private handleCreateFleet(request: CreateFleet): void {
+		const fleetId = `demo-fleet-${this.fleetSpawnCount + 1}`;
+		this.fleetSpawnCount += 1;
+		const fleet: Fleet = {
+			fleetId,
+			name: request.name,
+			description: request.description,
+			wardIds: []
+		};
+		this.fleets.set(fleetId, fleet);
+		this.persistDemoFleets();
+		this.fleetAck(
+			request.requestId,
+			FleetAckStatus.FLEET_ACK_STATUS_ACCEPTED,
+			'fleet created',
+			fleetId
+		);
+		this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+	}
+
+	private handleRenameFleet(request: RenameFleet): void {
+		const fleet = this.fleets.get(request.fleetId);
+		if (!fleet) {
+			this.fleetAck(
+				request.requestId,
+				FleetAckStatus.FLEET_ACK_STATUS_REJECTED,
+				`unknown fleet_id: ${request.fleetId}`,
+				request.fleetId
+			);
+			return;
+		}
+		fleet.name = request.name;
+		fleet.description = request.description;
+		this.persistDemoFleets();
+		this.fleetAck(
+			request.requestId,
+			FleetAckStatus.FLEET_ACK_STATUS_ACCEPTED,
+			'fleet renamed',
+			fleet.fleetId
+		);
+		this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+	}
+
+	private handleDeleteFleet(request: DeleteFleet): void {
+		if (!this.fleets.delete(request.fleetId)) {
+			this.fleetAck(
+				request.requestId,
+				FleetAckStatus.FLEET_ACK_STATUS_REJECTED,
+				`unknown fleet_id: ${request.fleetId}`,
+				request.fleetId
+			);
+			return;
+		}
+		this.persistDemoFleets();
+		this.fleetAck(
+			request.requestId,
+			FleetAckStatus.FLEET_ACK_STATUS_ACCEPTED,
+			'fleet deleted',
+			request.fleetId
+		);
+	}
+
+	private handleAddWardToFleet(request: AddWardToFleet): void {
+		const fleet = this.fleets.get(request.fleetId);
+		if (!fleet) {
+			this.fleetAck(
+				request.requestId,
+				FleetAckStatus.FLEET_ACK_STATUS_REJECTED,
+				`unknown fleet_id: ${request.fleetId}`,
+				request.fleetId
+			);
+			return;
+		}
+		if (!fleet.wardIds.includes(request.wardId)) fleet.wardIds.push(request.wardId);
+		this.persistDemoFleets();
+		this.fleetAck(
+			request.requestId,
+			FleetAckStatus.FLEET_ACK_STATUS_ACCEPTED,
+			'ward added to fleet',
+			fleet.fleetId
+		);
+		this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+	}
+
+	private handleRemoveWardFromFleet(request: RemoveWardFromFleet): void {
+		const fleet = this.fleets.get(request.fleetId);
+		if (!fleet) {
+			this.fleetAck(
+				request.requestId,
+				FleetAckStatus.FLEET_ACK_STATUS_REJECTED,
+				`unknown fleet_id: ${request.fleetId}`,
+				request.fleetId
+			);
+			return;
+		}
+		fleet.wardIds = fleet.wardIds.filter((id) => id !== request.wardId);
+		this.persistDemoFleets();
+		this.fleetAck(
+			request.requestId,
+			FleetAckStatus.FLEET_ACK_STATUS_ACCEPTED,
+			'ward removed from fleet',
+			fleet.fleetId
+		);
+		this.onEnvelope({ payload: { $case: 'fleet', fleet } });
+	}
+
+	private fleetAck(
+		requestId: string,
+		status: FleetAckStatus,
+		message: string,
+		fleetId: string
+	): void {
+		this.onEnvelope({
+			payload: { $case: 'fleetAck', fleetAck: { requestId, status, message, fleetId } }
+		});
+	}
+
+	private persistDemoFleets(): void {
+		if (typeof localStorage === 'undefined') return;
+		const fleets = [...this.fleets.values()];
+		if (fleets.length > 0) {
+			localStorage.setItem(DEMO_FLEETS_STORAGE_KEY, JSON.stringify(fleets));
+		} else {
+			localStorage.removeItem(DEMO_FLEETS_STORAGE_KEY);
 		}
 	}
 

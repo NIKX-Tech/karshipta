@@ -102,7 +102,7 @@ karshipta::v1::FleetAck FleetManager::handle_rename_fleet(const karshipta::v1::R
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
     ack.set_fleet_id(request.fleet_id());
-    const auto error = store_.rename_fleet(request.fleet_id(), request.name());
+    const auto error = store_.rename_fleet(request.fleet_id(), request.name(), request.description());
     if (error) {
         spdlog::warn("rename_fleet request '{}' rejected: {}", request.request_id(), *error);
         ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
@@ -240,7 +240,12 @@ karshipta::v1::ZoneAck FleetManager::handle_delete_zone(const karshipta::v1::Del
 
 void FleetManager::handle_fleet_mission_assignment(
     const karshipta::v1::FleetMissionAssignment& request, WardManager& ward_manager) {
-    if (request.fleet_id().empty() || !find_fleet(request.fleet_id())) {
+    // Empty fleet_id means an ad-hoc ward selection, not tied to a saved
+    // Fleet (the console's Mission tab lets an operator pick either a
+    // Fleet or a handful of individual wards); only a non-empty fleet_id
+    // is validated against the store, same as everywhere else fleet_id is
+    // looked up.
+    if (!request.fleet_id().empty() && !find_fleet(request.fleet_id())) {
         spdlog::warn("fleet_mission_assignment request '{}' rejected: unknown fleet_id '{}'",
                      request.request_id(), request.fleet_id());
         broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
