@@ -67,6 +67,16 @@ struct ManagedWard {
     // thread that set it may mutate this struct. Written only under
     // WardManager::wards_mutex_.
     bool busy = false;
+    // Set by dispatch_mission_upload_and_start() alongside the enqueued
+    // upload; cleared by run_publish_loop() the moment that mission_id's
+    // upload result is drained. A match on a successful result there is
+    // what turns into an auto-issued StartMissionCommand (see pending_start
+    // in run_publish_loop) - enqueue_upload() is non-blocking, so a fleet
+    // mission assignment cannot safely dispatch StartMissionCommand right
+    // after calling it; this flag defers the start until the upload this
+    // gateway process itself just kicked off is actually known to have
+    // landed on the ward. Written only under WardManager::wards_mutex_.
+    std::optional<std::string> pending_auto_start_mission_id;
     // Last: its loop calls connection->connect_with_retry()/is_connected() on
     // every iteration, so it must stop and join before connection (and the
     // other members above it) are torn down. Empty (not joinable) until
@@ -154,6 +164,19 @@ public:
     // ward is unknown or stopped; the upload's own success/failure
     // surfaces later, via the publish tick polling take_upload_result().
     void handle_mission_upload(const karshipta::v1::Mission& mission);
+
+    // Fleet-mission-assignment counterpart to handle_mission_upload(): same
+    // validation and rejection-event behavior (unknown/stopped/busy ward),
+    // but additionally arms an auto-start so that once this specific
+    // upload's result comes back successful (polled on the next publish
+    // tick, same as any other upload), a StartMissionCommand is issued for
+    // this ward automatically - the gateway-side half of "upload an
+    // independent copy to each selected ward and start them together"
+    // (fleet.proto FleetMissionAssignment). Returns the same rejection
+    // reason handle_mission_upload() would broadcast, so FleetManager can
+    // also learn per-ward outcomes it might otherwise have to poll for.
+    [[nodiscard]] std::optional<std::string> dispatch_mission_upload_and_start(
+        const karshipta::v1::Mission& mission);
 
     // Converts upload via the ward's MissionImporter, then routes the
     // result through handle_mission_upload() exactly like a console-editor

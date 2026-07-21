@@ -14,6 +14,7 @@ target_link_libraries(karshipta_gateway
             MAVSDK::mavsdk
             spdlog::spdlog
             ward
+            fleet
             transport
             karshipta_proto
             karshipta_warnings

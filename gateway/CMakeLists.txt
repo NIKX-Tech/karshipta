@@ -172,6 +172,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/transport/websocket_transport_test.cpp
     tests/transport/relay_transport_test.cpp
     tests/fleet/fleet_zone_store_test.cpp
+    tests/fleet/fleet_manager_test.cpp
   )
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
