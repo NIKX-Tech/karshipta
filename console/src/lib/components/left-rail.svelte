@@ -61,7 +61,7 @@
 	{#if !collapsed}
 		<aside
 			id="left-rail-content"
-			class="flex w-56 flex-col gap-2 overflow-y-auto p-3"
+			class="flex w-80 flex-col gap-2 overflow-y-auto p-3"
 			aria-label={fleetLabel}
 		>
 			<AddWardMenu variant="compact" {onopenconnection} {onstartdemoplacement} />
