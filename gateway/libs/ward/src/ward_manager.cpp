@@ -302,6 +302,7 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg,
         // below since it needs a reference to `managed` itself.
         .executor = nullptr,
         .busy = false,
+        .pending_auto_start_mission_id = std::nullopt,
         .reconnect_worker = {},
     };
     managed.executor = make_executor(managed);
