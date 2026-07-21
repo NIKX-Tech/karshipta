@@ -24,7 +24,7 @@
 	let confirmation = $state<Confirmation | undefined>(undefined);
 
 	// This panel only renders while the ward has a flight field (see
-	// ward-detail.svelte's gating), so flight is always set here, but the
+	// ward-tab.svelte's gating), so flight is always set here, but the
 	// wire type still marks it optional (unset for non-flight wards).
 	const flightState = $derived(fleet.wards[wardId]?.state?.flight);
 	const trackers = $derived(fleet.commandsFor(wardId).slice(0, 3));

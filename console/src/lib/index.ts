@@ -107,7 +107,13 @@ export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './
 export { default as FleetMap } from './components/fleet-map.svelte';
 export { default as LocationPickerBar } from './components/location-picker-bar.svelte';
 export { default as WardCard } from './components/ward-card.svelte';
-export { default as WardDetail } from './components/ward-detail.svelte';
+// WardDetail is now WardTab (its former self-scrolling <section> chrome
+// moved to right-panel.svelte's tabpanel wrapper, since the console's own
+// shell now always owns that framing - see the shell restructure in
+// right-panel.svelte). A consuming app that rendered WardDetail directly
+// gets the same info line/dl/CommandPanel/MissionPanel content from WardTab.
+export { default as WardTab } from './components/ward-tab.svelte';
+export { default as WardStatusStrip } from './components/ward-status-strip.svelte';
 export { default as CommandPanel } from './components/command-panel.svelte';
 export { default as MissionPanel } from './components/mission-panel.svelte';
 export { default as EventsFeed } from './components/events-feed.svelte';

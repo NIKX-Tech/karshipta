@@ -7,12 +7,11 @@
 	import { locateOrFallback } from '$lib/geolocation';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
-	import WardCard from '$lib/components/ward-card.svelte';
-	import WardDetail from '$lib/components/ward-detail.svelte';
+	import LeftRail from '$lib/components/left-rail.svelte';
+	import RightPanel from '$lib/components/right-panel.svelte';
 	import EventsFeed from '$lib/components/events-feed.svelte';
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
-	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
 	import LocationPickerBar from '$lib/components/location-picker-bar.svelte';
 	import logoMark from '$lib/assets/logo-mark.svg';
 
@@ -113,7 +112,7 @@
 	<title>Karshipta Console</title>
 </svelte:head>
 
-<div class="grid h-dvh grid-cols-[16rem_minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)] bg-ink">
+<div class="grid h-dvh grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)] bg-ink">
 	<header
 		class="col-span-3 flex items-center gap-2 border-b border-edge bg-panel px-4 py-2"
 		aria-label="Karshipta"
@@ -121,8 +120,7 @@
 		<img src={logoMark} alt="" class="h-3 w-auto" aria-hidden="true" />
 		<span class="font-display text-xs font-medium tracking-[0.25em]">KARSHIPTA</span>
 		<span class="ml-auto font-mono text-[10px] text-fg-muted tabular-nums">
-			{fleetLabel.toUpperCase()}
-			{fleet.wardIds.length}
+			WARDS {fleet.wardIds.length}
 		</span>
 		{#if fleet.readonly}
 			<span
@@ -172,16 +170,11 @@
 		</button>
 	</header>
 
-	<aside class="flex flex-col gap-2 overflow-y-auto p-3" aria-label={fleetLabel}>
-		<AddWardMenu
-			variant="compact"
-			onopenconnection={() => (connectionPanelOpen = true)}
-			onstartdemoplacement={startPlacement}
-		/>
-		{#each fleet.wardIds as wardId (wardId)}
-			<WardCard {wardId} ward={fleet.wards[wardId]} />
-		{/each}
-	</aside>
+	<LeftRail
+		{fleetLabel}
+		onopenconnection={() => (connectionPanelOpen = true)}
+		onstartdemoplacement={startPlacement}
+	/>
 
 	<div class="relative">
 		{#if mapCenterLat !== undefined && mapCenterLon !== undefined}
@@ -221,9 +214,7 @@
 		{/if}
 	</div>
 
-	{#if fleet.selectedWardId}
-		<WardDetail wardId={fleet.selectedWardId} />
-	{/if}
+	<RightPanel />
 
 	{#if connectionPanelOpen}
 		<ConnectionPanel onclose={() => (connectionPanelOpen = false)} />

@@ -15,7 +15,7 @@
 	const uploaded = $derived(fleet.uploadedMissions[wardId]);
 	const progress = $derived(fleet.missionProgress[wardId]);
 	// This panel only renders while the ward has a flight field (see
-	// ward-detail.svelte's gating), so flight is always set here.
+	// ward-tab.svelte's gating), so flight is always set here.
 	const flightState = $derived(fleet.wards[wardId]?.state?.flight);
 
 	const startWarning = $derived.by(() => {
