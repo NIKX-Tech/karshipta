@@ -2,6 +2,7 @@
 	import { fleet, isConfigTerminal } from '$lib/fleet-store.svelte';
 	import { WardClass } from '$lib/gen/karshipta/v1/common';
 	import { WardConfigStatus } from '$lib/gen/karshipta/v1/fleet';
+	import Dialog from '$lib/components/ui/dialog.svelte';
 
 	interface Props {
 		/** 'simulated' prefills a PX4 SITL preset; 'real' starts blank */
@@ -56,10 +57,6 @@
 		}
 	});
 
-	function onkeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape' && !pending) onclose();
-	}
-
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
 		if (!wardId.trim() || !connectionUrl.trim()) return;
@@ -73,106 +70,102 @@
 	}
 </script>
 
-<svelte:window {onkeydown} />
-
-<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="presentation">
-	<div
-		role="dialog"
-		aria-modal="true"
-		aria-label={mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
-		class="w-80 rounded border border-edge bg-panel p-4"
-	>
-		<form onsubmit={submit}>
-			<h3 class="font-display text-sm font-semibold">
-				{mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
-			</h3>
-			<p class="mt-1 text-xs text-fg-muted">
-				{#if fleet.gatewayConnected}
-					Sent to the connected gateway; it starts connecting immediately.
-				{:else}
-					Requires a connected gateway.
-					<span class="text-critical">Not connected.</span> Open the gateway panel first.
-				{/if}
-			</p>
-
-			<div class="mt-3 space-y-2">
-				<label class="block text-[10px]">
-					<span class="text-fg-muted">Ward ID</span>
-					<input
-						type="text"
-						bind:value={wardId}
-						required
-						placeholder="alpha-1"
-						disabled={pending}
-						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
-					/>
-				</label>
-				<label class="block text-[10px]">
-					<span class="text-fg-muted">Name (optional)</span>
-					<input
-						type="text"
-						bind:value={name}
-						disabled={pending}
-						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
-					/>
-				</label>
-				<label class="block text-[10px]">
-					<span class="text-fg-muted">Class</span>
-					<select
-						bind:value={wardClass}
-						disabled={pending}
-						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
-					>
-						{#each WARD_CLASSES as candidateClass (candidateClass)}
-							<option value={candidateClass}>{classLabel(candidateClass)}</option>
-						{/each}
-					</select>
-				</label>
-				<label class="block text-[10px]">
-					<span class="text-fg-muted">Connection URL</span>
-					<input
-						type="text"
-						bind:value={connectionUrl}
-						required
-						placeholder="udpin://0.0.0.0:14540"
-						disabled={pending}
-						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
-					/>
-				</label>
-				<label class="block text-[10px]">
-					<span class="text-fg-muted">MAVLink system id (0 = first autopilot)</span>
-					<input
-						type="number"
-						min="0"
-						max="255"
-						bind:value={mavlinkSystemId}
-						disabled={pending}
-						class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs tabular-nums disabled:opacity-50"
-					/>
-				</label>
-			</div>
-
-			{#if rejected && tracker}
-				<p class="mt-2 text-xs text-critical" role="alert">Rejected: {tracker.message}</p>
+<Dialog
+	label={mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
+	dismissible={!pending}
+	{onclose}
+>
+	<form onsubmit={submit}>
+		<h3 class="font-display text-sm font-semibold">
+			{mode === 'simulated' ? 'Add simulated ward' : 'Connect real ward'}
+		</h3>
+		<p class="mt-1 text-xs text-fg-muted">
+			{#if fleet.gatewayConnected}
+				Sent to the connected gateway; it starts connecting immediately.
+			{:else}
+				Requires a connected gateway.
+				<span class="text-critical">Not connected.</span> Open the gateway panel first.
 			{/if}
+		</p>
 
-			<div class="mt-4 flex justify-end gap-2">
-				<button
-					type="button"
-					onclick={onclose}
+		<div class="mt-3 space-y-2">
+			<label class="block text-[10px]">
+				<span class="text-fg-muted">Ward ID</span>
+				<input
+					type="text"
+					bind:value={wardId}
+					required
+					placeholder="alpha-1"
 					disabled={pending}
-					class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg disabled:opacity-50"
+					data-autofocus
+					class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
+				/>
+			</label>
+			<label class="block text-[10px]">
+				<span class="text-fg-muted">Name (optional)</span>
+				<input
+					type="text"
+					bind:value={name}
+					disabled={pending}
+					class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
+				/>
+			</label>
+			<label class="block text-[10px]">
+				<span class="text-fg-muted">Class</span>
+				<select
+					bind:value={wardClass}
+					disabled={pending}
+					class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 text-xs disabled:opacity-50"
 				>
-					Cancel
-				</button>
-				<button
-					type="submit"
-					disabled={pending || !fleet.gatewayConnected}
-					class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-40"
-				>
-					{pending ? 'Adding...' : 'Add ward'}
-				</button>
-			</div>
-		</form>
-	</div>
-</div>
+					{#each WARD_CLASSES as candidateClass (candidateClass)}
+						<option value={candidateClass}>{classLabel(candidateClass)}</option>
+					{/each}
+				</select>
+			</label>
+			<label class="block text-[10px]">
+				<span class="text-fg-muted">Connection URL</span>
+				<input
+					type="text"
+					bind:value={connectionUrl}
+					required
+					placeholder="udpin://0.0.0.0:14540"
+					disabled={pending}
+					class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
+				/>
+			</label>
+			<label class="block text-[10px]">
+				<span class="text-fg-muted">MAVLink system id (0 = first autopilot)</span>
+				<input
+					type="number"
+					min="0"
+					max="255"
+					bind:value={mavlinkSystemId}
+					disabled={pending}
+					class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs tabular-nums disabled:opacity-50"
+				/>
+			</label>
+		</div>
+
+		{#if rejected && tracker}
+			<p class="mt-2 text-xs text-critical" role="alert">Rejected: {tracker.message}</p>
+		{/if}
+
+		<div class="mt-4 flex justify-end gap-2">
+			<button
+				type="button"
+				onclick={onclose}
+				disabled={pending}
+				class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg disabled:opacity-50"
+			>
+				Cancel
+			</button>
+			<button
+				type="submit"
+				disabled={pending || !fleet.gatewayConnected}
+				class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-40"
+			>
+				{pending ? 'Adding...' : 'Add ward'}
+			</button>
+		</div>
+	</form>
+</Dialog>
