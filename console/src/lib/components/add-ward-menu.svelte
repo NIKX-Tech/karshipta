@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 	import AddWardDialog from '$lib/components/add-ward-dialog.svelte';
+	import Dialog from '$lib/components/ui/dialog.svelte';
 
 	interface Props {
 		onopenconnection: () => void;
@@ -103,34 +104,32 @@
 {/if}
 
 {#if simConfirmOpen}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="presentation">
-		<div
-			role="alertdialog"
-			aria-modal="true"
-			aria-label="Add another simulated ward"
-			class="w-80 rounded border border-edge bg-panel p-4"
-		>
-			<h3 class="font-display text-sm font-semibold">Add another simulated ward?</h3>
-			<p class="mt-2 text-xs text-fg-muted">
-				Each simulated ward is a full autopilot build running on your machine. A few at once can
-				make fans spin up and the machine run hot.
-			</p>
-			<div class="mt-4 flex justify-end gap-2">
-				<button
-					onclick={() => (simConfirmOpen = false)}
-					class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
-				>
-					Cancel
-				</button>
-				<button
-					onclick={startSimulated}
-					class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
-				>
-					Add anyway
-				</button>
-			</div>
+	<Dialog
+		label="Add another simulated ward"
+		variant="alertdialog"
+		onclose={() => (simConfirmOpen = false)}
+	>
+		<h3 class="font-display text-sm font-semibold">Add another simulated ward?</h3>
+		<p class="mt-2 text-xs text-fg-muted">
+			Each simulated ward is a full autopilot build running on your machine. A few at once can make
+			fans spin up and the machine run hot.
+		</p>
+		<div class="mt-4 flex justify-end gap-2">
+			<button
+				data-autofocus
+				onclick={() => (simConfirmOpen = false)}
+				class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
+			>
+				Cancel
+			</button>
+			<button
+				onclick={startSimulated}
+				class="rounded border border-accent/60 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
+			>
+				Add anyway
+			</button>
 		</div>
-	</div>
+	</Dialog>
 {/if}
 
 {#if dialogMode}
