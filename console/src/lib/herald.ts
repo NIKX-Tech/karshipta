@@ -93,7 +93,11 @@ function toGps(gps: HeraldGps | undefined): Gps | undefined {
 	// Herald carries no fix-type equivalent; WARD_CLASS-style "unspecified"
 	// is the honest default rather than guessing a fix quality.
 	return gps
-		? { fixType: GpsFixType.GPS_FIX_TYPE_UNSPECIFIED, numSatellites: gps.numSatellites, hdop: gps.hdop }
+		? {
+				fixType: GpsFixType.GPS_FIX_TYPE_UNSPECIFIED,
+				numSatellites: gps.numSatellites,
+				hdop: gps.hdop
+			}
 		: undefined;
 }
 
