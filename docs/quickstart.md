@@ -94,6 +94,31 @@ Takeoff: the command tracker shows ACCEPTED then SUCCESS, and the ward
 climbs in SITL's own console output too. `PUBLIC_READONLY=true` opens a
 read-only viewer session instead (see [console-ux.md](console-ux.md)).
 
+## Optional: report a non-MAVLink ward (Herald)
+
+The gateway also accepts [Herald](https://github.com/NIKX-Tech/herald)
+messages over HTTP, for sources with no MAVLink autopilot at all (a
+livestock tag, a generic tracker). With the gateway from step 2 still
+running:
+
+```sh
+curl -X POST http://127.0.0.1:8766/herald -H "Content-Type: application/json" -d '{
+  "entity_id": "tag-1",
+  "timestamp_ms": 1700000000000,
+  "entity_class": "ENTITY_CLASS_LIVESTOCK_TAG",
+  "position": {"latitude_deg": 52.37, "longitude_deg": 4.90},
+  "health_ok": true
+}'
+```
+
+A connected console shows `tag-1` alongside `sitl-1`, as a livestock-tag
+ward with no flight-mode UI (no arm/takeoff/land: there is no autopilot
+behind it to send those to). Same loopback-only-by-default bind policy as
+the websocket port above, controlled by `herald.host`/`herald.allow_lan_bind`
+in `gateway/config/gateway.yaml`. See
+[`gateway/docs/herald-ingest.md`](../gateway/docs/herald-ingest.md) for the
+full mapping and the HTTP status codes a POST can come back with.
+
 ## Multiple wards
 
 Not yet: the gateway connects to exactly one ward

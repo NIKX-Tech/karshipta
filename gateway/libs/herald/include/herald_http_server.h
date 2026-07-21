@@ -2,6 +2,7 @@
 #define KARSHIPTA_GATEWAY_HERALD_HTTP_SERVER_H
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -11,6 +12,11 @@
 namespace httplib {
 class Server;
 }  // namespace httplib
+
+// Defined in websocket_transport.cpp (declared there too); forward-declared
+// again here so from_config()'s default argument doesn't require this
+// header to include websocket_transport.h just for one free function.
+bool is_running_in_container();
 
 // Thin HTTP listener for Herald ingestion (github.com/NIKX-Tech/herald): one
 // route, POST /herald, translating the request body into a herald::v0::Herald
@@ -27,12 +33,19 @@ class HeraldHttpServer {
     HeraldHttpServer(HeraldWardManager& ward_manager, std::string host, uint16_t port);
 
     // Builds host/port from a YAML config file at config_path (keys:
-    // herald.host, herald.http_port, herald.allow_lan_bind), the same
-    // safe-by-default bind policy as WebsocketTransport::from_config: a
-    // non-loopback host is only honored if herald.allow_lan_bind is true.
-    // Falls back to (127.0.0.1, 8766) on a missing or malformed config.
-    static std::unique_ptr<HeraldHttpServer> from_config(const std::string& config_path,
-                                                         HeraldWardManager& ward_manager);
+    // herald.host, herald.http_port, herald.allow_lan_bind,
+    // herald.container_bind), the exact same safe-by-default bind policy as
+    // WebsocketTransport::from_config: a non-loopback host is only honored
+    // if herald.allow_lan_bind is true, or if herald.container_bind is true
+    // and is_in_container reports true (the docker-compose demo's case,
+    // see deploy/gateway-config.yaml). Falls back to (127.0.0.1, 8766) on a
+    // missing or malformed config. is_in_container exists as a parameter
+    // only so tests can inject a fixed answer instead of depending on
+    // /.dockerenv, same reasoning as WebsocketTransport::from_config's own
+    // parameter.
+    static std::unique_ptr<HeraldHttpServer> from_config(
+        const std::string& config_path, HeraldWardManager& ward_manager,
+        const std::function<bool()>& is_in_container = is_running_in_container);
 
     // Stops the server if still running, so no request callback can fire
     // against a destroyed HeraldHttpServer.

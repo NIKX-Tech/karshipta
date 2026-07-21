@@ -55,11 +55,13 @@ HeraldHttpServer::HeraldHttpServer(HeraldWardManager& ward_manager, std::string 
     });
 }
 
-std::unique_ptr<HeraldHttpServer> HeraldHttpServer::from_config(const std::string& config_path,
-                                                                HeraldWardManager& ward_manager) {
+std::unique_ptr<HeraldHttpServer> HeraldHttpServer::from_config(
+    const std::string& config_path, HeraldWardManager& ward_manager,
+    const std::function<bool()>& is_in_container) {
     std::string host = kDefaultHost;
     uint16_t port = kDefaultPort;
     bool allow_lan_bind = false;
+    bool container_bind = false;
 
     std::error_code exists_error;
     if (!std::filesystem::exists(config_path, exists_error) || exists_error) {
@@ -74,6 +76,7 @@ std::unique_ptr<HeraldHttpServer> HeraldHttpServer::from_config(const std::strin
                 if (herald["host"]) host = herald["host"].as<std::string>();
                 if (herald["http_port"]) port = herald["http_port"].as<uint16_t>();
                 if (herald["allow_lan_bind"]) allow_lan_bind = herald["allow_lan_bind"].as<bool>();
+                if (herald["container_bind"]) container_bind = herald["container_bind"].as<bool>();
             }
         } catch (const YAML::Exception& parse_error) {
             spdlog::error(
@@ -83,6 +86,7 @@ std::unique_ptr<HeraldHttpServer> HeraldHttpServer::from_config(const std::strin
             host = kDefaultHost;
             port = kDefaultPort;
             allow_lan_bind = false;
+            container_bind = false;
         }
     }
 
@@ -94,6 +98,20 @@ std::unique_ptr<HeraldHttpServer> HeraldHttpServer::from_config(const std::strin
             "on this network with NO AUTHENTICATION. Anyone who can reach this address can "
             "inject ward telemetry.",
             host, port);
+    } else if (container_bind && is_in_container()) {
+        spdlog::warn(
+            "Herald HTTP listener is binding to {}:{} because herald.container_bind is set and "
+            "this process detected it is running inside a container. This is reachable only "
+            "through whatever ports the container runtime publishes to the host, not directly "
+            "from the LAN; see gateway/docs/websocket-transport.md for the same reasoning "
+            "applied to the websocket transport.",
+            host, port);
+    } else if (container_bind) {
+        spdlog::warn(
+            "gateway config '{}' sets herald.container_bind: true, but this process is not "
+            "running inside a container; ignoring and forcing 127.0.0.1 instead.",
+            config_path);
+        host = kDefaultHost;
     } else {
         spdlog::warn(
             "gateway config '{}' requests herald.host='{}', but herald.allow_lan_bind is off; "

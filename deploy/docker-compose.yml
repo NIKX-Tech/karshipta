@@ -50,6 +50,10 @@ services:
       # the gateway's default connection URL (udp://:14540), rather than
       # something resolved through the compose network's own DNS/bridge.
       - "14540:14540/udp"
+      # Herald HTTP ingestion (github issue #101): lets a Herald source
+      # running on the host (or reachable from it) POST to the gateway
+      # inside this compose network. See gateway-config.yaml's herald block.
+      - "8766:8766"
     depends_on: [sitl-1, sitl-2, sitl-3]
 
   console:
