@@ -82,6 +82,26 @@ if(NOT yaml-cpp_FOUND)
   endif()
 endif()
 
+# cpp-httplib: single-header HTTP server, used only by the Herald HTTP
+# ingestion listener (github issue #101). vcpkg/Homebrew installs provide a
+# CMake config; when absent (Linux CI, bare dev machines) fall back to a
+# pinned FetchContent build, same pattern as ixwebsocket/yaml-cpp above.
+# Header-only: cpp-httplib's own CMakeLists already declares an INTERFACE
+# target named httplib::httplib, so the alias branch below is a safety net,
+# not the normal path.
+find_package(httplib CONFIG QUIET)
+if(NOT httplib_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(
+    httplib
+    URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.5.zip
+  )
+  FetchContent_MakeAvailable(httplib)
+  if(NOT TARGET httplib::httplib)
+    add_library(httplib::httplib ALIAS httplib)
+  endif()
+endif()
+
 # SQLite: used by FleetZoneStore (gateway issue #85) to persist Fleet and
 # Zone, a narrow, explicitly-signed-off exception to "no backend, no
 # database in the MVP" (root CLAUDE.md), scoped to exactly those two
@@ -138,6 +158,30 @@ foreach(proto_file ${KARSHIPTA_PROTO_FILES})
   list(APPEND KARSHIPTA_PROTO_GENERATED_SRCS "${gen_src}")
 endforeach()
 
+# proto/herald/v0/herald.proto is vendored from the standalone NIKX-Tech/herald
+# repo (github issue #101), not owned by this repo (root CLAUDE.md's "single
+# source of truth" applies to karshipta/v1 only). Its own package (herald.v0)
+# keeps it from colliding with anything under karshipta/v1; generated into the
+# same karshipta_proto static library rather than a separate target, since
+# there is no reason yet to version or expose it independently.
+file(GLOB KARSHIPTA_HERALD_PROTO_FILES "${KARSHIPTA_PROTO_DIR}/herald/v0/*.proto")
+
+foreach(proto_file ${KARSHIPTA_HERALD_PROTO_FILES})
+  get_filename_component(proto_name ${proto_file} NAME_WE)
+  set(gen_src "${KARSHIPTA_PROTO_GEN_DIR}/herald/v0/${proto_name}.pb.cc")
+  set(gen_hdr "${KARSHIPTA_PROTO_GEN_DIR}/herald/v0/${proto_name}.pb.h")
+  add_custom_command(
+    OUTPUT "${gen_src}" "${gen_hdr}"
+    COMMAND protobuf::protoc
+    ARGS --cpp_out "${KARSHIPTA_PROTO_GEN_DIR}" -I "${KARSHIPTA_PROTO_DIR}"
+         --experimental_allow_proto3_optional "${proto_file}"
+    DEPENDS "${proto_file}" protobuf::protoc
+    COMMENT "Generating protobuf C++ for herald/v0/${proto_name}.proto"
+    VERBATIM
+  )
+  list(APPEND KARSHIPTA_PROTO_GENERATED_SRCS "${gen_src}")
+endforeach()
+
 add_library(karshipta_proto STATIC ${KARSHIPTA_PROTO_GENERATED_SRCS})
 target_include_directories(karshipta_proto PUBLIC "${KARSHIPTA_PROTO_GEN_DIR}")
 target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
@@ -145,6 +189,7 @@ target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/fleet)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/herald)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
@@ -173,6 +218,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/transport/relay_transport_test.cpp
     tests/fleet/fleet_zone_store_test.cpp
     tests/fleet/fleet_manager_test.cpp
+    tests/herald/herald_ward_manager_test.cpp
   )
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
@@ -183,6 +229,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     spdlog::spdlog
     ward
     fleet
+    herald
     transport
     # the transport test drives the server with a real ix client
     ixwebsocket::ixwebsocket

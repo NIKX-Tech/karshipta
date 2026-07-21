@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package herald.v0;
+
+// ---------- Herald ----------
+//
+// An open message standard for reporting the state of any tracked
+// entity: position, battery, health, into any system, from any source
+// that isn't already using an existing standard for its domain (e.g.
+// MAVLink for flight vehicles).
+//
+// Herald is intentionally self-contained: it depends on nothing outside
+// this file, and uses no vocabulary specific to any single adopter.
+// Any system, not only its originating project, can implement Herald
+// as an input or output format.
+
+message GeoPoint {
+  double latitude_deg = 1;
+  double longitude_deg = 2;
+  float altitude_msl_m = 3;   // above mean sea level
+  float altitude_rel_m = 4;   // relative to a reference point, if known
+}
+
+message Velocity {
+  float north_m_s = 1;
+  float east_m_s = 2;
+  float down_m_s = 3;
+}
+
+message Battery {
+  float voltage_v = 1;
+  float remaining_pct = 2;    // 0.0 to 100.0, -1 if unknown
+}
+
+message Gps {
+  uint32 num_satellites = 1;
+  float hdop = 2;
+}
+
+// What kind of thing this is. Extend freely; unknown values should be
+// treated as ENTITY_CLASS_UNSPECIFIED by any consumer.
+enum EntityClass {
+  ENTITY_CLASS_UNSPECIFIED = 0;
+  ENTITY_CLASS_MULTIROTOR = 1;
+  ENTITY_CLASS_FIXED_WING = 2;
+  ENTITY_CLASS_VTOL = 3;
+  ENTITY_CLASS_HELICOPTER = 4;
+  ENTITY_CLASS_GROUND_VEHICLE = 5;
+  ENTITY_CLASS_LIVESTOCK_TAG = 6;
+  ENTITY_CLASS_GENERIC_TRACKER = 7;
+}
+
+message Herald {
+  // Required: stable identifier for the physical device. Same device
+  // must always produce the same entity_id.
+  string entity_id = 1;
+
+  // Required: unix timestamp in milliseconds when this data was sampled.
+  uint64 timestamp_ms = 2;
+
+  // Required: what kind of thing this is.
+  EntityClass entity_class = 3;
+
+  // Required: current position.
+  GeoPoint position = 4;
+
+  // Optional: velocity, if the source provides it.
+  optional Velocity velocity = 5;
+
+  // Optional: battery/power status. Unset if not applicable.
+  optional Battery battery = 6;
+
+  // Optional: GPS quality metadata. Unset if not applicable.
+  optional Gps gps = 7;
+
+  // Required: overall health. true = reporting normally, false = any
+  // issue detected (low battery, weak signal, sensor fault).
+  bool health_ok = 8;
+
+  // Optional: human-readable label identifying which system sent this.
+  string source = 9;
+
+  // Optional: free-form key-value pairs for anything that doesn't fit
+  // the standard schema. Stored as-is, not interpreted by the standard.
+  map<string, string> metadata = 10;
+
+  // Optional: operator-defined labels for grouping or classification.
+  repeated string tags = 11;
+
+  // Required: tenant/organization scope, meaning defined by the adopter.
+  string org_id = 12;
+}

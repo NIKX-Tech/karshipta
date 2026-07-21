@@ -52,6 +52,9 @@ Mission upload via MAVSDK Mission plugin, start/pause, MissionProgress published
 **M6 (week 6): Dockerfile + hardening.**
 Multi-stage Dockerfile, gateway joins the root docker-compose. Reconnect behavior verified by killing/restarting SITL containers mid-flight.
 
+**M7: Herald ingestion (github issue #101, milestone #15).**
+Accept a [Herald](https://github.com/NIKX-Tech/herald) message over `POST /herald` and report it as a ward, alongside MAVLink wards, with no console changes needed. Non-MAVLink, push-only telemetry: no command surface, no persistence, no MAVSDK dependency. See `gateway/docs/herald-ingest.md`. Explicitly out of scope here: vendor mapping config, CoT/SensorThings bridges, and org scoping for `Herald.org_id` (github issues #102/#104/#105/#106).
+
 ## Definition of done, always
 
 - Builds warning-clean in CI (gcc + clang, -Wall -Wextra).

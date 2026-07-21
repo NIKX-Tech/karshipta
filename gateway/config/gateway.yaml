@@ -15,3 +15,17 @@ websocket:
   # connected ward. Only acceptable on a trusted, isolated network, and the
   # gateway logs a loud warning on every startup while this is true.
   allow_lan_bind: false
+
+# Herald HTTP ingestion (github issue #101): accepts a Herald message
+# (github.com/NIKX-Tech/herald) over POST /herald and reports it as a ward,
+# same as any MAVLink ward. See gateway/docs/herald-ingest.md.
+herald:
+  # Same loopback-by-default policy as websocket.host above.
+  host: 127.0.0.1
+  http_port: 8766
+
+  # Same escape hatch as websocket.allow_lan_bind, same warning. A Herald
+  # source (a livestock tag, a sensor) is usually not on the same machine as
+  # the gateway, so this is the more likely of the two to actually need
+  # turning on; it carries the same NO AUTHENTICATION caveat.
+  allow_lan_bind: false
