@@ -18,8 +18,8 @@
 	let finishing = $state(false);
 	let newName = $state('');
 	let newType = $state<ZoneType>(ZoneType.ZONE_TYPE_KEEP_OUT);
-	let newAltitudeMin = $state('');
-	let newAltitudeMax = $state('');
+	let newAltitudeMin = $state<number | undefined>(undefined);
+	let newAltitudeMax = $state<number | undefined>(undefined);
 
 	function startDrawing() {
 		zoneStore.startDrawing();
@@ -30,8 +30,8 @@
 		finishing = true;
 		newName = '';
 		newType = ZoneType.ZONE_TYPE_KEEP_OUT;
-		newAltitudeMin = '';
-		newAltitudeMax = '';
+		newAltitudeMin = undefined;
+		newAltitudeMax = undefined;
 	}
 
 	function cancelDrawing() {
@@ -43,25 +43,23 @@
 		event.preventDefault();
 		const name = newName.trim();
 		if (!name) return;
-		const altitudeMinM = newAltitudeMin.trim() ? Number(newAltitudeMin) : undefined;
-		const altitudeMaxM = newAltitudeMax.trim() ? Number(newAltitudeMax) : undefined;
-		zoneStore.requestCreateZone(name, newType, altitudeMinM, altitudeMaxM);
+		zoneStore.requestCreateZone(name, newType, newAltitudeMin, newAltitudeMax);
 		finishing = false;
 	}
 
 	let editingZoneId = $state<string | undefined>(undefined);
 	let editName = $state('');
 	let editType = $state<ZoneType>(ZoneType.ZONE_TYPE_KEEP_OUT);
-	let editAltitudeMin = $state('');
-	let editAltitudeMax = $state('');
+	let editAltitudeMin = $state<number | undefined>(undefined);
+	let editAltitudeMax = $state<number | undefined>(undefined);
 	let deleteConfirmId = $state<string | undefined>(undefined);
 
 	function startEdit(zone: Zone) {
 		editingZoneId = zone.zoneId;
 		editName = zone.name;
 		editType = zone.type;
-		editAltitudeMin = zone.altitudeMinM !== undefined ? String(zone.altitudeMinM) : '';
-		editAltitudeMax = zone.altitudeMaxM !== undefined ? String(zone.altitudeMaxM) : '';
+		editAltitudeMin = zone.altitudeMinM;
+		editAltitudeMax = zone.altitudeMaxM;
 	}
 
 	function submitEdit(event: SubmitEvent) {
@@ -69,9 +67,7 @@
 		if (!editingZoneId) return;
 		const trimmed = editName.trim();
 		if (!trimmed) return;
-		const altitudeMinM = editAltitudeMin.trim() ? Number(editAltitudeMin) : undefined;
-		const altitudeMaxM = editAltitudeMax.trim() ? Number(editAltitudeMax) : undefined;
-		zoneStore.requestUpdateZone(editingZoneId, trimmed, editType, altitudeMinM, altitudeMaxM);
+		zoneStore.requestUpdateZone(editingZoneId, trimmed, editType, editAltitudeMin, editAltitudeMax);
 		editingZoneId = undefined;
 	}
 </script>
