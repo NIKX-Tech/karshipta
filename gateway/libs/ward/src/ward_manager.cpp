@@ -336,6 +336,11 @@ std::vector<std::string> WardManager::list_ward_ids() const {
     return ids;
 }
 
+bool WardManager::has_ward(const std::string& ward_id) const {
+    std::lock_guard lock(wards_mutex_);
+    return find_locked(ward_id) != nullptr;
+}
+
 void WardManager::dispatch_command(const karshipta::v1::Command& command) {
     // The rejection ack is built under the lock but broadcast after releasing
     // it: Transport::broadcast is a blocking socket write and must not stall

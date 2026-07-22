@@ -15,6 +15,7 @@ target_link_libraries(karshipta_gateway
             spdlog::spdlog
             ward
             fleet
+            herald
             transport
             karshipta_proto
             karshipta_warnings

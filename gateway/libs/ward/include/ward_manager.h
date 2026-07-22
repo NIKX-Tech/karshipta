@@ -149,6 +149,12 @@ public:
     // Just the ids, no start/connect state; use list_status() for that.
     [[nodiscard]] std::vector<std::string> list_ward_ids() const;
 
+    // True if ward_id is registered here, MAVLink-connected or not. Read-only
+    // query for a sibling ingestion path (HeraldWardManager) to check for a
+    // ward_id collision before registering a non-MAVLink ward under the same
+    // id; this class never calls it itself.
+    [[nodiscard]] bool has_ward(const std::string& ward_id) const;
+
     // Routes command to the CommandExecutor of the ward named
     // command.ward_id(). Synthesizes and broadcasts a REJECTED CommandAck
     // (gateway rule 5: no silent drop) if that ward is unknown, stopped,

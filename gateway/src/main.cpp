@@ -9,6 +9,8 @@
 #include <karshipta/v1/envelope.pb.h>
 
 #include "fleet_manager.h"
+#include "herald_http_server.h"
+#include "herald_ward_manager.h"
 #include "transport.h"
 #include "ward_manager.h"
 #include "websocket_transport.h"
@@ -57,11 +59,17 @@ int main() {
     auto transport = WebsocketTransport::from_config(kNetworkConfigPath);
     auto ward_manager = WardManager::create(*transport, kPersistencePath);
     auto fleet_manager = std::make_unique<FleetManager>(*transport, kFleetZoneDbPath);
+    // Depends on ward_manager (has_ward() rejects an entity_id collision
+    // with a MAVLink ward), so it's constructed after it.
+    auto herald_manager = std::make_unique<HeraldWardManager>(*transport, *ward_manager);
+    auto herald_http = HeraldHttpServer::from_config(kNetworkConfigPath, *herald_manager);
 
-    transport->on_connect([&ward_manager, &fleet_manager](const Transport::ClientId client) {
-        ward_manager->send_ward_info(client);
-        fleet_manager->send_fleet_zone_snapshot(client);
-    });
+    transport->on_connect(
+        [&ward_manager, &fleet_manager, &herald_manager](const Transport::ClientId client) {
+            ward_manager->send_ward_info(client);
+            fleet_manager->send_fleet_zone_snapshot(client);
+            herald_manager->send_known_wards(client);
+        });
 
     transport->on_receive([&ward_manager, &fleet_manager, &transport](
                                const Transport::ClientId client, const std::vector<uint8_t>& bytes) {
@@ -188,6 +196,7 @@ int main() {
         ward_manager->handle_add_ward(seed);
     }
     ward_manager->start_publishing();
+    herald_http->start();
 
     // Runs until externally killed: with a dynamic fleet there's no longer
     // one hardcoded ward whose disconnect should end the process. No

@@ -61,5 +61,6 @@ RUN chown -R karshipta:karshipta /app
 USER karshipta
 
 EXPOSE 8765
+EXPOSE 8766
 
 CMD ["./gateway/build/src/karshipta_gateway"]
