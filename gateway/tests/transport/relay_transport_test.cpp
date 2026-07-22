@@ -118,6 +118,38 @@ TEST(RelayTransport, StopIsIdempotentAndStartAfterStopWorks) {
     fake_relay.stop();
 }
 
+TEST(RelayTransport, DisconnectClosesTheRelayLink) {
+    constexpr uint16_t port = 28775;
+    WebsocketTransport fake_relay(kHost, port);
+    fake_relay.start();
+
+    RelayTransport transport("ws://" + std::string(kHost) + ":" + std::to_string(port),
+                              RelayCredentials{"test-device", ""});
+    Signal connected, disconnected;
+    std::atomic<Transport::ClientId> peer_id{0};
+    transport.on_connect([&](const Transport::ClientId id) {
+        peer_id = id;
+        connected.notify();
+    });
+    transport.on_disconnect([&](Transport::ClientId) { disconnected.notify(); });
+    transport.start();
+    ASSERT_TRUE(connected.wait());
+
+    // Mirrors main.cpp's use after rejecting an oversized frame: closes the
+    // single outbound link, same job WebsocketTransport::disconnect() does
+    // for one client.
+    transport.disconnect(peer_id.load());
+    EXPECT_TRUE(disconnected.wait());
+
+    // Stale/unknown id (including 0, the not-connected sentinel) is a no-op,
+    // not a crash.
+    transport.disconnect(peer_id.load());
+    transport.disconnect(0);
+
+    transport.stop();
+    fake_relay.stop();
+}
+
 TEST(RelayTransport, RoleIsAlwaysOperator) {
     // No per-peer role concept exists yet (see the class comment and
     // transport.h): any client id, connected or not, reads as kOperator.

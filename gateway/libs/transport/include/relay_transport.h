@@ -73,6 +73,14 @@ class RelayTransport final : public Transport {
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Closes the single outbound relay link if `client` matches the current
+    // peer_id_ (there is only ever one peer in this scaffold, see the class
+    // comment). This drops the whole connection, not just one logical peer;
+    // the socket's own Close callback then does the usual peer_id_ reset and
+    // fires on_disconnect. No-op if `client` doesn't match (including 0, the
+    // not-connected sentinel).
+    void disconnect(ClientId client) override;
+
     // Always kOperator: relayly pairing has no per-peer role concept yet
     // (see the class comment), so there is nothing to mark a peer viewer
     // with. Revisit once peer identity exists past the Noise XX handshake.

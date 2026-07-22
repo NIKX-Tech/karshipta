@@ -61,6 +61,7 @@ to tell which one is active.
 | `virtual bool is_running() const` | |
 | `virtual void send(ClientId, const std::vector<uint8_t>&)` | Sends to one client. No-op if that client is no longer connected. |
 | `virtual void broadcast(const std::vector<uint8_t>&)` | Sends to every currently connected client. |
+| `virtual void disconnect(ClientId)` | Forcibly closes one client's connection (e.g. after a protocol violation such as an oversized frame, see `main.cpp`'s `kMaxEnvelopeBytes` check). No-op if that client is no longer connected. `on_disconnect` still fires normally. |
 | `virtual ClientRole role(ClientId) const` | The role a currently-connected client was marked with. `kViewer` (the unprivileged default) for an unknown/disconnected client. |
 | `virtual void on_receive(ReceiveCallback)` | Replaces the current receive callback. |
 | `virtual void on_connect(ConnectCallback)` | Replaces the current connect callback. |
@@ -77,6 +78,7 @@ to tell which one is active.
 | `void stop() override` | Stops the server, clears the client maps, and calls `ix::uninitNetSystem()`. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_`; no-op if not found. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Snapshots the current `shared_ptr<ix::WebSocket>` list under the lock, then sends outside it. |
+| `void disconnect(ClientId) override` | Looks up and copies the `shared_ptr<ix::WebSocket>` for that id under `clients_mutex_` (no-op if not found), then calls `ix::WebSocket::close()` outside it. The server's own Close callback does the `clients_`/`client_ids_`/`client_roles_` cleanup and fires `on_disconnect`, same as a client-initiated close. |
 | `ClientRole role(ClientId) const override` | Looks up `client_roles_` under `clients_mutex_`; `kViewer` if the id is not currently connected. |
 | `const std::string& host() const` / `uint16_t port() const` | Read-only accessors for the address this instance was built with. |
 
@@ -259,6 +261,10 @@ server + real IXWebSocket client on loopback ports, deadline-guarded):
 - `ConnectDeliversFrameAndDisconnectMatchesId`: a client connect fires
   `on_connect`, a `send()` to that id arrives as one binary frame, and the
   disconnect fires `on_disconnect` with the same `ClientId`.
+- `DisconnectClosesConnectionAndFiresOnDisconnect`: a server-initiated
+  `disconnect()` (the path an oversized frame takes) closes the client's
+  socket and still fires `on_disconnect`; a second call on the same,
+  now-gone id is a no-op.
 - `BroadcastReachesEveryClientAndReceiveRoundTrips`: `broadcast()` reaches
   two clients; a client's binary frame reaches `on_receive` intact.
 - `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety.

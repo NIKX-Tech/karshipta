@@ -87,6 +87,7 @@ There is nothing meaningful to load from static config for it yet.
 | `void stop() override` | Closes the connection if open. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | No-op unless `client` matches the current connection id. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Equivalent to `send` to that id: there is only ever one today. |
+| `void disconnect(ClientId) override` | No-op unless `client` matches the current `peer_id_`; otherwise closes the single outbound link (`socket_->stop()`), same as `stop()` does, but leaves `running_` untouched. |
 | `const RelayCredentials& credentials() const` | Read-only accessor; no setter, credentials are fixed for the instance's lifetime. |
 | `ClientRole role(ClientId) const override` | Always `kOperator` (gateway issue #20): relayly pairing has no per-peer role concept yet, so there is nothing to mark a peer viewer with. Revisit once peer identity exists past the Noise XX handshake. |
 
@@ -136,6 +137,9 @@ debug builds).
   `on_receive`.
 - `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety, mirroring the
   equivalent `WebsocketTransport` test.
+- `DisconnectClosesTheRelayLink`: `disconnect()` with the current peer id
+  closes the outbound link and fires `on_disconnect`; a stale or `0` id is a
+  no-op.
 - `FromConfigMissingFileDefaultsToEmptyCredentials`: a nonexistent config
   path logs a warning and still produces a usable, empty-credentialed
   instance.

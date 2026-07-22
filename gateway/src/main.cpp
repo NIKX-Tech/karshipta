@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -24,6 +25,16 @@ constexpr auto kNetworkConfigPath = "gateway/config/gateway.yaml";
 constexpr auto kPersistencePath = "gateway/config/fleet_state.yaml";
 // Same treatment for Fleet/Zone's SQLite store (gateway/.gitignore).
 constexpr auto kFleetZoneDbPath = "gateway/config/fleet_zones.db";
+
+// Upper bound on one inbound frame, checked before ParseFromArray(). Found
+// during the gateway concurrency audit: IXWebSocket (v11.4.5, as vendored)
+// has no maxMessageSize concept at all, so an unbounded client could send one
+// arbitrarily large frame straight into the protobuf parser. No Envelope
+// payload this milestone sends legitimately approaches 1MB (a mission file
+// upload is the largest, and QGC/WPL/plan files for a single ward's mission
+// are orders of magnitude smaller); generous enough not to reject real
+// traffic, small enough to bound the parser's worst case.
+constexpr std::size_t kMaxEnvelopeBytes = 1024 * 1024;
 
 // Which manager owns rejecting a given upstream payload kind while a client
 // is a read-only viewer (gateway issue #20). Kept as one small router here
@@ -73,6 +84,12 @@ int main() {
 
     transport->on_receive([&ward_manager, &fleet_manager, &transport](
                                const Transport::ClientId client, const std::vector<uint8_t>& bytes) {
+        if (bytes.size() > kMaxEnvelopeBytes) {
+            spdlog::warn("client {} sent an oversized frame ({} bytes > {} limit), disconnecting",
+                         client, bytes.size(), kMaxEnvelopeBytes);
+            transport->disconnect(client);
+            return;
+        }
         karshipta::v1::Envelope envelope;
         if (!envelope.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
             spdlog::warn("undecodable {} byte frame from client {}", bytes.size(), client);

@@ -134,6 +134,20 @@ void RelayTransport::send(const ClientId client, const std::vector<uint8_t>& byt
     socket->sendBinary(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
 }
 
+void RelayTransport::disconnect(const ClientId client) {
+    std::shared_ptr<ix::WebSocket> socket;
+    {
+        std::lock_guard lock(peer_mutex_);
+        if (peer_id_ == 0 || peer_id_ != client) return;
+        socket = socket_;
+    }
+    // Unlocked, same reasoning as send(): stop() blocks until the connection
+    // actually closes and must not run while peer_mutex_ is held. The
+    // socket's own Close callback does the peer_id_ reset and fires
+    // on_disconnect, same as any other disconnect.
+    if (socket) socket->stop();
+}
+
 void RelayTransport::broadcast(const std::vector<uint8_t>& bytes) {
     ClientId id;
     {
