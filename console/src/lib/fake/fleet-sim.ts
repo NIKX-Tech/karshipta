@@ -38,11 +38,12 @@ import type { LatLon } from '$lib/geolocation';
  * on patrol around the PX4 SITL default home.
  */
 
-// PX4 SITL default home (Zurich Irchel), so the fake fleet and the real
-// docker-compose demo appear in the same place on the map.
-const HOME_LAT_DEG = 47.397742;
-const HOME_LON_DEG = 8.545594;
-const HOME_ALT_MSL_M = 488;
+// Amsterdam (Dam Square), overridden from PX4 SITL's own Zurich default via
+// PX4_HOME_LAT/PX4_HOME_LON in deploy/docker-compose.yml, so the fake fleet
+// and the real docker-compose demo appear in the same place on the map.
+const HOME_LAT_DEG = 52.373;
+const HOME_LON_DEG = 4.8924;
+const HOME_ALT_MSL_M = 0;
 
 const TICK_HZ = 5;
 const TICK_S = 1 / TICK_HZ;

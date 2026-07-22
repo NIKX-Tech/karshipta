@@ -13,9 +13,19 @@
 # PX4_INSTANCE (or equivalent system_id override) plus a matching
 # per-ward connection_url on the gateway side; out of scope for M6.
 
+# PX4 SITL's own default home position is Zurich (Irchel); overridden here to
+# Amsterdam (Dam Square) so a real SITL ward and the console's fake demo
+# fleet (console/src/lib/fake/fleet-sim.ts) show up in the same place on the
+# map. Respected by the SIH simulator mode this project uses
+# (etc/init.d-posix/px4-rc.sihsim inside the image).
+x-px4-home: &px4-home
+  PX4_HOME_LAT: "52.373"
+  PX4_HOME_LON: "4.8924"
+
 services:
   sitl-1:
     image: px4io/px4-sitl:latest
+    environment: *px4-home
     ports:
       # 14540/udp is not published here: the gateway service claims that
       # host port for itself below, since sitl-1's own MAVLink stream is
@@ -25,12 +35,14 @@ services:
 
   sitl-2:
     image: px4io/px4-sitl:latest
+    environment: *px4-home
     ports:
       - "14541:14540/udp"
       - "14551:14550/udp"
 
   sitl-3:
     image: px4io/px4-sitl:latest
+    environment: *px4-home
     ports:
       - "14542:14540/udp"
       - "14552:14550/udp"

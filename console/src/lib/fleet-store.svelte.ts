@@ -69,7 +69,7 @@ const GATEWAY_URL_STORAGE_KEY = 'karshipta.gatewayUrl';
  * now needs to reproduce a ward where the operator actually put it -
  * respawning N wards with no location silently drops them all back to
  * FAKE_FLEET_CENTER, which is what happened before this fix (deploy in
- * Amsterdam, refresh, ward is back in Zurich).
+ * Rotterdam, refresh, ward is back in Amsterdam).
  */
 const DEMO_WARD_HOMES_STORAGE_KEY = 'karshipta.demoWardHomes';
 

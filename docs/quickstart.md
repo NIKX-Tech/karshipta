@@ -13,7 +13,9 @@ the README's quickstart is enough; skip this page.
 ## 1. Start a simulated ward (PX4 SITL)
 
 ```sh
-docker run --rm -it -p 14550:14550/udp px4io/px4-sitl:latest
+docker run --rm -it -p 14550:14550/udp \
+  -e PX4_HOME_LAT=52.373 -e PX4_HOME_LON=4.8924 \
+  px4io/px4-sitl:latest
 ```
 
 Leave this running. Only 14550 is published: SITL's own MAVLink stream to
@@ -24,6 +26,12 @@ proxy binds that host port for itself, so a natively run gateway (which
 needs to bind that same host port to listen for SITL's stream) fails with
 "Address already in use" if it's published. Wait for
 `INFO [px4] Startup script returned successfully` before moving on.
+
+`PX4_HOME_LAT`/`PX4_HOME_LON` override PX4's own default home position
+(Zurich) to Amsterdam, matching the console's fake demo fleet
+(console/src/lib/fake/fleet-sim.ts) and deploy/docker-compose.yml, so a
+real SITL ward and the simulated one show up in the same place on the
+map.
 
 ## 2. Build and run the gateway
 

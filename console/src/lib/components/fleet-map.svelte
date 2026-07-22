@@ -286,7 +286,7 @@
 		// basemap/theme change as a reason to tear the whole map down and
 		// rebuild it from these original values (losing the operator's pan/zoom
 		// and snapping back to whatever centerLat/centerLon were at mount,
-		// e.g. always Zurich for a caller passing FAKE_FLEET_CENTER). The
+		// e.g. always Amsterdam for a caller passing FAKE_FLEET_CENTER). The
 		// tile-swap effect further down is the sole thing that should react to
 		// basemapTiles changing.
 		const { lat, lon, tiles } = untrack(() => ({
