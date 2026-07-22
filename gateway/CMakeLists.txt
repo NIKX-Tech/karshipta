@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(karshipta_gateway LANGUAGES CXX)
+# C is enabled alongside CXX because cpp-httplib's own CMakeLists.txt
+# (fetched below for Herald ingestion, github issue #101) probes for
+# optional C dependencies (zlib, brotli) via enable_language(C) inside a
+# nested scope; without C already configured at this top-level project()
+# call, that nested enable_language() call leaves CMAKE_C_COMPILE_OBJECT
+# and friends unset ("CMake Generate step failed", seen building the
+# gateway Docker image on a fresh toolchain with no prior CMake cache).
+project(karshipta_gateway LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
