@@ -4,7 +4,6 @@
 
 #include "ward_manager.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -202,6 +201,29 @@ karshipta::v1::CommandAck make_rejected_ack(const karshipta::v1::Command& comman
     return ack;
 }
 
+// Free-function counterparts of WardManager::broadcast_command_ack()/
+// broadcast_rejection_event(), taking Transport& explicitly instead of
+// reading transport_ off `this`. make_executor()'s ack callback calls these
+// directly (never the WardManager member functions of the same name)
+// specifically so that callback never captures `this` at all; the member
+// functions below just delegate to these for every other caller.
+void emit_command_ack(Transport& transport, const karshipta::v1::CommandAck& ack) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_command_ack() = ack;
+    transport.broadcast(serialize_envelope(envelope));
+}
+
+void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck& ack) {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_ward_id(ack.ward_id());
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code("COMMAND_REJECTED");
+    event->set_message(ack.message());
+    transport.broadcast(serialize_envelope(envelope));
+}
+
 }  // namespace
 
 WardManager::WardManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
@@ -216,35 +238,52 @@ std::unique_ptr<WardManager> WardManager::create(Transport& tp,
 
 WardManager::~WardManager() {
     // See the header comment: force_stop() in particular runs for up to
-    // kForceStopLandingTimeoutS with wards_mutex_ released, holding a raw
-    // ManagedWard*. Waiting here for every busy flag to clear guarantees
-    // managed_wards_ never gets torn down out from under one of those
-    // unlocked windows.
-    std::unique_lock lock(wards_mutex_);
-    busy_cv_.wait(lock, [this] {
-        return std::none_of(managed_wards_.begin(), managed_wards_.end(),
-                             [](const auto& entry) { return entry.second.busy; });
-    });
+    // kForceStopLandingTimeoutS with no lock held, holding a
+    // shared_ptr<ManagedWard>. Snapshotting every ward once (structural
+    // lock) and then waiting for each one's own busy flag to clear
+    // guarantees managed_wards_ never gets torn down out from under one of
+    // those unlocked windows. No shared condition_variable spans this: busy
+    // now lives in N per-ward mutexes, so each is polled on its own mutex_
+    // instead, acceptable since this runs once, at shutdown, never on a hot
+    // path.
+    std::vector<std::shared_ptr<ManagedWard>> wards;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards.reserve(managed_wards_.size());
+        for (const auto& [id, ward] : managed_wards_) {
+            wards.push_back(ward);
+        }
+    }
+    for (const auto& ward : wards) {
+        std::unique_lock lock(ward->mutex_);
+        while (ward->busy) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            lock.lock();
+        }
+    }
 }
 
-ManagedWard* WardManager::find_locked(const std::string& ward_id) {
+std::shared_ptr<ManagedWard> WardManager::find_shared_locked(const std::string& ward_id) const {
+    std::lock_guard lock(wards_mutex_);
     const auto it = managed_wards_.find(ward_id);
-    return it == managed_wards_.end() ? nullptr : &it->second;
-}
-
-const ManagedWard* WardManager::find_locked(const std::string& ward_id) const {
-    const auto it = managed_wards_.find(ward_id);
-    return it == managed_wards_.end() ? nullptr : &it->second;
+    return it == managed_wards_.end() ? nullptr : it->second;
 }
 
 std::unique_ptr<CommandExecutor> WardManager::make_executor(ManagedWard& ward) {
+    // Captures &transport_, never `this` (see the header comment on this
+    // method): keeps this callback safe to invoke even if a CommandExecutor
+    // outlives WardManager itself. Calls the free functions above (not the
+    // WardManager member functions of the same name) precisely because it
+    // must not touch `this`.
+    Transport* transport = &transport_;
     return std::make_unique<CommandExecutor>(
         *ward.actions, *ward.telemetry, *ward.mission,
-        [this](const karshipta::v1::CommandAck& ack) {
-            broadcast_command_ack(ack);
+        [transport](const karshipta::v1::CommandAck& ack) {
+            emit_command_ack(*transport, ack);
             // rejected commands are events a human should see (gateway rule 5)
             if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
-                broadcast_rejection_event(ack);
+                emit_rejection_event(*transport, ack);
             }
         });
 }
@@ -255,29 +294,19 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg,
         return "ward_id is empty";
     }
 
-    std::lock_guard lock(wards_mutex_);
-    if (managed_wards_.contains(cfg.ward_id)) {
-        return "ward_id '" + cfg.ward_id + "' already registered";
-    }
-    // system_id 0 means "first autopilot" (fleet.proto), so zeros are not
-    // identities and must not collide with each other.
-    if (cfg.system_id != 0) {
-        for (const auto& [id, ward] : managed_wards_) {
-            if (ward.config.system_id == cfg.system_id) {
-                return "system_id " + std::to_string(cfg.system_id) +
-                       " already bound to ward_id '" + id + "'";
-            }
-        }
-    }
-
     spdlog::debug("add_ward: building object graph for '{}' (system_id={}, url={})",
                   cfg.ward_id, cfg.system_id, cfg.connection_url);
 
-    // Each object below binds to the previous one by reference, so they must be
-    // built in this order: connection first, then telemetry/actions/mission off
-    // of it, then the executor off of those. None of this connects to the
-    // ward yet (WardConnection's constructor only stores state); that
-    // happens when start() launches the reconnect worker.
+    // Built entirely without wards_mutex_: constructing this object graph
+    // touches nothing shared (each object only binds to the previous one by
+    // reference; WardConnection's constructor only stores state, it does
+    // not connect), so there is nothing here for another thread to observe
+    // or race against. The duplicate-ward_id/duplicate-system_id checks
+    // that used to run before this build now run AFTER it, under the lock,
+    // right next to the insert itself (see below) - checking before an
+    // unlocked build would leave a window for two concurrent add_ward_impl
+    // calls to both pass the check and then both try to insert the same
+    // ward_id.
     const std::optional<uint32_t> expected_system_id =
         cfg.system_id == 0 ? std::nullopt : std::optional<uint32_t>{cfg.system_id};
     auto connection =
@@ -287,25 +316,35 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg,
     auto mission = std::make_unique<WardMission>(*connection);
     auto mission_importer = std::make_unique<MissionImporter>(*connection);
 
-    ManagedWard managed{
-        .config = cfg,
-        .connection = std::move(connection),
-        .telemetry = std::move(telemetry),
-        .actions = std::move(actions),
-        .mission = std::move(mission),
-        .mission_importer = std::move(mission_importer),
-        // Explicit even though these match ManagedWard's own default
-        // member initializers (nullptr, false, not-joinable): gcc/clang's
-        // -Wmissing-field-initializers (part of -Wextra) flags a designated
-        // initializer that doesn't reach the struct's last member, even when
-        // the skipped ones have in-class defaults. executor is filled in
-        // below since it needs a reference to `managed` itself.
-        .executor = nullptr,
-        .busy = false,
-        .pending_auto_start_mission_id = std::nullopt,
-        .reconnect_worker = {},
-    };
-    managed.executor = make_executor(managed);
+    // make_shared<ManagedWard>() default-constructs the aggregate (mutex_
+    // default-constructs, unique_ptrs to nullptr, busy to false,
+    // reconnect_worker not-joinable), then fields are filled in below;
+    // ManagedWard contains a std::mutex, which is neither copyable nor
+    // movable, so it cannot be built as a local variable and moved/emplaced
+    // the way an earlier version of this function did.
+    auto managed = std::make_shared<ManagedWard>();
+    managed->config = cfg;
+    managed->connection = std::move(connection);
+    managed->telemetry = std::move(telemetry);
+    managed->actions = std::move(actions);
+    managed->mission = std::move(mission);
+    managed->mission_importer = std::move(mission_importer);
+    managed->executor = make_executor(*managed);
+
+    std::lock_guard lock(wards_mutex_);
+    if (managed_wards_.contains(cfg.ward_id)) {
+        return "ward_id '" + cfg.ward_id + "' already registered";
+    }
+    // system_id 0 means "first autopilot" (fleet.proto), so zeros are not
+    // identities and must not collide with each other.
+    if (cfg.system_id != 0) {
+        for (const auto& [id, ward] : managed_wards_) {
+            if (ward->config.system_id == cfg.system_id) {
+                return "system_id " + std::to_string(cfg.system_id) +
+                       " already bound to ward_id '" + id + "'";
+            }
+        }
+    }
 
     managed_wards_.emplace(cfg.ward_id, std::move(managed));
     spdlog::info("ward '{}' registered (system_id={}, total={})", cfg.ward_id, cfg.system_id,
@@ -337,26 +376,27 @@ std::vector<std::string> WardManager::list_ward_ids() const {
 }
 
 bool WardManager::has_ward(const std::string& ward_id) const {
-    std::lock_guard lock(wards_mutex_);
-    return find_locked(ward_id) != nullptr;
+    return find_shared_locked(ward_id) != nullptr;
 }
 
 void WardManager::dispatch_command(const karshipta::v1::Command& command) {
-    // The rejection ack is built under the lock but broadcast after releasing
-    // it: Transport::broadcast is a blocking socket write and must not stall
-    // every other manager call behind a slow client. The accept path below
-    // gets the same treatment: enqueue() synchronously broadcasts its own
-    // ACCEPTED ack, so it must not run while wards_mutex_ is held either.
+    // The rejection ack is built under ward->mutex_ but broadcast after
+    // releasing it: Transport::broadcast is a blocking socket write and must
+    // not stall every other manager call behind a slow client. The accept
+    // path below gets the same treatment: enqueue() synchronously broadcasts
+    // its own ACCEPTED ack, so it must not run while any lock is held either.
+    // find_shared_locked() only takes the structural lock (briefly); every
+    // read/write below is under this one ward's own mutex_, so a slow
+    // command on ward A never blocks a lookup or command for ward B.
+    auto ward = find_shared_locked(command.ward_id());
     std::optional<karshipta::v1::CommandAck> rejection;
     CommandExecutor* executor = nullptr;
-    {
-        std::lock_guard lock(wards_mutex_);
-        auto* ward = find_locked(command.ward_id());
-        if (ward == nullptr) {
-            spdlog::warn("dispatch_command rejected: unknown ward_id '{}'",
-                         command.ward_id());
-            rejection = make_rejected_ack(command, "unknown ward_id: " + command.ward_id());
-        } else if (ward->executor == nullptr) {
+    if (ward == nullptr) {
+        spdlog::warn("dispatch_command rejected: unknown ward_id '{}'", command.ward_id());
+        rejection = make_rejected_ack(command, "unknown ward_id: " + command.ward_id());
+    } else {
+        std::lock_guard lock(ward->mutex_);
+        if (ward->executor == nullptr) {
             spdlog::warn("dispatch_command rejected: ward_id '{}' is stopped",
                          command.ward_id());
             rejection = make_rejected_ack(command, "ward is stopped");
@@ -383,18 +423,18 @@ void WardManager::dispatch_command(const karshipta::v1::Command& command) {
         return;
     }
     executor->enqueue(command);
-    clear_busy_and_notify(command.ward_id());
+    clear_busy(ward);
 }
 
 void WardManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
+    auto ward = find_shared_locked(mission.ward_id());
     std::optional<std::string> rejection_reason;
     WardMission* target = nullptr;
-    {
-        std::lock_guard lock(wards_mutex_);
-        auto* ward = find_locked(mission.ward_id());
-        if (ward == nullptr) {
-            rejection_reason = "unknown ward_id: " + mission.ward_id();
-        } else if (ward->executor == nullptr) {
+    if (ward == nullptr) {
+        rejection_reason = "unknown ward_id: " + mission.ward_id();
+    } else {
+        std::lock_guard lock(ward->mutex_);
+        if (ward->executor == nullptr) {
             rejection_reason = "ward is stopped";
         } else if (ward->busy) {
             rejection_reason = "ward is busy, retry shortly";
@@ -409,19 +449,19 @@ void WardManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
         return;
     }
     target->enqueue_upload(mission);
-    clear_busy_and_notify(mission.ward_id());
+    clear_busy(ward);
 }
 
 std::optional<std::string> WardManager::dispatch_mission_upload_and_start(
     const karshipta::v1::Mission& mission) {
+    auto ward = find_shared_locked(mission.ward_id());
     std::optional<std::string> rejection_reason;
     WardMission* target = nullptr;
-    {
-        std::lock_guard lock(wards_mutex_);
-        auto* ward = find_locked(mission.ward_id());
-        if (ward == nullptr) {
-            rejection_reason = "unknown ward_id: " + mission.ward_id();
-        } else if (ward->executor == nullptr) {
+    if (ward == nullptr) {
+        rejection_reason = "unknown ward_id: " + mission.ward_id();
+    } else {
+        std::lock_guard lock(ward->mutex_);
+        if (ward->executor == nullptr) {
             rejection_reason = "ward is stopped";
         } else if (ward->busy) {
             rejection_reason = "ward is busy, retry shortly";
@@ -438,20 +478,20 @@ std::optional<std::string> WardManager::dispatch_mission_upload_and_start(
         return rejection_reason;
     }
     target->enqueue_upload(mission);
-    clear_busy_and_notify(mission.ward_id());
+    clear_busy(ward);
     return std::nullopt;
 }
 
 void WardManager::handle_mission_file_upload(const karshipta::v1::MissionFileUpload& upload) {
+    auto ward = find_shared_locked(upload.ward_id());
     std::optional<std::string> rejection_reason;
     MissionImporter* importer = nullptr;
     WardMission* target = nullptr;
-    {
-        std::lock_guard lock(wards_mutex_);
-        auto* ward = find_locked(upload.ward_id());
-        if (ward == nullptr) {
-            rejection_reason = "unknown ward_id: " + upload.ward_id();
-        } else if (ward->executor == nullptr) {
+    if (ward == nullptr) {
+        rejection_reason = "unknown ward_id: " + upload.ward_id();
+    } else {
+        std::lock_guard lock(ward->mutex_);
+        if (ward->executor == nullptr) {
             rejection_reason = "ward is stopped";
         } else if (ward->busy) {
             rejection_reason = "ward is busy, retry shortly";
@@ -471,23 +511,23 @@ void WardManager::handle_mission_file_upload(const karshipta::v1::MissionFileUpl
     if (!mission) {
         spdlog::warn("mission file import rejected for {}: {}", upload.ward_id(), reason);
         broadcast_mission_event(upload.ward_id(), "MISSION_IMPORT_REJECTED", reason);
-        clear_busy_and_notify(upload.ward_id());
+        clear_busy(ward);
         return;
     }
     target->enqueue_upload(std::move(*mission));
-    clear_busy_and_notify(upload.ward_id());
+    clear_busy(ward);
 }
 
 void WardManager::handle_mission_download_request(
     const karshipta::v1::MissionDownloadRequest& request) {
+    auto ward = find_shared_locked(request.ward_id());
     std::optional<std::string> rejection_reason;
     WardMission* target = nullptr;
-    {
-        std::lock_guard lock(wards_mutex_);
-        auto* ward = find_locked(request.ward_id());
-        if (ward == nullptr) {
-            rejection_reason = "unknown ward_id: " + request.ward_id();
-        } else if (ward->executor == nullptr) {
+    if (ward == nullptr) {
+        rejection_reason = "unknown ward_id: " + request.ward_id();
+    } else {
+        std::lock_guard lock(ward->mutex_);
+        if (ward->executor == nullptr) {
             rejection_reason = "ward is stopped";
         } else if (ward->busy) {
             rejection_reason = "ward is busy, retry shortly";
@@ -502,7 +542,7 @@ void WardManager::handle_mission_download_request(
         return;
     }
     target->enqueue_download();
-    clear_busy_and_notify(request.ward_id());
+    clear_busy(ward);
 }
 
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
@@ -584,20 +624,11 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
 }
 
 void WardManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
-    karshipta::v1::Envelope envelope;
-    *envelope.mutable_command_ack() = ack;
-    transport_.broadcast(serialize_envelope(envelope));
+    emit_command_ack(transport_, ack);
 }
 
 void WardManager::broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const {
-    karshipta::v1::Envelope envelope;
-    auto* event = envelope.mutable_event();
-    event->set_ward_id(ack.ward_id());
-    event->set_timestamp_ms(unix_epoch_ms());
-    event->set_severity(karshipta::v1::SEVERITY_WARNING);
-    event->set_code("COMMAND_REJECTED");
-    event->set_message(ack.message());
-    transport_.broadcast(serialize_envelope(envelope));
+    emit_rejection_event(transport_, ack);
 }
 
 void WardManager::broadcast_link_event(const std::string& ward_id, bool connected) const {
@@ -652,12 +683,12 @@ void WardManager::broadcast_fleet_event(const std::string& ward_id, bool added) 
 }
 
 bool WardManager::start(const std::string& ward_id) {
-    std::lock_guard lock(wards_mutex_);
-    auto* ward = find_locked(ward_id);
+    auto ward = find_shared_locked(ward_id);
     if (ward == nullptr) {
         spdlog::warn("start rejected: unknown ward_id '{}'", ward_id);
         return false;
     }
+    std::lock_guard lock(ward->mutex_);
     if (ward->busy) {
         spdlog::warn("start rejected: ward_id '{}' is mid-transition", ward_id);
         return false;
@@ -672,8 +703,18 @@ bool WardManager::start(const std::string& ward_id) {
     if (ward->executor == nullptr) {
         ward->executor = make_executor(*ward);
     }
-    ward->reconnect_worker = std::jthread(
-        [this, ward](std::stop_token stop_token) { run_reconnect_loop(*ward, stop_token); });
+    // Captures a raw pointer, not the shared_ptr itself: reconnect_worker is
+    // one of ManagedWard's own members, so a shared_ptr captured here would
+    // keep the object alive as long as the thread runs, which is exactly
+    // what has to stop and join for the object to ever be destroyed in the
+    // first place, i.e. a self-referential leak/deadlock. The raw pointer is
+    // safe because reconnect_worker's own lifetime is always bounded by
+    // ManagedWard's lifetime (it's a member, declared last so it stops and
+    // joins before anything else in the struct is torn down).
+    ManagedWard* raw_ward = ward.get();
+    ward->reconnect_worker = std::jthread([this, raw_ward](std::stop_token stop_token) {
+        run_reconnect_loop(*raw_ward, stop_token);
+    });
     return true;
 }
 
@@ -693,11 +734,11 @@ void WardManager::persist_locked() const {
     YAML::Node wards(YAML::NodeType::Sequence);
     for (const auto& [id, ward] : managed_wards_) {
         YAML::Node entry;
-        entry["ward_id"] = ward.config.ward_id;
-        entry["connection_url"] = ward.config.connection_url;
-        entry["mavlink_system_id"] = ward.config.system_id;
-        entry["name"] = ward.config.name;
-        entry["ward_class"] = karshipta::v1::WardClass_Name(ward.config.ward_class);
+        entry["ward_id"] = ward->config.ward_id;
+        entry["connection_url"] = ward->config.connection_url;
+        entry["mavlink_system_id"] = ward->config.system_id;
+        entry["name"] = ward->config.name;
+        entry["ward_class"] = karshipta::v1::WardClass_Name(ward->config.ward_class);
         wards.push_back(entry);
     }
     root["wards"] = wards;
@@ -784,9 +825,9 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
     while (!stop_token.stop_requested()) {
         std::vector<std::vector<uint8_t>> frames;
         // Deferred so broadcast_mission_event()/broadcast_mission_download()
-        // (blocking socket writes) never run while wards_mutex_ is held,
-        // same rule as everywhere else in this file. mission set means
-        // "broadcast this download"; otherwise code/message carry an event.
+        // (blocking socket writes) never run while any lock is held, same
+        // rule as everywhere else in this file. mission set means "broadcast
+        // this download"; otherwise code/message carry an event.
         struct DeferredMissionBroadcast {
             std::string ward_id;
             std::optional<karshipta::v1::Mission> mission;
@@ -794,77 +835,96 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
             std::string message;
         };
         std::vector<DeferredMissionBroadcast> deferred_mission_broadcasts;
-        // ward_id + executor to enqueue a synthetic RTL command on, once
+        // ward + executor to enqueue a synthetic RTL command on, once
         // unlocked; mirrors dispatch_command's busy-then-unlocked-enqueue
         // pattern so a concurrent remove_ward() can't destroy the executor
-        // out from under this deferred call.
-        std::vector<std::pair<std::string, CommandExecutor*>> pending_rtl;
+        // out from under this deferred call. Keeps the ward's shared_ptr
+        // (not just its id) so clear_busy() can clear busy directly on it
+        // afterward, without a second lookup.
+        std::vector<std::pair<std::shared_ptr<ManagedWard>, CommandExecutor*>> pending_rtl;
         // Same deferred-unlocked-enqueue shape as pending_rtl, but for a
         // fleet mission assignment's auto-start (see
         // ManagedWard::pending_auto_start_mission_id): populated below when
         // a ward's own just-drained upload result matches the mission_id it
         // was armed with.
-        std::vector<std::pair<std::string, CommandExecutor*>> pending_start;
+        std::vector<std::pair<std::shared_ptr<ManagedWard>, CommandExecutor*>> pending_start;
+
+        std::vector<std::shared_ptr<ManagedWard>> wards;
         {
-            // Cheap in-memory work only (TelemetryInfo's/WardMission's
-            // getters are cached reads, not MAVSDK round-trips): safe to
-            // build every frame while holding the lock. The broadcast itself
-            // is not, so it happens after releasing it below.
+            // Structural lock only, held briefly: copies every ward's
+            // shared_ptr, which is what keeps each one alive for the rest of
+            // this tick independent of a concurrent remove_ward() erasing it
+            // from the map mid-tick. TelemetryInfo's/WardMission's getters
+            // below are cached reads (not MAVSDK round-trips) that guard
+            // their own internal state already, so none of this needs
+            // wards_mutex_ held any longer than this copy.
             std::lock_guard lock(wards_mutex_);
-            frames.reserve(managed_wards_.size());
-            for (auto& [id, ward] : managed_wards_) {
-                karshipta::v1::Envelope state_envelope;
-                *state_envelope.mutable_ward_state() =
-                    build_ward_state(id, *ward.connection, *ward.telemetry);
-                frames.push_back(serialize_envelope(state_envelope));
+            wards.reserve(managed_wards_.size());
+            for (const auto& [id, ward] : managed_wards_) {
+                wards.push_back(ward);
+            }
+        }
+        frames.reserve(wards.size());
+        for (const auto& ward : wards) {
+            const std::string& id = ward->config.ward_id;
+            karshipta::v1::Envelope state_envelope;
+            *state_envelope.mutable_ward_state() =
+                build_ward_state(id, *ward->connection, *ward->telemetry);
+            frames.push_back(serialize_envelope(state_envelope));
 
-                if (!ward.mission) continue;  // always built by add_ward_impl; defensive only
+            if (!ward->mission) continue;  // always built by add_ward_impl; defensive only
 
-                // Only once something has actually been uploaded (get_progress()'s
-                // own documented default), so wards with no mission don't
-                // spam empty progress frames every tick.
-                const auto progress = ward.mission->get_progress();
-                if (!progress.mission_id().empty()) {
-                    karshipta::v1::Envelope progress_envelope;
-                    *progress_envelope.mutable_mission_progress() = progress;
-                    frames.push_back(serialize_envelope(progress_envelope));
+            // Only once something has actually been uploaded (get_progress()'s
+            // own documented default), so wards with no mission don't
+            // spam empty progress frames every tick.
+            const auto progress = ward->mission->get_progress();
+            if (!progress.mission_id().empty()) {
+                karshipta::v1::Envelope progress_envelope;
+                *progress_envelope.mutable_mission_progress() = progress;
+                frames.push_back(serialize_envelope(progress_envelope));
+            }
+
+            if (ward->mission->take_pending_return_to_launch()) {
+                // Only the busy check-and-set below needs this ward's own
+                // mutex_; everything else touched on this ward in this loop
+                // is a cached, self-synchronized read that needs no lock
+                // (see ManagedWard's header comment).
+                std::lock_guard vlock(ward->mutex_);
+                if (ward->executor != nullptr && !ward->busy) {
+                    ward->busy = true;
+                    pending_rtl.emplace_back(ward, ward->executor.get());
+                } else {
+                    // Narrow race (ward mid-transition exactly when its
+                    // final pass completed): the flag is already consumed
+                    // by take_pending_return_to_launch() and cannot be
+                    // retried. Logged so it's at least observable.
+                    spdlog::warn(
+                        "ward '{}' mission finished pending return-to-launch, but the "
+                        "ward is busy or stopped; return-to-launch not sent this cycle",
+                        id);
                 }
+            }
 
-                if (ward.mission->take_pending_return_to_launch()) {
-                    if (ward.executor != nullptr && !ward.busy) {
-                        ward.busy = true;
-                        pending_rtl.emplace_back(id, ward.executor.get());
-                    } else {
-                        // Narrow race (ward mid-transition exactly when its
-                        // final pass completed): the flag is already consumed
-                        // by take_pending_return_to_launch() and cannot be
-                        // retried. Logged so it's at least observable.
-                        spdlog::warn(
-                            "ward '{}' mission finished pending return-to-launch, but the "
-                            "ward is busy or stopped; return-to-launch not sent this cycle",
-                            id);
-                    }
-                }
+            if (const auto upload_result = ward->mission->take_upload_result()) {
+                // A fleet mission assignment arms pending_auto_start_mission_id
+                // before enqueuing its upload; consume it here regardless of
+                // outcome so a failed upload never leaves a stale armed
+                // mission_id behind for some later, unrelated upload to
+                // accidentally match. pending_auto_start_mission_id and the
+                // busy check-and-set below both live under ward->mutex_, so
+                // both are folded into one locked scope rather than two
+                // separate acquisitions.
+                bool auto_start = false;
+                {
+                    std::lock_guard vlock(ward->mutex_);
+                    auto_start = ward->pending_auto_start_mission_id &&
+                                 *ward->pending_auto_start_mission_id == upload_result->mission_id;
+                    if (auto_start) ward->pending_auto_start_mission_id.reset();
 
-                if (const auto upload_result = ward.mission->take_upload_result()) {
-                    // A fleet mission assignment arms this before enqueuing
-                    // its upload; consume it here regardless of outcome so a
-                    // failed upload never leaves a stale armed mission_id
-                    // behind for some later, unrelated upload to accidentally
-                    // match.
-                    const bool auto_start = ward.pending_auto_start_mission_id &&
-                                             *ward.pending_auto_start_mission_id ==
-                                                 upload_result->mission_id;
-                    if (auto_start) ward.pending_auto_start_mission_id.reset();
-
-                    if (upload_result->result != mavsdk::Mission::Result::Success) {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
-                             WardMission::result_name(upload_result->result)});
-                    } else if (auto_start) {
-                        if (ward.executor != nullptr && !ward.busy) {
-                            ward.busy = true;
-                            pending_start.emplace_back(id, ward.executor.get());
+                    if (upload_result->result == mavsdk::Mission::Result::Success && auto_start) {
+                        if (ward->executor != nullptr && !ward->busy) {
+                            ward->busy = true;
+                            pending_start.emplace_back(ward, ward->executor.get());
                         } else {
                             // Narrow race (ward stopped/mid-transition in the
                             // instant between the upload landing and this
@@ -877,40 +937,45 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
                         }
                     }
                 }
+                if (upload_result->result != mavsdk::Mission::Result::Success) {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
+                         WardMission::result_name(upload_result->result)});
+                }
+            }
 
-                if (auto download_result = ward.mission->take_download_result()) {
-                    if (download_result->mission) {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::move(download_result->mission), "", ""});
-                    } else {
-                        deferred_mission_broadcasts.push_back(
-                            {id, std::nullopt, "MISSION_DOWNLOAD_REJECTED", download_result->message});
-                    }
+            if (auto download_result = ward->mission->take_download_result()) {
+                if (download_result->mission) {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::move(download_result->mission), "", ""});
+                } else {
+                    deferred_mission_broadcasts.push_back(
+                        {id, std::nullopt, "MISSION_DOWNLOAD_REJECTED", download_result->message});
                 }
             }
         }
         for (const auto& frame : frames) {
             transport_.broadcast(frame);
         }
-        for (auto& [ward_id, executor] : pending_rtl) {
+        for (auto& [ward, executor] : pending_rtl) {
             karshipta::v1::Command rtl;
-            rtl.set_command_id("gateway-mission-rtl-" + ward_id + "-" +
+            rtl.set_command_id("gateway-mission-rtl-" + ward->config.ward_id + "-" +
                                 std::to_string(unix_epoch_ms()));
-            rtl.set_ward_id(ward_id);
+            rtl.set_ward_id(ward->config.ward_id);
             rtl.set_timestamp_ms(unix_epoch_ms());
             rtl.mutable_rtl();
             executor->enqueue(rtl);
-            clear_busy_and_notify(ward_id);
+            clear_busy(ward);
         }
-        for (auto& [ward_id, executor] : pending_start) {
+        for (auto& [ward, executor] : pending_start) {
             karshipta::v1::Command start;
-            start.set_command_id("gateway-fleet-mission-start-" + ward_id + "-" +
+            start.set_command_id("gateway-fleet-mission-start-" + ward->config.ward_id + "-" +
                                   std::to_string(unix_epoch_ms()));
-            start.set_ward_id(ward_id);
+            start.set_ward_id(ward->config.ward_id);
             start.set_timestamp_ms(unix_epoch_ms());
             start.mutable_start_mission();
             executor->enqueue(start);
-            clear_busy_and_notify(ward_id);
+            clear_busy(ward);
         }
         for (auto& broadcast : deferred_mission_broadcasts) {
             if (broadcast.mission) {
@@ -929,17 +994,21 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
         std::shared_ptr<mavsdk::System> system;
         karshipta::v1::WardClass ward_class;
     };
-    // Snapshot cheap values under the lock, then release it before the
-    // per-ward work below: query_firmware_version() is a blocking MAVSDK
-    // round-trip, not cached state, and transport_.send() is a blocking
-    // socket write - neither may run while wards_mutex_ is held, or every
-    // other WardManager call stalls behind one client connect.
+    // Snapshot cheap values under the structural lock, then release it
+    // before the per-ward work below: query_firmware_version() is a
+    // blocking MAVSDK round-trip, not cached state, and transport_.send()
+    // is a blocking socket write - neither may run while any lock is held,
+    // or every other WardManager call stalls behind one client connect.
+    // connection->get_system() guards its own internal state (see
+    // WardConnection), so no ward->mutex_ is needed here at all: only
+    // reconnect_worker/executor/busy/pending_auto_start_mission_id live
+    // behind that.
     std::vector<Snapshot> snapshots;
     {
         std::lock_guard lock(wards_mutex_);
         snapshots.reserve(managed_wards_.size());
         for (const auto& [id, ward] : managed_wards_) {
-            snapshots.push_back({id, ward.connection->get_system(), ward.config.ward_class});
+            snapshots.push_back({id, ward->connection->get_system(), ward->config.ward_class});
         }
     }
     for (const auto& snapshot : snapshots) {
@@ -981,28 +1050,20 @@ void WardManager::stop_worker(ManagedWard& ward) {
     if (!ward.reconnect_worker.joinable()) {
         return;
     }
-    // Joining under wards_mutex_ is deliberate: other threads read
-    // joinable() under the lock, so the join must not race them. Worst case
-    // it blocks ~3s (a discovery attempt is not stop-token-interruptible).
-    // Not moved unlocked: std::jthread::joinable()/join() are not safe to
-    // call concurrently on the same object from different threads, so an
-    // unlocked join here would race is_started()/list_status()'s locked
-    // joinable() reads on this exact object. A real fix needs a per-ward
-    // mutex (finer than wards_mutex_), which is a larger change than this
-    // pass's scope; the ~3s worst case is accepted for now.
+    // Joining under ward.mutex_ is deliberate: other threads read joinable()
+    // on this same ward under that same mutex, so the join must not race
+    // them (std::jthread::joinable()/join() are not safe to call
+    // concurrently on the same object from different threads). Worst case
+    // this blocks ~3s (a discovery attempt is not stop-token-interruptible)
+    // - but now only for THIS ward's own mutex_, not the fleet-wide
+    // wards_mutex_, so no other ward's calls are affected.
     ward.reconnect_worker.request_stop();
     ward.reconnect_worker.join();
 }
 
-void WardManager::clear_busy_and_notify(const std::string& ward_id) {
-    std::lock_guard lock(wards_mutex_);
-    if (auto* v = find_locked(ward_id)) {
-        v->busy = false;
-    }
-    // Unconditional: ~WardManager()'s wait must re-evaluate even when the
-    // ward that just finished was erased by this same transition (a
-    // successful remove_ward_impl()), not just when a flag actually flips.
-    busy_cv_.notify_all();
+void WardManager::clear_busy(const std::shared_ptr<ManagedWard>& ward) {
+    std::lock_guard lock(ward->mutex_);
+    ward->busy = false;
 }
 
 std::optional<std::string> WardManager::verify_grounded_and_disarm(
@@ -1026,7 +1087,7 @@ std::optional<std::string> WardManager::verify_grounded_and_disarm(
         return std::nullopt;
     }
 
-    std::lock_guard lock(wards_mutex_);
+    std::lock_guard lock(ward.mutex_);
     ward.executor = make_executor(ward);
     if (!link_ok) return "link dropped during transition";
     if (!grounded) return "ward took off during transition";
@@ -1034,15 +1095,14 @@ std::optional<std::string> WardManager::verify_grounded_and_disarm(
 }
 
 bool WardManager::stop(const std::string& ward_id) {
-    ManagedWard* ward = nullptr;
+    auto ward = find_shared_locked(ward_id);
+    if (ward == nullptr) {
+        spdlog::warn("stop rejected: unknown ward_id '{}'", ward_id);
+        return false;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(wards_mutex_);
-        ward = find_locked(ward_id);
-        if (ward == nullptr) {
-            spdlog::warn("stop rejected: unknown ward_id '{}'", ward_id);
-            return false;
-        }
+        std::lock_guard lock(ward->mutex_);
         if (ward->busy) {
             spdlog::warn("stop rejected: ward_id '{}' is mid-transition", ward_id);
             return false;
@@ -1070,9 +1130,11 @@ bool WardManager::stop(const std::string& ward_id) {
         ward->busy = true;
         retired_executor = std::move(ward->executor);
     }
-    // busy is set: no other transition can start, remove_ward cannot erase
-    // this entry, so `ward` stays valid across the unlocked phases below.
-    ScopeExit clear_busy{[this, &ward_id] { clear_busy_and_notify(ward_id); }};
+    // busy is set: no other transition on this ward can start, and
+    // remove_ward cannot erase this entry, so `ward` (kept alive by our own
+    // shared_ptr copy regardless) stays usable across the unlocked phases
+    // below.
+    ScopeExit busy_guard{[this, &ward] { clear_busy(ward); }};
 
     // Unlocked: joins the executor worker (may be mid-MAVSDK-call for
     // seconds) and broadcasts rejection acks for whatever was still queued.
@@ -1085,7 +1147,7 @@ bool WardManager::stop(const std::string& ward_id) {
         return false;
     }
 
-    std::lock_guard lock(wards_mutex_);
+    std::lock_guard lock(ward->mutex_);
     stop_worker(*ward);
     spdlog::info("ward_id '{}' stopped", ward_id);
     return true;
@@ -1098,15 +1160,14 @@ void WardManager::stop_all() {
 }
 
 bool WardManager::force_stop(const std::string& ward_id) {
-    ManagedWard* ward = nullptr;
+    auto ward = find_shared_locked(ward_id);
+    if (ward == nullptr) {
+        spdlog::warn("force_stop rejected: unknown ward_id '{}'", ward_id);
+        return false;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(wards_mutex_);
-        ward = find_locked(ward_id);
-        if (ward == nullptr) {
-            spdlog::warn("force_stop rejected: unknown ward_id '{}'", ward_id);
-            return false;
-        }
+        std::lock_guard lock(ward->mutex_);
         if (ward->busy) {
             spdlog::warn("force_stop rejected: ward_id '{}' is mid-transition", ward_id);
             return false;
@@ -1114,7 +1175,7 @@ bool WardManager::force_stop(const std::string& ward_id) {
         ward->busy = true;
         retired_executor = std::move(ward->executor);
     }
-    ScopeExit clear_busy{[this, &ward_id] { clear_busy_and_notify(ward_id); }};
+    ScopeExit busy_guard{[this, &ward] { clear_busy(ward); }};
 
     retired_executor.reset();  // unlocked; see stop()
 
@@ -1155,7 +1216,7 @@ bool WardManager::force_stop(const std::string& ward_id) {
             std::this_thread::sleep_for(kReconnectPollInterval);
         }
         if (!safe_on_ground) {
-            std::lock_guard lock(wards_mutex_);
+            std::lock_guard lock(ward->mutex_);
             ward->executor = make_executor(*ward);
             spdlog::error("force_stop timed out for ward_id '{}': not confirmed landed and "
                           "disarmed within {}s; monitoring stays active",
@@ -1168,7 +1229,7 @@ bool WardManager::force_stop(const std::string& ward_id) {
     // stop(); taking the ward offline is the whole point of force_stop.
     (void)disarm_if_armed(ward_id, *ward);
 
-    std::lock_guard lock(wards_mutex_);
+    std::lock_guard lock(ward->mutex_);
     stop_worker(*ward);
     spdlog::warn("ward_id '{}' force-stopped", ward_id);
     return true;
@@ -1181,40 +1242,57 @@ void WardManager::force_stop_all() {
 }
 
 bool WardManager::is_started(const std::string& ward_id) const {
-    std::lock_guard lock(wards_mutex_);
-    const auto* ward = find_locked(ward_id);
-    return ward != nullptr && ward->reconnect_worker.joinable();
+    auto ward = find_shared_locked(ward_id);
+    if (ward == nullptr) {
+        return false;
+    }
+    std::lock_guard lock(ward->mutex_);
+    return ward->reconnect_worker.joinable();
 }
 
 bool WardManager::is_connected(const std::string& ward_id) const {
-    std::lock_guard lock(wards_mutex_);
-    const auto* ward = find_locked(ward_id);
+    // connection->is_connected() guards its own internal state (see
+    // WardConnection), so no ward->mutex_ is needed here at all: only
+    // reconnect_worker/executor/busy/pending_auto_start_mission_id live
+    // behind that.
+    auto ward = find_shared_locked(ward_id);
     return ward != nullptr && ward->connection->is_connected();
 }
 
 std::vector<WardStatus> WardManager::list_status() const {
-    std::lock_guard lock(wards_mutex_);
+    std::vector<std::shared_ptr<ManagedWard>> wards;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards.reserve(managed_wards_.size());
+        for (const auto& [id, ward] : managed_wards_) {
+            wards.push_back(ward);
+        }
+    }
     std::vector<WardStatus> statuses;
-    statuses.reserve(managed_wards_.size());
-    for (const auto& [id, ward] : managed_wards_) {
+    statuses.reserve(wards.size());
+    for (const auto& ward : wards) {
+        bool started = false;
+        {
+            std::lock_guard lock(ward->mutex_);
+            started = ward->reconnect_worker.joinable();
+        }
         statuses.push_back(WardStatus{
-            .ward_id = id,
-            .started = ward.reconnect_worker.joinable(),
-            .connected = ward.connection->is_connected(),
+            .ward_id = ward->config.ward_id,
+            .started = started,
+            .connected = ward->connection->is_connected(),
         });
     }
     return statuses;
 }
 
 std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward_id) {
-    ManagedWard* ward = nullptr;
+    auto ward = find_shared_locked(ward_id);
+    if (ward == nullptr) {
+        return "unknown ward_id: " + ward_id;
+    }
     std::unique_ptr<CommandExecutor> retired_executor;
     {
-        std::lock_guard lock(wards_mutex_);
-        ward = find_locked(ward_id);
-        if (ward == nullptr) {
-            return "unknown ward_id: " + ward_id;
-        }
+        std::lock_guard lock(ward->mutex_);
         if (ward->busy) {
             return "ward is mid-transition";
         }
@@ -1230,7 +1308,7 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
         ward->busy = true;
         retired_executor = std::move(ward->executor);
     }
-    ScopeExit clear_busy{[this, &ward_id] { clear_busy_and_notify(ward_id); }};
+    ScopeExit busy_guard{[this, &ward] { clear_busy(ward); }};
 
     retired_executor.reset();  // unlocked; see stop()
 
@@ -1238,21 +1316,31 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
         return *error;
     }
 
-    // extract(), not erase(): erase() would destroy the ManagedWard (and
-    // therefore run WardConnection::~WardConnection() -> mavsdk's
-    // remove_connection(), TelemetryInfo::~TelemetryInfo()'s unsubscribe, and
-    // WardMission::~WardMission()'s own worker join) right here, under
-    // wards_mutex_. None of those calls are bounded or interruptible, so
-    // one slow teardown would stall every other ward's dispatch_command,
-    // the publish tick, and add/remove requests behind this lock. extract()
-    // only relocates the node out of the map (same out-of-lock-destruction
-    // idea as retired_executor above); `node` actually destructs once it goes
-    // out of scope below, after the lock has already been released.
-    std::map<std::string, ManagedWard>::node_type node;
+    // Structural lock outer, this ward's own mutex_ inner (the documented
+    // lock order): stop_worker() needs the latter, erase() needs the
+    // former. ward->mutex_ is released again before erase(): erasing from
+    // the map needs no state that lock guards, and this keeps the
+    // structural lock's hold time as short as possible.
+    //
+    // A plain erase() here is correct, not a regression of an earlier fix
+    // that used std::map::extract() instead: that version's map held
+    // ManagedWard BY VALUE, so erase() would destroy the object (running
+    // WardConnection::~WardConnection() -> mavsdk's remove_connection(),
+    // TelemetryInfo::~TelemetryInfo()'s unsubscribe, WardMission::
+    // ~WardMission()'s own worker join, all unbounded) right here, under
+    // the lock, stalling the whole fleet. Now the map holds
+    // shared_ptr<ManagedWard>: erase() only drops the map's reference. The
+    // local `ward` variable above still holds its own shared_ptr copy, so
+    // the object is not destroyed by this erase() call - it is destroyed
+    // later, when `ward` goes out of scope at the end of this function,
+    // which happens after every lock here has already released.
     {
         std::lock_guard lock(wards_mutex_);
-        stop_worker(*ward);
-        node = managed_wards_.extract(ward_id);
+        {
+            std::lock_guard vlock(ward->mutex_);
+            stop_worker(*ward);
+        }
+        managed_wards_.erase(ward_id);
         persist_locked();
         spdlog::info("ward_id '{}' removed (total={})", ward_id, managed_wards_.size());
     }

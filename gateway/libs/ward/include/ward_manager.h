@@ -5,7 +5,6 @@
 #ifndef KARSHIPTA_GATEWAY_WARD_MANAGER_H
 #define KARSHIPTA_GATEWAY_WARD_MANAGER_H
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <filesystem>
 #include <map>
@@ -39,11 +38,34 @@ struct WardConfig {
     std::string name;
 };
 
+// One ward's full object graph plus its own transition state. Held by
+// WardManager as a shared_ptr (see managed_wards_): a lookup copies the
+// shared_ptr under the structural lock and releases it immediately, so one
+// ward's slow teardown never blocks a lookup for any other ward.
+//
+// Lifetime invariant: nothing may retain a copy of this shared_ptr beyond the
+// synchronous scope of the call that obtained it (no background thread, no
+// member field elsewhere). Every current call site follows this already
+// (dispatch_command, the handle_mission_*/dispatch_mission_upload_and_start
+// methods, run_publish_loop's per-tick snapshot, and ~WardManager()'s own
+// snapshot all let their copy go out of scope before returning/sleeping).
+// This is what lets ~WardManager() bound this object's true lifetime to
+// managed_wards_'s own destruction: relax this invariant and a lingering
+// copy could keep a ward (and its CommandExecutor's worker thread) alive
+// past WardManager's own teardown.
 struct ManagedWard {
     // The config this ward was built from (persistence and WardInfo both
     // read this instead of asking WardConnection, so neither needs a live
     // connection to answer). config.system_id replaces a standalone field.
+    // Set once at construction, never reassigned: safe to read without
+    // mutex_.
     WardConfig config;
+    // Pointers below are set once at construction and never reassigned; the
+    // pointee's own thread-safety (WardConnection/TelemetryInfo/etc. each
+    // guard their own internal state) is what protects concurrent use, not
+    // this struct. Only executor is ever reassigned after construction,
+    // which is why it (along with busy, pending_auto_start_mission_id, and
+    // reconnect_worker) lives under mutex_ below instead of alongside these.
     std::unique_ptr<WardConnection> connection;
     std::unique_ptr<TelemetryInfo> telemetry;
     std::unique_ptr<WardActions> actions;
@@ -57,15 +79,23 @@ struct ManagedWard {
     // so its position relative to `mission`/`executor` doesn't matter for
     // build order, unlike the rest of this quartet.
     std::unique_ptr<MissionImporter> mission_importer;
+
+    // Guards executor/busy/pending_auto_start_mission_id/reconnect_worker
+    // below: this ward's own transition state, independent of every other
+    // ward's. Lock order: WardManager::wards_mutex_ (structural:
+    // managed_wards_ itself) before this, never the other way; nothing ever
+    // holds two different wards' mutex_ at once. Mutable so const query
+    // methods (is_started(), etc.) can lock a const ManagedWard&.
+    mutable std::mutex mutex_;
     // Null while the ward is stopped or a transition is quiescing it;
-    // dispatch_command() rejects commands in that window. Written only under
-    // WardManager::wards_mutex_.
+    // dispatch_command() rejects commands in that window. Guarded by mutex_.
     std::unique_ptr<CommandExecutor> executor;
     // True while a stop()/force_stop()/remove_ward() transition is in
     // flight, including its unlocked phases. While set: no other transition
-    // may begin, remove_ward() may not erase this entry, and only the
-    // thread that set it may mutate this struct. Written only under
-    // WardManager::wards_mutex_.
+    // on THIS ward may begin, remove_ward_impl() may not erase this entry
+    // from managed_wards_, and only the thread that set it may mutate
+    // executor/reconnect_worker/pending_auto_start_mission_id. Guarded by
+    // mutex_.
     bool busy = false;
     // Set by dispatch_mission_upload_and_start() alongside the enqueued
     // upload; cleared by run_publish_loop() the moment that mission_id's
@@ -75,12 +105,15 @@ struct ManagedWard {
     // mission assignment cannot safely dispatch StartMissionCommand right
     // after calling it; this flag defers the start until the upload this
     // gateway process itself just kicked off is actually known to have
-    // landed on the ward. Written only under WardManager::wards_mutex_.
+    // landed on the ward. Guarded by mutex_.
     std::optional<std::string> pending_auto_start_mission_id;
     // Last: its loop calls connection->connect_with_retry()/is_connected() on
     // every iteration, so it must stop and join before connection (and the
     // other members above it) are torn down. Empty (not joinable) until
-    // WardManager::start() launches it.
+    // WardManager::start() launches it. Guarded by mutex_ (every
+    // joinable()/request_stop()/join() call site takes mutex_ first;
+    // std::jthread's joinable()/join() are not safe to call concurrently on
+    // the same object from two threads without this).
     std::jthread reconnect_worker;
 };
 
@@ -94,8 +127,15 @@ struct WardStatus {
 };
 
 // Owns the fleet: one ManagedWard per configured ward, all sharing one
-// Mavsdk core. All public methods are thread-safe (wards_mutex_); no
-// pointer or reference into the internal map ever escapes the lock.
+// Mavsdk core. All public methods are thread-safe. Locking is two-level:
+// wards_mutex_ is structural only (managed_wards_'s map shape: insert,
+// erase, lookup), always fast; each ward's own transition state (busy,
+// executor, reconnect_worker) lives behind that ward's own ManagedWard::
+// mutex_, so one ward's slow teardown or reconnect-join never blocks any
+// other ward's calls. No raw pointer or reference into the internal map
+// ever escapes wards_mutex_; find_shared_locked() returns a shared_ptr
+// copy instead, which is what keeps a ward alive for the duration of an
+// unlocked call even if it's concurrently removed from the map.
 class WardManager {
 public:
     // Default publish interval for start_publishing(): BRIEF.md M2's ~5Hz
@@ -115,21 +155,29 @@ public:
     // should use.
     static std::unique_ptr<WardManager> create(Transport& tp,
                                                     std::filesystem::path persistence_path = {});
-    // Blocks until no ward is mid-transition (busy) before letting
-    // managed_wards_ destruct: force_stop() in particular spends up to
-    // kForceStopLandingTimeoutS unlocked, holding a raw ManagedWard*, and
-    // without this wait a concurrent destructor could free that ward out
-    // from under it. Once every transition has quiesced, managed_wards_
-    // destroys each ManagedWard's members in reverse declaration order:
+    // Snapshots every currently registered ward (structural lock, once),
+    // then waits for each one's own busy flag to clear before letting it go:
+    // force_stop() in particular spends up to kForceStopLandingTimeoutS
+    // unlocked, holding a shared_ptr<ManagedWard>, and without this wait a
+    // concurrent destructor could tear that ward down out from under it.
+    // No shared condition_variable spans this (busy now lives in N per-
+    // ward mutexes, which a single condition_variable's one-mutex contract
+    // can't wait across); each ward is polled on its own mutex_ instead,
+    // acceptable because this runs once, at shutdown, never on a hot path.
+    // Once every snapshot ward's busy flag has cleared, the local
+    // snapshot's shared_ptrs go out of scope and managed_wards_ destroys
+    // each ManagedWard's members in reverse declaration order:
     // reconnect_worker stops and joins first, then the executor (rejecting
     // whatever it still queued), then mission/actions/telemetry/connection.
-    // This does
-    // NOT proactively RTL wards that were never told to stop; graceful
-    // shutdown of a still-flying, never-force_stop()ped fleet needs main.cpp
-    // to call force_stop_all() before dropping the WardManager, which
-    // isn't wired up yet (no signal handling exists in main.cpp today).
+    // This does NOT proactively RTL wards that were never told to stop;
+    // graceful shutdown of a still-flying, never-force_stop()ped fleet needs
+    // main.cpp to call force_stop_all() before dropping the WardManager,
+    // which isn't wired up yet (no signal handling exists in main.cpp today).
     // Callers must not invoke NEW methods concurrently with destruction;
     // that's a normal C++ lifetime rule this class does not attempt to lift.
+    // Relies on the ManagedWard lifetime invariant documented on that
+    // struct: nothing outside this snapshot and managed_wards_ itself may
+    // be holding a shared_ptr<ManagedWard> once this snapshot is taken.
     ~WardManager();
 
     WardManager(const WardManager&) = delete;
@@ -307,15 +355,17 @@ private:
     // Empty disables persistence. Set once at construction, never mutated
     // after, so it's safe to read from any thread without wards_mutex_.
     std::filesystem::path persistence_path_;
-    // Guards managed_wards_ (structure and every element's executor/busy/
-    // reconnect_worker members). Mutable so const query methods can lock.
-    // Lock order: wards_mutex_ before any WardConnection/TelemetryInfo/
-    // WardActions internal mutex; nothing locks in the other direction.
+    // Structural lock: guards managed_wards_'s shape only (insert, erase,
+    // lookup). Does NOT guard any individual ward's busy/executor/
+    // reconnect_worker/pending_auto_start_mission_id; those live behind that
+    // ward's own ManagedWard::mutex_ instead, so this lock is always held
+    // briefly. Mutable so const query methods can lock. Lock order: this
+    // before a ward's ManagedWard::mutex_, and that before any
+    // WardConnection/TelemetryInfo/WardActions internal mutex; nothing
+    // locks in the other direction, and no code ever holds two different
+    // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
-    // Notified whenever a ward's busy flag clears (clear_busy_and_notify);
-    // ~WardManager() waits on this until no ward is busy.
-    mutable std::condition_variable busy_cv_;
-    std::map<std::string, ManagedWard> managed_wards_;
+    std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
     // Shared across the whole fleet, unlike reconnect_worker (one per
     // ward): the publish tick is cheap in-memory work for every ward
     // back to back, not I/O-bound work that benefits from its own thread per
@@ -324,15 +374,18 @@ private:
     // every tick.
     std::jthread publish_worker_;
 
-    // Lookup while holding wards_mutex_. The returned pointer is only
-    // valid under the lock, or between lock windows of a transition that has
-    // set busy on that ward (busy blocks erase).
-    [[nodiscard]] ManagedWard* find_locked(const std::string& ward_id);
-    [[nodiscard]] const ManagedWard* find_locked(const std::string& ward_id) const;
+    // Copies the shared_ptr for ward_id under wards_mutex_ (briefly) and
+    // returns it; nullptr if unknown. The returned ward stays valid for as
+    // long as the caller holds this copy, independent of whether it's
+    // concurrently erased from managed_wards_ by another thread. Callers
+    // must not retain the returned shared_ptr beyond the synchronous scope
+    // of the call that obtained it (see ManagedWard's lifetime invariant).
+    [[nodiscard]] std::shared_ptr<ManagedWard> find_shared_locked(
+        const std::string& ward_id) const;
 
     // Reason-returning cores (nullopt = success) shared by the bool public
     // methods (which log) and the handle_* wire entry points (which put the
-    // reason in the ack). Both take wards_mutex_ themselves.
+    // reason in the ack).
     // should_persist=false is only for load_persisted(), which is
     // reconstructing entries already on disk and must not rewrite the file
     // once per entry while doing so.
@@ -351,13 +404,21 @@ private:
 
     // Builds the CommandExecutor wired to broadcast its acks; shared by
     // add_ward_impl() and every path that restores a retired executor.
+    // Captures &transport_ directly, never `this`: a CommandExecutor's
+    // worker thread can outlive WardManager itself if some other
+    // shared_ptr<ManagedWard> copy is (incorrectly) still held elsewhere
+    // when WardManager is destroyed, and this callback must stay safe to
+    // invoke even then. transport_'s referent is guaranteed by the whole
+    // system's construction order (main.cpp builds Transport before
+    // WardManager) to outlive it regardless.
     [[nodiscard]] std::unique_ptr<CommandExecutor> make_executor(ManagedWard& ward);
 
-    // Clears ward_id's busy flag (no-op if the ward was erased in the
-    // meantime, e.g. by remove_ward_impl's own success path) and always
-    // notifies busy_cv_, so ~WardManager()'s wait re-evaluates even when
-    // the ward that just finished no longer exists to be found.
-    void clear_busy_and_notify(const std::string& ward_id);
+    // Clears ward's busy flag under ward->mutex_. Takes the shared_ptr
+    // directly (not a ward_id to re-look-up): the caller already holds a
+    // copy from before the busy window began, and using it here means this
+    // works correctly even if the ward has since been erased from
+    // managed_wards_ (e.g. remove_ward_impl's own success path).
+    void clear_busy(const std::shared_ptr<ManagedWard>& ward);
 
     // Shared epilogue for stop() and remove_ward_impl(), called once the
     // ward's executor has already been retired (so no command can race
@@ -410,18 +471,20 @@ private:
     // drop, so it's re-requested on every reconnect, not just the first),
     // waits while connected, and on drop connects again, until stop_token is
     // cancelled. Touches only ward.connection, ward.telemetry, and
-    // ward.config, so it never needs wards_mutex_ (joining under the
-    // lock cannot deadlock).
+    // ward.config, so it never needs any lock at all (joining under
+    // ward.mutex_ cannot deadlock).
     void run_reconnect_loop(ManagedWard& ward, std::stop_token stop_token);
 
     // No-op (returns true) if ward isn't armed; otherwise attempts to
-    // disarm and returns whether it succeeded. Precondition: caller holds
-    // wards_mutex_ OR has set ward.busy (the pointees it reads are
-    // stable either way). Blocking MAVSDK call; prefer calling it unlocked.
+    // disarm and returns whether it succeeded. Precondition: caller has set
+    // ward.busy (the pointees it reads are stable while busy holds).
+    // Blocking MAVSDK call; prefer calling it unlocked.
     [[nodiscard]] bool disarm_if_armed(const std::string& ward_id, ManagedWard& ward);
 
     // Requests reconnect_worker to stop and joins it; no-op if not running.
-    // Must be called under wards_mutex_ (other threads read joinable()).
+    // Must be called under ward.mutex_ (other threads read joinable() on
+    // this same ward under that same mutex; std::jthread's joinable()/
+    // join() are not safe to call concurrently on one object without it).
     void stop_worker(ManagedWard& ward);
 };
 
