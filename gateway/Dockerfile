@@ -8,10 +8,28 @@
 # ubuntu:22.04 for both stages, matching the exact recipe already proven in
 # .github/workflows/ci.yml's gateway job (same MAVSDK release asset,
 # libspdlog-dev, protobuf-compiler, libprotobuf-dev).
+#
+# --platform=linux/amd64 is pinned on both FROM lines because MAVSDK's
+# GitHub releases ship an arm64 .deb for Debian, but not for any Ubuntu
+# version, so this image cannot be built natively on an arm64 host (Apple
+# Silicon, arm64 Linux): apt would fail unpacking the amd64 .deb with
+# "package architecture (amd64) does not match system (arm64)". Pinning
+# amd64 here runs the build (and the resulting container) under emulation
+# on such a host instead of failing outright, at some performance cost. A
+# native arm64 image would need a Debian base or building MAVSDK from
+# source, both bigger changes than this demo Dockerfile is set up for.
 
-FROM ubuntu:22.04 AS builder
+FROM --platform=linux/amd64 ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Herald ingestion (github issue #101) added cpp-httplib as a FetchContent
+# dependency; its release zip contains a non-ASCII path, and this base
+# image has no locale configured at all, so cmake's archive extraction
+# fails with "Pathname cannot be converted from UTF-8 to current locale"
+# without this. C.UTF-8 is a minimal locale glibc ships built in, so this
+# needs no extra apt package.
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -36,7 +54,7 @@ COPY gateway/libs/ gateway/libs/
 RUN cmake -S gateway -B gateway/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && cmake --build gateway/build -j "$(nproc)"
 
-FROM ubuntu:22.04 AS runtime
+FROM --platform=linux/amd64 ubuntu:22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
