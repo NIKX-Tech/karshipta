@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { wardClassToJSON, WardOrigin } from '$lib/gen/karshipta/v1/common';
+	import { wardClassToJSON } from '$lib/gen/karshipta/v1/common';
 	import { fleet } from '$lib/fleet-store.svelte';
-	import { formatBatteryLabel, formatModeLabel, formatGpsLabel } from '$lib/ward-format';
+	import { formatBatteryLabel, formatGpsLabel } from '$lib/ward-format';
 	import CommandPanel from '$lib/components/command-panel.svelte';
 	import MissionPanel from '$lib/components/mission-panel.svelte';
 
@@ -29,39 +29,26 @@
 	const ward = $derived(fleet.wards[wardId]);
 	const info = $derived(ward?.info);
 	const state = $derived(ward?.state);
-	// See ward-card.svelte: no autopilot behind this ward at all, not
-	// SITL (a real autopilot binary flying simulated physics).
-	const synthetic = $derived(info?.origin === WardOrigin.WARD_ORIGIN_SYNTHETIC);
 	const wardClassLabel = $derived(
 		info ? wardClassToJSON(info.wardClass).replace(WARD_CLASS_PREFIX, '').toLowerCase() : undefined
 	);
 
-	const modeLabel = $derived(formatModeLabel(state?.flight));
-	const batteryLabel = $derived(formatBatteryLabel(state?.battery));
 	const gpsLabel = $derived(formatGpsLabel(state?.gps));
+	const batteryLabel = $derived(formatBatteryLabel(state?.battery));
 	const groundSpeed = $derived(
 		state?.velocity ? Math.hypot(state.velocity.northMS, state.velocity.eastMS) : undefined
 	);
 </script>
 
 <div class="flex flex-col gap-3">
-	<header class="flex items-center gap-2">
-		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
-		{#if synthetic}
-			<span
-				class="text-[10px] font-medium tracking-widest text-synthetic"
-				title="No autopilot behind this ward; demo telemetry standing in for one"
-			>
-				SIM
-			</span>
-		{/if}
-		{#if state?.flight?.armed}
-			<span class="text-[10px] font-medium tracking-widest text-armed">ARMED</span>
-		{/if}
-	</header>
-
+	<!-- Identity, mode, ARMED, and battery percentage already live in the
+	     always-visible ward-status-strip.svelte above this scrollable body -
+	     repeating them here just cost vertical space for no new information.
+	     Voltage and the raw connected/health_ok booleans still get their own
+	     rows below since the strip only encodes those two through the link
+	     dot's color, not as text. -->
 	{#if info}
-		<p class="-mt-2 text-[10px] text-fg-muted">
+		<p class="text-[10px] text-fg-muted">
 			{info.autopilot}
 			{info.firmwareVersion} &middot; {wardClassLabel}
 		</p>
@@ -69,9 +56,13 @@
 
 	{#if state}
 		<dl class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-			{#if modeLabel}
-				<dt class="text-fg-muted">Mode</dt>
-				<dd class="font-medium">{modeLabel}</dd>
+			<dt class="text-fg-muted">Health</dt>
+			<dd class={state.healthOk ? '' : 'text-critical'}>{state.healthOk ? 'OK' : 'fault'}</dd>
+			<dt class="text-fg-muted">Battery</dt>
+			<dd class="font-mono tabular-nums">{batteryLabel}</dd>
+			{#if state.flight}
+				<dt class="text-fg-muted">Airborne</dt>
+				<dd class="font-medium">{state.flight.inAir ? 'in air' : 'grounded'}</dd>
 			{/if}
 			<dt class="text-fg-muted">Alt rel</dt>
 			<dd class="font-mono tabular-nums">{state.position?.altitudeRelM.toFixed(1) ?? '?'} m</dd>
@@ -83,8 +74,6 @@
 			</dd>
 			<dt class="text-fg-muted">Heading</dt>
 			<dd class="font-mono tabular-nums">{state.headingDeg.toFixed(0)}&deg;</dd>
-			<dt class="text-fg-muted">Battery</dt>
-			<dd class="font-mono tabular-nums">{batteryLabel}</dd>
 			<dt class="text-fg-muted">GPS</dt>
 			<dd class="font-mono tabular-nums">
 				{gpsLabel} &middot; {state.gps?.numSatellites ?? 0} sat
