@@ -1,11 +1,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include <spdlog/spdlog.h>
+#include <yaml-cpp/yaml.h>
 
 #include <karshipta/v1/envelope.pb.h>
 
@@ -16,6 +19,10 @@
 #include "ward_manager.h"
 #include "websocket_transport.h"
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_RELAY
+#include "relay_transport.h"
+#endif
+
 namespace {
 // Both relative to the repo root, matching how the binary is documented to
 // be run (docs/quickstart-windows.md, gateway/CLAUDE.local.md).
@@ -25,6 +32,62 @@ constexpr auto kNetworkConfigPath = "gateway/config/gateway.yaml";
 constexpr auto kPersistencePath = "gateway/config/fleet_state.yaml";
 // Same treatment for Fleet/Zone's SQLite store (gateway/.gitignore).
 constexpr auto kFleetZoneDbPath = "gateway/config/fleet_zones.db";
+// Default when gateway.yaml's relay.credentials_path is unset; secrets, so
+// gitignored, unlike gateway.yaml itself (see relay_credentials.yaml.example).
+constexpr auto kDefaultRelayCredentialsPath = "gateway/config/relay_credentials.yaml";
+
+// Reads gateway.yaml's top-level `transport` field to decide which Transport
+// implementation to construct: "websocket" (default, and the fallback for
+// anything unrecognized) or "relay" (gateway/docs/relay-transport.md). Only
+// ever returns a RelayTransport when this binary was actually built with
+// KARSHIPTA_GATEWAY_ENABLE_RELAY=ON; logs and falls back to websocket
+// otherwise, matching every other config-parsing failure mode in this file
+// (observable, never a hard crash over a config problem).
+std::unique_ptr<Transport> build_transport(const std::string& config_path) {
+    std::string mode = "websocket";
+    std::string relay_url;
+    std::string relay_credentials_path = kDefaultRelayCredentialsPath;
+
+    std::error_code exists_error;
+    if (std::filesystem::exists(config_path, exists_error) && !exists_error) {
+        try {
+            const YAML::Node root = YAML::LoadFile(config_path);
+            if (root["transport"]) mode = root["transport"].as<std::string>();
+            if (const YAML::Node relay = root["relay"]; relay) {
+                if (relay["url"]) relay_url = relay["url"].as<std::string>();
+                if (relay["credentials_path"])
+                    relay_credentials_path = relay["credentials_path"].as<std::string>();
+            }
+        } catch (const YAML::Exception& parse_error) {
+            spdlog::error(
+                "failed to parse gateway config '{}': {}; defaulting to websocket transport",
+                config_path, parse_error.what());
+        }
+    }
+
+    if (mode == "relay") {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_RELAY
+        if (relay_url.empty()) {
+            spdlog::error(
+                "transport: relay but gateway.yaml has no relay.url set; falling back to "
+                "websocket");
+        } else {
+            spdlog::info("transport: relay ({}), credentials from '{}'", relay_url,
+                         relay_credentials_path);
+            return RelayTransport::from_config(relay_url, relay_credentials_path);
+        }
+#else
+        spdlog::error(
+            "transport: relay requested but this binary was not built with "
+            "-DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON (see gateway/docs/relay-transport.md); "
+            "falling back to websocket");
+#endif
+    } else if (mode != "websocket") {
+        spdlog::warn("unknown transport '{}' in gateway config; defaulting to websocket", mode);
+    }
+
+    return WebsocketTransport::from_config(config_path);
+}
 
 // Upper bound on one inbound frame, checked before ParseFromArray(). Found
 // during the gateway concurrency audit: IXWebSocket (v11.4.5, as vendored)
@@ -67,7 +130,7 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
 }  // namespace
 
 int main() {
-    auto transport = WebsocketTransport::from_config(kNetworkConfigPath);
+    std::unique_ptr<Transport> transport = build_transport(kNetworkConfigPath);
     auto ward_manager = WardManager::create(*transport, kPersistencePath);
     auto fleet_manager = std::make_unique<FleetManager>(*transport, kFleetZoneDbPath);
     // Depends on ward_manager (has_ward() rejects an entity_id collision
@@ -200,7 +263,18 @@ int main() {
                 break;
         }
     });
-    transport->start();
+    // Only the relay transport can actually throw here (websocket's start()
+    // just begins listening; relay's blocks on a real network handshake and
+    // surfaces a relayly::Error on auth/connect failure, see
+    // gateway/docs/relay-transport.md's "Threading and blocking") - caught
+    // broadly since RelayTransport is conditionally compiled and this path
+    // must build cleanly either way.
+    try {
+        transport->start();
+    } catch (const std::exception& start_error) {
+        spdlog::error("transport failed to start: {}", start_error.what());
+        return 1;
+    }
 
     if (ward_manager->restore_and_start() == 0) {
         // First run, nothing persisted yet: seed the same default SITL

@@ -13,6 +13,7 @@ target_link_libraries(karshipta_gateway
         PRIVATE
             MAVSDK::mavsdk
             spdlog::spdlog
+            yaml-cpp::yaml-cpp
             ward
             fleet
             herald
@@ -20,3 +21,12 @@ target_link_libraries(karshipta_gateway
             karshipta_proto
             karshipta_warnings
 )
+
+# Lets main.cpp #ifdef around RelayTransport: relay_transport.cpp/.h only exist
+# in the transport library's build when this option is on (see root
+# CMakeLists.txt), so main.cpp needs its own compile-time signal to match -
+# referencing RelayTransport unconditionally would fail to link when the
+# option is off.
+if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    target_compile_definitions(karshipta_gateway PRIVATE KARSHIPTA_GATEWAY_ENABLE_RELAY)
+endif()

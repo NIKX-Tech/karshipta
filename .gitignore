@@ -11,6 +11,11 @@ console/src/lib/gen/
 gateway/config/fleet_state.yaml
 gateway/config/fleet_zones.db
 
+# relay device credentials (secrets, provisioned out of band against a real
+# relayly server - never committed; gateway.yaml itself stays safe to commit
+# since it only holds the non-secret relay URL/path to this file)
+gateway/config/relay_credentials.yaml
+
 # local notes
 CLAUDE.local.md
 
