@@ -189,18 +189,21 @@ Not covered by the automated suite above:
    `cmd/relayly`).
 2. Register a device and obtain a `device_token`:
    `relayly pair gateway-1` (or `POST /api/v1/devices`) against that server.
-3. Write `device_id`/`device_token`/`private_key_path` into a YAML file and
-   build a `RelayTransport` from it (`RelayTransport::from_config`), or
-   construct one directly with a `RelayCredentials`.
+3. Write `device_id`/`device_token`/`private_key_path` into a YAML file
+   (`relay_credentials.yaml`, gitignored - see `relay_credentials.yaml.example`)
+   and point `gateway.yaml`'s `relay.credentials_path` at it, or construct a
+   `RelayTransport` directly with a `RelayCredentials`.
 4. Call `start()`; confirm it returns once connected (or logs and returns
    promptly on a deliberately wrong `device_token`, which should surface as
-   a `relayly::Error` with an auth-related message).
-5. From a second device (another `relayly::Client`, or the SDK's own CLI/
-   examples under `examples/` in the relayly repo), call
-   `RequestPairCode`/`AcceptPair` against this gateway's device, confirm
-   `Transport::on_connect` fires here with a `ClientId`, and that
-   `send`/`broadcast` reach the other side and `on_receive` fires for
-   replies.
+   a `relayly::Error` with an auth-related message). Or run
+   `gateway/tools/relay_pair`'s `karshipta_relay_pair`, which does this and
+   the next step together.
+5. Trigger pairing: `gateway/tools/relay_pair`'s `karshipta_relay_pair`
+   requests a code from this device and prints it - accept it from a second
+   device (the console's connection panel in Relay mode, or another
+   `relayly::Client`/the SDK's own CLI). Confirm `Transport::on_connect`
+   fires here with a `ClientId`, and that `send`/`broadcast` reach the other
+   side and `on_receive` fires for replies.
 6. Call `disconnect()` with that `ClientId`; confirm `Transport::on_disconnect`
    fires and the paired peer sees its side of the link close too.
 
@@ -234,18 +237,27 @@ deliberately **not** in `gateway.yaml` itself, unlike `relay.url` - see
 documented as safe to commit; device credentials are secrets and stay
 gitignored.
 
-`request_pair_code`/`accept_pair` still have no operational trigger (a CLI
-flag, `gateway/tools/`, or similar) - pairing today only happens through
-whatever calls `RelayTransport`'s methods directly (tests, or a manual tool
-not yet written). Separate follow-up work.
+`request_pair_code`/`accept_pair` now have an operational trigger:
+`gateway/tools/relay_pair` (`karshipta_relay_pair`, built alongside the
+gateway whenever `KARSHIPTA_GATEWAY_ENABLE_RELAY` is on). It reads the same
+`relay.url`/`relay.credentials_path` as `gateway.yaml`, connects with the
+same device identity the real gateway process will use, requests a pairing
+code, prints it for the operator to type into the console's connection
+panel (Relay mode), and blocks until the console accepts it or the code
+expires. Pairing is server-side durable (see "What relayly handles
+internally" above), so this tool does not need to keep running afterward -
+the real `karshipta_gateway` process, started separately with the same
+`device_id`, picks up the pairing on its own next connect. Usage:
+`./karshipta_relay_pair [path/to/gateway.yaml]` (defaults to
+`gateway/config/gateway.yaml`).
+
+Console-side pairing (`console/src/lib/transport/relay-transport.ts`,
+wrapping relayly's TypeScript SDK) is the other half of a full pairing
+flow and already exists; see `console/src/lib/components/connection-panel.svelte`
+for the UI.
 
 ## Still open
 
-- **A CLI/tool to actually trigger pairing** (`request_pair_code`/
-  `accept_pair`) outside of unit tests - see above.
-- **Console-side pairing UI and the relayly TypeScript SDK as an alternative
-  `Transport`** on the console (`console/src/lib/transport/`) is TypeScript
-  work, tracked separately from this C++ class.
 - **End-to-end verification** (a console commanding a SITL ward through a
-  real relay, with the gateway's own WebSocket bound to `localhost` only) is
-  blocked on both of the above.
+  real relay, with the gateway's own WebSocket bound to `localhost` only) -
+  needs a real relayly server; not yet done.

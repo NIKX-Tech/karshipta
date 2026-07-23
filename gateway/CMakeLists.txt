@@ -68,13 +68,34 @@ endif()
 
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
-# TLS stays off: the local transport is plain ws://, the encrypted path is
-# the M4 relay transport. Zlib (permessage-deflate compression) stays off
-# too: it is optional and not vendored anywhere, so skip the dependency.
+# TLS is on only when relay is: the local transport is plain ws:// on a
+# LAN/localhost, no TLS needed there, but the relay transport dials out to a
+# relay server over the open internet, almost always reached as wss:// in
+# any real deployment (TLS terminated by a reverse proxy in front of the
+# relay server, the standard way public WebSocket services are run). Noise
+# (relayly's own handshake) encrypts the actual payload either way, but
+# without transport-level TLS too, connection metadata (device_id, timing,
+# message sizes) is visible to anyone on the network path, and there is no
+# protection against interference with the connection before the Noise
+# handshake completes - real gap for something framed as a security
+# promise, found by actually trying to connect a relay-enabled build to a
+# wss:// URL and hitting "TLS support is not enabled on this platform".
+# Enabling USE_TLS picks ixwebsocket's own per-platform default backend with
+# no extra configuration needed here: Apple's native SecureTransport on
+# macOS (zero new dependencies), OpenSSL elsewhere (already present on
+# standard Linux CI images) - see ixwebsocket's own CMakeLists.txt. This
+# only affects wss:// connections; ws:// (the local transport) is
+# unaffected either way, ixwebsocket picks TLS per-connection by URL scheme.
+# Zlib (permessage-deflate compression) stays off regardless: optional and
+# not vendored anywhere, so skip the dependency.
 find_package(ixwebsocket CONFIG QUIET)
 if(NOT ixwebsocket_FOUND)
   include(FetchContent)
-  set(USE_TLS OFF CACHE BOOL "" FORCE)
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    set(USE_TLS ON CACHE BOOL "" FORCE)
+  else()
+    set(USE_TLS OFF CACHE BOOL "" FORCE)
+  endif()
   set(USE_ZLIB OFF CACHE BOOL "" FORCE)
   # When relay is enabled, relayly's own CMake also links ixwebsocket (into
   # librelayly.so, a genuine shared library - see relay-transport.md's "Why
@@ -252,6 +273,12 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/fleet)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/herald)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
+
+# Operator CLI for triggering relay pairing (gateway/docs/relay-transport.md);
+# meaningless without RelayTransport itself.
+if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tools/relay_pair)
+endif()
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
 
