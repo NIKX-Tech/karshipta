@@ -10,7 +10,6 @@
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import LeftRail from '$lib/components/left-rail.svelte';
 	import RightPanel from '$lib/components/right-panel.svelte';
-	import EventsFeed from '$lib/components/events-feed.svelte';
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import LocationPickerBar from '$lib/components/location-picker-bar.svelte';
@@ -187,7 +186,6 @@
 				placementPoint={placing ? { latitudeDeg: placeLat, longitudeDeg: placeLon } : undefined}
 			/>
 		{/if}
-		<EventsFeed />
 		<!-- Zone drawing is the one map-click workflow that doesn't need an
 		     existing ward to start (an operator can plan safety areas before
 		     ever adding one); without this guard, EmptyState's centered card

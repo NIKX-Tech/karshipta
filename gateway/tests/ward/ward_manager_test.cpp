@@ -511,9 +511,18 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
         if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     ASSERT_TRUE(connected) << "fake autopilot never discovered";
-    // The fake republishes InAir every 50ms; give the client's TelemetryInfo a
-    // moment to have received at least one of those since connecting.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // The fake republishes InAir every 50ms; poll rather than a fixed sleep,
+    // since a fixed wait races a slow/loaded CI runner: if it fires before
+    // TelemetryInfo has actually cached an in-air reading,
+    // handle_remove_ward() below falls through to the real grounded-removal
+    // path (a genuine blocking MAVSDK disarm RPC against a fake autopilot
+    // that never acks it), hanging until ctest's TIMEOUT kills the test.
+    bool in_air = false;
+    for (int attempt = 0; attempt < 100 && !in_air; ++attempt) {
+        in_air = manager.is_in_air("alpha-air");
+        if (!in_air) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(in_air) << "fake autopilot's in-air state never reached TelemetryInfo";
 
     const auto remove_ack =
         manager.handle_remove_ward(make_remove_request("req-remove", "alpha-air"));

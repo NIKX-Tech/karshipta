@@ -1259,6 +1259,12 @@ bool WardManager::is_connected(const std::string& ward_id) const {
     return ward != nullptr && ward->connection->is_connected();
 }
 
+bool WardManager::is_in_air(const std::string& ward_id) const {
+    std::lock_guard lock(wards_mutex_);
+    const auto* ward = find_locked(ward_id);
+    return ward != nullptr && ward->telemetry->is_in_air();
+}
+
 std::vector<WardStatus> WardManager::list_status() const {
     std::vector<std::shared_ptr<ManagedWard>> wards;
     {

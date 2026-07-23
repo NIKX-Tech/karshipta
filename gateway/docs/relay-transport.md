@@ -7,74 +7,85 @@
 
 `RelayTransport` is the second `Transport` implementation (BRIEF.md M4):
 instead of listening for inbound connections like `WebsocketTransport`, it
-connects outward to a relay service, built on
-[relayly](https://github.com/NIKX-Tech/relayly). Code above `Transport` talks
-to the same interface either way and cannot tell which implementation is
-active.
+connects outward to a relay service, wrapping
+[relayly](https://github.com/NIKX-Tech/relayly)'s own C++ SDK
+(`sdk/cpp`, `relayly::Client`) rather than a raw WebSocket. Code above
+`Transport` talks to the same interface either way and cannot tell which
+implementation is active.
 
-## Scaffold status: not yet functional against a real relay
+Only built when `KARSHIPTA_GATEWAY_ENABLE_RELAY` is `ON` (root
+`gateway/CMakeLists.txt`; `OFF` by default everywhere, and a hard CMake error
+on Windows) - see "Build gating" below.
 
-This class is a scaffold, not a finished relay transport. relayly
-authenticates a device to the relay server with a static identity
-(`device_id` plus an X25519 private key) and then pairs that device with one
-or more peers, each pairing established through a Noise Protocol XX
-handshake authenticated by a pairing token (short code or QR code) exchanged
-out of band; the relay server itself only ever sees opaque encrypted frames
-once paired. None of the handshake or pairing is implemented here yet:
+## What relayly handles internally
 
-- **No Noise XX handshake.** Frames sent and received today are plain
-  WebSocket binary frames, unauthenticated and unencrypted.
-- **No pairing wiring.** `RelayCredentials` (device_id, private_key_path) can
-  be supplied, but nothing is sent over the wire yet; relayly's connect URL
-  shape is `ws://<host>/ws?device_id=<id>&token=<pair-token>` and neither the
-  per-peer pairing token nor that query string is constructed here.
-- **No TLS.** The gateway's `ixwebsocket` dependency is built with
-  `USE_TLS OFF` (see root `gateway/CMakeLists.txt`); a `wss://` relay URL will
-  fail to connect until that is turned on.
+relayly's C++ SDK owns the Noise XX handshake, pairing, peer key pinning, and
+reconnection; `RelayTransport` never touches wire bytes or crypto itself:
 
-BRIEF.md M4 expected relayly's actual pairing spec and device credentials to
-come from Erfan; they have not landed in this repo yet. Do not point
-`RelayTransport` at a real relayly server expecting a paired peer: it will
-either fail the handshake or, worse, exchange frames a real relayly server
-would treat as valid ciphertext.
+- **Auth**: `device_id` + `device_token` (a bearer credential from relayly's
+  `POST /api/v1/devices` or the `relayly pair <name>` CLI, `docs/PROTOCOL.md`
+  §2) authenticate the WebSocket upgrade to the relay server itself.
+- **Identity**: this device's X25519 static keypair (`private_key_path`,
+  loaded or generated via `relayly::PrivateKey::LoadOrGenerate`) is the Noise
+  XX static key, separate from `device_token`.
+- **Pairing**: a 6-digit code (`request_pair_code`/`accept_pair`, both thin
+  wrappers over `relayly::Client`). **v1 links exactly one peer per device**
+  (relayly's own constraint); pairing again replaces whatever was linked
+  before. The relay server remembers the pairing server-side
+  (`docs/PROTOCOL.md` §5.3) and replays it via `welcome`/`peer_status` on
+  every future connect, so pairing is a one-time setup action, not something
+  `start()` does automatically or something a restarted gateway needs to
+  redo.
+- **Peer key pinning**: relayly pins each peer's authenticated static key on
+  first pairing (`~/.relayly/peers.json` by default) and hard-fails a later
+  handshake presenting a different key for the same peer id. `RelayTransport`
+  does not touch this; it is entirely internal to `relayly::Client`.
 
-## Credentials: supplied separately from construction
+## Build gating
 
-`RelayCredentials` (device_id, private_key_path) mirrors relayly's own Go SDK
-`Options` struct so the field names track a real upstream shape rather than
-a guess. A `RelayTransport` can be built two ways:
+`KARSHIPTA_GATEWAY_ENABLE_RELAY` (root `gateway/CMakeLists.txt`) defaults to
+`OFF` everywhere, not just on Windows:
+
+- relayly's C++ SDK is a new dependency tree on top of `ixwebsocket` (already
+  used elsewhere in this repo): libsodium (via libsodium-cmake) and
+  nlohmann/json, fetched automatically by relayly's own CMake. Defaulting
+  this on would silently grow every build's (and CI's) dependency footprint
+  and build time for a transport the M4 milestone explicitly marks optional
+  for v0.1 (`ROADMAP.md`).
+- relayly's C++ SDK v1 does not support Windows at all (its own
+  `sdk/cpp/README.md` Requirements section). Setting
+  `KARSHIPTA_GATEWAY_ENABLE_RELAY=ON` on Windows is a CMake `FATAL_ERROR`,
+  not a silent no-op, so a Windows developer who tries to turn it on gets a
+  clear reason instead of a confusing missing target.
+
+When off, `libs/transport/src/relay_transport.cpp` is not compiled into the
+`transport` library and `tests/transport/relay_transport_test.cpp` is not
+added to the test binary at all (see the `if(KARSHIPTA_GATEWAY_ENABLE_RELAY)`
+guards in both `gateway/CMakeLists.txt` and
+`gateway/libs/transport/CMakeLists.txt`); only `relay_transport.h` still
+exists on disk, unused.
+
+## Credentials
+
+`RelayCredentials` (`device_id`, `private_key_path`, `device_token`) mirrors
+`relayly::Options`'s corresponding fields. A `RelayTransport` can be built
+two ways:
 
 - `RelayTransport(relay_url, credentials)`: pass an already-built
   `RelayCredentials` directly.
-- `RelayTransport::from_config(relay_url, config_path)`: load
-  `device_id`/`private_key_path` from a YAML file at `config_path` (same
-  shape and error-handling pattern as `WardManager`'s fleet persistence:
-  missing file or fields are logged and treated as empty, never fatal).
+- `RelayTransport::from_config(relay_url, config_path)`: load all three
+  fields from a YAML file at `config_path` (same shape and error-handling
+  pattern as `WardManager`'s fleet persistence: missing file or fields are
+  logged and treated as empty, never fatal).
 
-Either way, an all-empty `RelayCredentials` is valid: it keeps
-`RelayTransport` in the same unauthenticated scaffold mode described above.
-This exists so callers (`main.cpp`, tests) can wire up a `RelayTransport`
-today without real credentials existing yet; once Erfan's spec lands, only
-the config file's contents need to change, not the call site.
+An all-empty `RelayCredentials` is valid to construct with, but `start()`
+refuses to connect (logged, not thrown) unless both `device_id` and
+`device_token` are set; `private_key_path` empty falls back to relayly's own
+default (`~/.relayly/device.key`).
 
-The per-peer pairing token is deliberately not part of `RelayCredentials`:
-unlike `device_id`/`private_key`, which are fixed for the device's lifetime,
-a pairing token is obtained per relationship through `RequestPairCode`/
-`AcceptPair`, which requires the still-unimplemented Noise XX handshake.
-There is nothing meaningful to load from static config for it yet.
-
-## Responsibilities (as implemented today)
-
-- Open one outbound WebSocket connection to a configured `relay_url` and
-  assign it a `Transport::ClientId` on connect, mirroring
-  `WebsocketTransport`'s id scheme but for a single underlying link instead
-  of N inbound sockets (see "Design" below for why this id is not yet a real
-  relayly peer id).
-- Fan `on_connect`/`on_receive`/`on_disconnect` out to whoever registered
-  them, with that `ClientId`, never an `ix::` type.
-- Be safe to call `send`/`broadcast` from a different thread than the one
-  that called `start()`: the ix client delivers connect/receive/disconnect
-  events on its own thread.
+`device_id`/`device_token` are provisioned out of band, against a real
+relayly server, before the gateway can use them - there is nothing in this
+repo that mints them.
 
 ## Public API
 
@@ -83,78 +94,120 @@ There is nothing meaningful to load from static config for it yet.
 | `RelayTransport(std::string relay_url, RelayCredentials credentials)` | Configures the relay endpoint and this gateway's relay identity; does not connect yet. An empty `RelayCredentials` is valid. |
 | `RelayTransport::from_config(relay_url, config_path)` | Static factory: builds credentials from a YAML file, defaulting to empty on a missing/unparsable one. |
 | `~RelayTransport()` | Calls `stop()` if still running. |
-| `void start() override` | Opens the outbound WebSocket connection. Logs a warning that no handshake/encryption is implemented yet. |
-| `void stop() override` | Closes the connection if open. |
-| `void send(ClientId, const std::vector<uint8_t>&) override` | No-op unless `client` matches the current connection id. |
-| `void broadcast(const std::vector<uint8_t>&) override` | Equivalent to `send` to that id: there is only ever one today. |
+| `void start() override` | Blocks until `relayly::Client::Connect` completes the control-channel handshake or throws (see "Threading and blocking" below). No-op, logged, if `device_id`/`device_token` are missing or already running. |
+| `void stop() override` | Closes the `relayly::Client` if open. |
+| `void send(ClientId, const std::vector<uint8_t>&) override` | No-op unless `client` matches the currently paired-and-ready peer. Logs and swallows a `relayly::Error` from `Client::Send` (e.g. `kNotReady` mid-reconnect) rather than propagating it. |
+| `void broadcast(const std::vector<uint8_t>&) override` | Equivalent to `send` to the current peer: there is only ever one (v1 constraint). |
 | `const RelayCredentials& credentials() const` | Read-only accessor; no setter, credentials are fixed for the instance's lifetime. |
-| `ClientRole role(ClientId) const override` | Always `kOperator` (gateway issue #20): relayly pairing has no per-peer role concept yet, so there is nothing to mark a peer viewer with. Revisit once peer identity exists past the Noise XX handshake. |
+| `ClientRole role(ClientId) const override` | Always `kOperator`: relayly pairing has no per-peer role concept. |
+| `relayly::PairCode request_pair_code()` | Wraps `Client::RequestPairCode()`. Throws `relayly::Error(kClosed)` if called before `start()` has connected. |
+| `std::future<relayly::Peer> accept_pair(const std::string& code)` | Wraps `Client::AcceptPair(code)`. Throws `relayly::Error(kClosed)` if called before `start()` has connected. |
 
-## Design: one link today, not yet N relayly peers
+`request_pair_code`/`accept_pair` are not part of the `Transport` interface:
+pairing is relay-specific setup, the same way `WebsocketTransport`'s viewer
+query-param handling is WebSocket-specific and not part of `Transport`
+either. Nothing calls them today (see "Not yet wired" below).
 
-relayly itself is not a single-peer protocol: one device (one `device_id` and
-private key) can pair with several peers at once, each identified separately
-and each reachable through `Send(peerID, ...)` (confirmed against relayly's
-Go SDK). That maps naturally onto `Transport::ClientId`, the same way
-`WebsocketTransport` maps each inbound socket to its own id.
+## Mapping relayly's single peer onto Transport::ClientId
 
-`RelayTransport` does not implement that yet, and deliberately does not fake
-it. Peer identity in relayly only exists once a peer completes pairing
-(`AcceptPair`), which depends on the Noise XX handshake this class does not
-have. So today `peer_id_` (0 when disconnected) represents "the single
-outbound WebSocket link to the relay server is up or down", not any specific
-paired peer. Extending this to real per-peer ids is expected to fall out
-naturally once the pairing layer exists: `on_connect`/`ClientId` assignment
-moves from "on WebSocket Open" to "on `AcceptPair` completing for a given
-peer", and `peer_id_` becomes a map keyed by relayly peer id, the same shape
-`WebsocketTransport` already uses for its `clients_` map.
+`Transport::ClientId` is a plain integer scoped to one `Transport` instance.
+relayly identifies peers by string id. `RelayTransport` keeps a single
+optional `(relayly peer id, ClientId)` pair (`current_peer_id_`/
+`assigned_id_`, guarded by `peer_mutex_`), not a map: v1 links exactly one
+peer per device, so there is never more than one to track.
 
-`socket_` is a `shared_ptr<ix::WebSocket>` rather than `unique_ptr` for the
-same reason `WebsocketTransport` stores its clients as `shared_ptr`:
-`send()`/`broadcast()` copy it out from under `peer_mutex_` before calling
-`sendBinary()`, so a concurrent `stop()` clearing `socket_`/`peer_id_` under
-the same lock cannot free the socket out from under an in-flight send.
+- `on_ready(peer_id)`, not `on_peer_status(peer_id, true)`, is what assigns a
+  `ClientId` and fires `Transport::on_connect`: a peer can go online
+  (`peer_status`) before its Noise session is actually ready to `Send()` to,
+  and `on_ready` is relayly's signal for the latter.
+- `on_peer_status(peer_id, false)` clears the assignment and fires
+  `Transport::on_disconnect`.
+- The same peer reconnecting keeps the same `ClientId` (`handle_peer_ready`
+  only allocates a new one when `current_peer_id_` differs from the
+  incoming `peer_id`), matching relayly's own "re-handshake keeps the
+  session logically continuous" model (`docs/PROTOCOL.md` §6).
+- Incoming messages (`on_message`) are only forwarded to
+  `Transport::on_receive` if `message.from` matches the currently assigned
+  peer; a message from any other id (should not happen given the one-peer
+  constraint, but not asserted away) is silently dropped.
 
-## Thread safety
+## Threading and blocking
 
-`peer_mutex_` guards `socket_` and `peer_id_` for every read and write,
-including inside `send()`/`broadcast()`/`stop()`, the same pattern
-`WebsocketTransport` uses for `clients_`/`client_ids_`.
+`start()` calls `relayly::Client::Connect`, which blocks the calling thread
+until the initial control-channel handshake succeeds or throws
+`relayly::Error` (relayly's own documented contract, matching how its quick
+start calls it synchronously from `main`). This differs from
+`WebsocketTransport::start()`, which only begins listening and returns
+immediately - `RelayTransport::start()` is not the same kind of "start", and
+callers (`main.cpp`, once wired) should expect it to take as long as one
+network round trip to the relay server.
 
-`on_receive`/`on_connect`/`on_disconnect` are not synchronized: they must be
-called before `start()`, never while the connection is running (asserted in
-debug builds).
+All `relayly::Options` callbacks (`on_ready`, `on_peer_status`, `on_message`,
+`on_disconnect`, `on_reconnect`) fire on relayly's internal IXWebSocket I/O
+thread, never the thread that called `start()` - `peer_mutex_` guards
+`current_peer_id_`/`assigned_id_` against that thread racing `send()`/
+`broadcast()`/`stop()` called from elsewhere, the same pattern
+`WebsocketTransport` uses for its own client map. `on_receive`/`on_connect`/
+`on_disconnect` registration itself is not synchronized: callbacks must be
+registered before `start()`, never while running (asserted in debug builds).
+
+`Client::Send`, `RequestPairCode`, and `AcceptPair` are safe to call from any
+thread (relayly serializes concurrent writes internally).
 
 ## Automated tests
 
-`gateway/tests/transport/relay_transport_test.cpp`:
+`gateway/tests/transport/relay_transport_test.cpp`, only built when
+`KARSHIPTA_GATEWAY_ENABLE_RELAY` is on. Exercising a live connect or pairing
+flow needs a running relayly server, which this hermetic unit suite
+deliberately does not stand up (the old scaffold's approach of faking the
+relay with a bare `WebsocketTransport` no longer applies now that a real
+protocol - Noise XX plus a JSON control channel - runs on the wire). What is
+covered instead:
 
-- `ConnectsOutSendsAndReceivesFrames`: stands a plain `WebsocketTransport` in
-  for a real relayly server on loopback (there is no Noise handshake to
-  fake, since none exists on either side yet). `RelayTransport` connects
-  out, a `send()` reaches the stand-in relay, and a reply reaches
-  `on_receive`.
-- `StopIsIdempotentAndStartAfterStopWorks`: lifecycle safety, mirroring the
-  equivalent `WebsocketTransport` test.
-- `FromConfigMissingFileDefaultsToEmptyCredentials`: a nonexistent config
-  path logs a warning and still produces a usable, empty-credentialed
-  instance.
-- `FromConfigLoadsFieldsFromFile`: a YAML file with `device_id`/
-  `private_key_path` is loaded into the resulting `credentials()`.
-- `RoleIsAlwaysOperator`: `role()` reads `kOperator` for any client id,
-  connected or not.
+- `RoleIsAlwaysOperator`: `role()` reads `kOperator` for any client id.
+- `StartWithoutDeviceTokenDoesNotConnect` / `StartWithoutDeviceIdDoesNotConnect`:
+  `start()` with incomplete credentials logs and leaves `is_running()` false,
+  without ever reaching the network.
+- `StopWithoutStartIsIdempotent`: lifecycle safety when `stop()` is called
+  without a prior `start()`.
+- `PairingBeforeStartThrows`: `request_pair_code`/`accept_pair` throw
+  `relayly::Error(kClosed)` before `start()` has connected.
+- `FromConfigMissingFileDefaultsToEmptyCredentials` /
+  `FromConfigLoadsFieldsFromFile`: YAML credential loading, including the new
+  `device_token` field.
 
-## Next steps (tracked, not started)
+## Manual verification (requires a live relayly server)
 
-- Get the pairing spec and credentials from Erfan (BRIEF.md M4).
-- Implement the Noise XX handshake, or vendor relayly's protocol library if
-  one becomes available for C++; note relayly's official SDKs today are Go,
-  TypeScript, Python, and Rust, none of which this repo may introduce as a
-  service (root `CLAUDE.md`: "Two languages only: C++ at the edge, TypeScript
-  everywhere else").
-- Once pairing exists, generalize `peer_id_` from a single id to a map of
-  relayly peer id to connection state, so multiple paired peers (e.g.
-  multiple console sessions) are each their own `Transport::ClientId`.
-- Turn on `USE_TLS` for `ixwebsocket` if the relay endpoint requires `wss://`.
-- Decide how `main.cpp` selects between `WebsocketTransport` and
-  `RelayTransport` (config-driven, per `gateway/config/`, most likely).
+Not covered by the automated suite above:
+
+1. Run a relayly server (`docker-compose.yml` in the relayly repo, or
+   `cmd/relayly`).
+2. Register a device and obtain a `device_token`:
+   `relayly pair gateway-1` (or `POST /api/v1/devices`) against that server.
+3. Write `device_id`/`device_token`/`private_key_path` into a YAML file and
+   build a `RelayTransport` from it (`RelayTransport::from_config`), or
+   construct one directly with a `RelayCredentials`.
+4. Call `start()`; confirm it returns once connected (or logs and returns
+   promptly on a deliberately wrong `device_token`, which should surface as
+   a `relayly::Error` with an auth-related message).
+5. From a second device (another `relayly::Client`, or the SDK's own CLI/
+   examples under `examples/` in the relayly repo), call
+   `RequestPairCode`/`AcceptPair` against this gateway's device, confirm
+   `Transport::on_connect` fires here with a `ClientId`, and that
+   `send`/`broadcast` reach the other side and `on_receive` fires for
+   replies.
+
+## Not yet wired (open follow-up work)
+
+- **`main.cpp` does not construct a `RelayTransport` yet.** Only
+  `WebsocketTransport` is wired in today. Deciding how the gateway picks
+  between the two (config-driven, most likely, mirroring
+  `gateway/config/gateway.yaml`) and how/when `request_pair_code`/
+  `accept_pair` get triggered operationally (a CLI flag, `gateway/tools/`,
+  or similar) is separate work.
+- **Console-side pairing UI and the relayly TypeScript SDK as an alternative
+  `Transport`** on the console (`console/src/lib/transport/`) is TypeScript
+  work, tracked separately from this C++ class.
+- **End-to-end verification** (a console commanding a SITL ward through a
+  real relay, with the gateway's own WebSocket bound to `localhost` only) is
+  blocked on both of the above.
