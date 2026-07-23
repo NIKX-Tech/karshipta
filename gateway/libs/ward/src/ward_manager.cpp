@@ -1260,8 +1260,9 @@ bool WardManager::is_connected(const std::string& ward_id) const {
 }
 
 bool WardManager::is_in_air(const std::string& ward_id) const {
-    std::lock_guard lock(wards_mutex_);
-    const auto* ward = find_locked(ward_id);
+    // Same reasoning as is_connected() above: telemetry->is_in_air() guards
+    // its own internal state, not one of the fields behind ward->mutex_.
+    auto ward = find_shared_locked(ward_id);
     return ward != nullptr && ward->telemetry->is_in_air();
 }
 
