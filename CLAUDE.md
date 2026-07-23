@@ -1,6 +1,6 @@
 # CLAUDE.md: Karshipta monorepo
 
-Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones, unmanned vehicles, and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. A ward is any tracked, controlled unit: a flight vehicle today, and any other MAVLink-speaking tracked entity (a livestock GPS tag, a generic tracker) alongside it. Flagship demo: `docker compose up` starts 3 PX4 SITL wards, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
+Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones, unmanned vehicles, and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. A ward is any tracked, controlled unit: a flight vehicle today, plus any other tracked entity alongside it, whether MAVLink-speaking (a generic tracker) or ingested over HTTP via a Herald message (a livestock GPS tag, no command surface, see `gateway/docs/herald-ingest.md`). Flagship demo: `docker compose up` starts 3 PX4 SITL wards, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
 
 Owned by NIKX Technologies B.V. License: AGPL-3.0. Domain: karshipta.com.
 
@@ -23,6 +23,8 @@ console/     SvelteKit web dashboard
 deploy/      docker-compose demo, SITL configs
 docs/        architecture, quickstart
 ```
+
+Each gateway class has a matching reference doc in `gateway/docs/<class-name>.md` (e.g. `ward-manager.md`, `websocket-transport.md`, `herald-ingest.md`); read those before re-deriving behavior from headers.
 
 ## Commands
 
@@ -52,7 +54,7 @@ CI (`.github/workflows/ci.yml`) runs a `proto`, a `console`, and a `gateway` job
 
 ## Current phase
 
-MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` (gateway M1 to M6) and `docs/architecture.md`. Do not scaffold features beyond the current milestone.
+MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` and `docs/architecture.md`. Do not scaffold features beyond the current milestone.
 
 ## Branching
 

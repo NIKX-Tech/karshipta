@@ -48,6 +48,24 @@ if(NOT Protobuf_FOUND)
   find_package(Protobuf REQUIRED)
 endif()
 
+# relayly: the M4 relay transport's real C++ SDK (gateway/docs/relay-transport.md).
+# Declared before ixwebsocket below because enabling it changes how ixwebsocket
+# itself must be built (see the BUILD_SHARED_LIBS note in that block).
+# OFF by default everywhere, not just Windows: it pulls in a new dependency tree
+# (libsodium via libsodium-cmake, nlohmann/json) on top of relayly itself, and is
+# explicitly optional for v0.1 (ROADMAP.md) - enabling it by default would silently
+# grow CI build time/surface. relayly's C++ SDK v1 does not support Windows at all
+# (sdk/cpp/README.md's Requirements), so forcing it on there is a hard error, not a
+# silent no-op, to avoid a confusing "I turned it on and nothing happened".
+option(KARSHIPTA_GATEWAY_ENABLE_RELAY
+  "Build RelayTransport against relayly's real C++ SDK (BRIEF.md M4, optional for v0.1)"
+  OFF)
+if(KARSHIPTA_GATEWAY_ENABLE_RELAY AND WIN32)
+  message(FATAL_ERROR
+    "KARSHIPTA_GATEWAY_ENABLE_RELAY=ON is not supported on Windows: relayly's C++ "
+    "SDK v1 does not build there yet (see relayly's sdk/cpp/README.md Requirements).")
+endif()
+
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
 # TLS stays off: the local transport is plain ws://, the encrypted path is
@@ -58,14 +76,50 @@ if(NOT ixwebsocket_FOUND)
   include(FetchContent)
   set(USE_TLS OFF CACHE BOOL "" FORCE)
   set(USE_ZLIB OFF CACHE BOOL "" FORCE)
+  # When relay is enabled, relayly's own CMake also links ixwebsocket (into
+  # librelayly.so, a genuine shared library - see relay-transport.md's "Why
+  # shared?" reference). ixwebsocket defaults to a static library, so without
+  # this override both librelayly.so and this executable would each embed
+  # their own independent copy of ixwebsocket's global state (confirmed via
+  # `nm -D librelayly.so` showing ix::initNetSystem/uninitNetSystem as
+  # exported symbols there too) - two copies of the same reference-counted
+  # init/deinit machinery in one process reliably double-frees at exit.
+  # Forcing a single shared ixwebsocket means both link the same runtime
+  # instance instead. Scoped to only around this one FetchContent_MakeAvailable
+  # call, as a plain (non-CACHE) variable restored right after: relayly's own
+  # Dependencies.cmake fetches libsodium/nlohmann_json later in this same
+  # configure and deliberately builds those static to privately absorb into
+  # librelayly.so (its "Why shared?" doc) - a persistent CACHE FORCE here
+  # leaked BUILD_SHARED_LIBS=ON into that too and broke its install(EXPORT).
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    set(_karshipta_prev_build_shared_libs "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS ON)
+  endif()
   FetchContent_Declare(
     ixwebsocket
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.5.zip
   )
   FetchContent_MakeAvailable(ixwebsocket)
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    set(BUILD_SHARED_LIBS "${_karshipta_prev_build_shared_libs}")
+    unset(_karshipta_prev_build_shared_libs)
+  endif()
   if(NOT TARGET ixwebsocket::ixwebsocket)
     add_library(ixwebsocket::ixwebsocket ALIAS ixwebsocket)
   endif()
+endif()
+
+if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+  include(FetchContent)
+  FetchContent_Declare(
+    relayly
+    GIT_REPOSITORY https://github.com/NIKX-Tech/relayly.git
+    GIT_TAG main
+    SOURCE_SUBDIR sdk/cpp
+  )
+  # Don't build relayly's own unit/integration test suite as part of ours.
+  set(RELAYLY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(relayly)
 endif()
 
 # yaml-cpp: vcpkg/Homebrew installs provide a CMake config; when absent (Linux
@@ -222,11 +276,13 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/ward/mission_importer_test.cpp
     tests/ward/ward_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
-    tests/transport/relay_transport_test.cpp
     tests/fleet/fleet_zone_store_test.cpp
     tests/fleet/fleet_manager_test.cpp
     tests/herald/herald_ward_manager_test.cpp
   )
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    list(APPEND KARSHIPTA_TEST_SOURCES tests/transport/relay_transport_test.cpp)
+  endif()
 
   add_executable(karshipta_gateway_tests ${KARSHIPTA_TEST_SOURCES})
 
