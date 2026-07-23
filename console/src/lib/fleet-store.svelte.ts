@@ -10,6 +10,7 @@ import {
 import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
 import type { WardClass } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
+import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
 import type { LatLon } from '$lib/geolocation';
 import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
@@ -63,6 +64,14 @@ const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
 const TRACKER_LINGER_MS = 6_000;
 const GATEWAY_URL_STORAGE_KEY = 'karshipta.gatewayUrl';
+const RELAY_URL_STORAGE_KEY = 'karshipta.relayUrl';
+const RELAY_DEVICE_ID_STORAGE_KEY = 'karshipta.relayDeviceId';
+// Same tier of protection as the gateway's own relay_credentials.yaml
+// (gitignored, plaintext on disk, see gateway/docs/relay-transport.md) -
+// stored locally, never committed anywhere, not hidden from the browser
+// environment itself. There is no server-side session store this console
+// could use instead (self-hosted, static app).
+const RELAY_DEVICE_TOKEN_STORAGE_KEY = 'karshipta.relayDeviceToken';
 /**
  * Each demo ward's home location, not just how many there were: a plain
  * count (this key's previous shape) loses exactly the thing spawnWard
@@ -91,6 +100,33 @@ export function isConfigTerminal(status: WardConfigStatus): boolean {
 function readStoredGatewayUrl(): string | undefined {
 	if (typeof localStorage === 'undefined') return undefined;
 	return localStorage.getItem(GATEWAY_URL_STORAGE_KEY) ?? undefined;
+}
+
+function readStoredRelayUrl(): string | undefined {
+	if (typeof localStorage === 'undefined') return undefined;
+	return localStorage.getItem(RELAY_URL_STORAGE_KEY) ?? undefined;
+}
+
+/**
+ * The relay device id only needs to stay stable across sessions once
+ * chosen - generated once, then persisted, the same way the device keypair
+ * itself is persisted inside relay-transport.ts. The matching device_token
+ * (see readStoredRelayDeviceToken below) is provisioned out of band against
+ * a real relayly server (POST /api/v1/devices or its CLI, same as the
+ * gateway side - gateway/docs/relay-transport.md), not minted here.
+ */
+function readOrCreateRelayDeviceId(): string {
+	if (typeof localStorage === 'undefined') return crypto.randomUUID();
+	const saved = localStorage.getItem(RELAY_DEVICE_ID_STORAGE_KEY);
+	if (saved) return saved;
+	const id = crypto.randomUUID();
+	localStorage.setItem(RELAY_DEVICE_ID_STORAGE_KEY, id);
+	return id;
+}
+
+function readStoredRelayDeviceToken(): string {
+	if (typeof localStorage === 'undefined') return '';
+	return localStorage.getItem(RELAY_DEVICE_TOKEN_STORAGE_KEY) ?? '';
 }
 
 function readStoredDemoWardHomes(): LatLon[] {
@@ -135,6 +171,11 @@ class FleetStore {
 	/** gateway connection as the operator should read it */
 	link = $state<'live' | 'connecting' | 'down'>('down');
 	gatewayUrl = $state(readStoredGatewayUrl() ?? '');
+	relayUrl = $state(readStoredRelayUrl() ?? '');
+	relayDeviceId = $state(readOrCreateRelayDeviceId());
+	relayDeviceToken = $state(readStoredRelayDeviceToken());
+	/** connected to the relay but pairWithGateway() hasn't completed yet */
+	relayAwaitingPair = $state(false);
 	/** read-only session: telemetry flows, commanding is refused observably */
 	readonly = $state(false);
 	/** how many simulated-ward adds this session has requested; drives the resource warning at C7's UI layer */
@@ -153,6 +194,7 @@ class FleetStore {
 
 	private demoEngine: DemoEngine | undefined;
 	private gatewayTransport: FleetTransport | undefined;
+	private relayTransport: RelayTransport | undefined;
 	// timers are bookkeeping, not state
 	private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	// each live demo ward's home location, keyed by id - bookkeeping for
@@ -192,9 +234,55 @@ class FleetStore {
 		transport.start();
 	}
 
+	/**
+	 * Connects through relayly instead of a direct WebSocket - the console
+	 * half of gateway/docs/relay-transport.md, for operators whose gateway
+	 * sits behind NAT/CGNAT with no reachable inbound port. Reuses the same
+	 * gatewayTransport slot and wards/link plumbing as connectGateway();
+	 * only the wire underneath differs, per the Transport abstraction rule
+	 * in CLAUDE.md ("nothing outside the transport layer may know which is
+	 * active"). relayTransport is kept separately only because pairing
+	 * (pairRelay below) is relay-specific and not part of FleetTransport.
+	 */
+	connectRelay(relayUrl: string, deviceId: string, deviceToken: string): void {
+		this.disconnectGateway();
+		this.relayUrl = relayUrl;
+		this.relayDeviceId = deviceId;
+		this.relayDeviceToken = deviceToken;
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(RELAY_URL_STORAGE_KEY, relayUrl);
+			localStorage.setItem(RELAY_DEVICE_ID_STORAGE_KEY, deviceId);
+			localStorage.setItem(RELAY_DEVICE_TOKEN_STORAGE_KEY, deviceToken);
+		}
+		this.link = 'connecting';
+		const transport = new RelayTransport(relayUrl, deviceId, deviceToken, {
+			onEnvelope: (envelope) => this.applyEnvelope(envelope, 'gateway'),
+			onStatus: (status) => this.setGatewayStatus(status)
+		});
+		this.gatewayTransport = transport;
+		this.relayTransport = transport;
+		this.relayAwaitingPair = true;
+		transport.start();
+	}
+
+	/**
+	 * One-time pairing against the code the gateway's pairing tool displayed
+	 * (see gateway/docs/relay-transport.md). Only meaningful right after
+	 * connectRelay(); once paired, the pairing persists server-side and
+	 * future connectRelay() calls with the same deviceId reconnect straight
+	 * to 'open' without this step.
+	 */
+	async pairRelay(code: string): Promise<void> {
+		if (!this.relayTransport) throw new Error('relay transport not connected');
+		await this.relayTransport.pairWithGateway(code);
+		this.relayAwaitingPair = false;
+	}
+
 	disconnectGateway(): void {
 		this.gatewayTransport?.stop();
 		this.gatewayTransport = undefined;
+		this.relayTransport = undefined;
+		this.relayAwaitingPair = false;
 		this.link = 'down';
 		for (const [id, ward] of Object.entries(this.wards)) {
 			if (ward.source === 'gateway') delete this.wards[id];
@@ -206,6 +294,11 @@ class FleetStore {
 
 	setGatewayStatus(status: 'connecting' | 'open' | 'closed'): void {
 		this.link = status === 'open' ? 'live' : status === 'connecting' ? 'connecting' : 'down';
+		// covers relay reconnects that resume an already-established pairing
+		// (RelayTransport finds it via getPeers() and reports 'open' directly,
+		// without pairRelay() ever being called) - the pairing prompt should
+		// not linger once telemetry is actually flowing
+		if (status === 'open') this.relayAwaitingPair = false;
 	}
 
 	select(wardId: string | undefined): void {
