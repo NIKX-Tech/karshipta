@@ -89,6 +89,15 @@ class RelayTransport final : public Transport {
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Closes the single outbound relay link if `client` matches the
+    // currently assigned peer (current_peer_id_/assigned_id_ - there is only
+    // ever one peer, v1's one-peer-per-device constraint, see the class
+    // comment). This drops the whole connection, not just one logical peer;
+    // relayly's own on_peer_status(false) then does the usual assignment
+    // reset and fires on_disconnect. No-op if `client` doesn't match
+    // (including 0, the not-connected sentinel).
+    void disconnect(ClientId client) override;
+
     // Always kOperator: relayly pairing has no per-peer role concept, so
     // there is nothing to mark a peer viewer with.
     [[nodiscard]] ClientRole role(ClientId client) const override;

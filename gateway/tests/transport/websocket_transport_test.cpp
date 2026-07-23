@@ -158,6 +158,46 @@ TEST(WebsocketTransport, ConnectDeliversFrameAndDisconnectMatchesId) {
     EXPECT_FALSE(transport.is_running());
 }
 
+TEST(WebsocketTransport, DisconnectClosesConnectionAndFiresOnDisconnect) {
+    constexpr uint16_t port = 28774;
+    WebsocketTransport transport(kHost, port);
+
+    std::atomic<Transport::ClientId> connected_id{0};
+    std::atomic<Transport::ClientId> disconnected_id{0};
+    Signal connected, disconnected;
+
+    transport.on_connect([&](const Transport::ClientId client) {
+        connected_id = client;
+        connected.notify();
+    });
+    transport.on_disconnect([&](const Transport::ClientId client) {
+        disconnected_id = client;
+        disconnected.notify();
+    });
+    transport.start();
+
+    auto client = make_client(port);
+    Signal client_closed;
+    client->setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+        if (msg->type == ix::WebSocketMessageType::Close) client_closed.notify();
+    });
+    client->start();
+    ASSERT_TRUE(connected.wait());
+
+    // Server-initiated close, the same call main.cpp makes after rejecting an
+    // oversized frame: the client sees its connection closed, and the
+    // server's own on_disconnect still fires, same as any other disconnect.
+    transport.disconnect(connected_id);
+    EXPECT_TRUE(disconnected.wait());
+    EXPECT_EQ(disconnected_id.load(), connected_id.load());
+    EXPECT_TRUE(client_closed.wait());
+
+    // Second call is a no-op (client already gone), not a crash.
+    transport.disconnect(connected_id);
+
+    transport.stop();
+}
+
 TEST(WebsocketTransport, BroadcastReachesEveryClientAndReceiveRoundTrips) {
     constexpr uint16_t port = 28766;
     WebsocketTransport transport(kHost, port);

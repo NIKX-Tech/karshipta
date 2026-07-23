@@ -38,6 +38,8 @@ public:
         std::lock_guard lock(mutex_);
         broadcast_.push_back(bytes);
     }
+    // Not exercised by these tests; satisfies the interface.
+    void disconnect(ClientId /*client*/) override {}
 
     void on_receive(ReceiveCallback callback) override { receive_callback_ = std::move(callback); }
     void on_connect(ConnectCallback callback) override { connect_callback_ = std::move(callback); }
@@ -267,6 +269,43 @@ TEST_F(WardManagerTest, RemoveWardRemovesNeverStartedWard) {
     ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24991")));
     EXPECT_TRUE(manager.remove_ward("alpha-1"));
     EXPECT_TRUE(manager.list_ward_ids().empty());
+}
+
+// Regression test for gateway issue #70 (per-ward locking replacing the
+// single fleet-wide wards_mutex_). Before this change, stop_worker()'s join
+// of a reconnect_worker stuck mid-discovery ran under the same lock every
+// other ward's calls needed, so one ward's up-to-kAutopilotDiscoveryTimeoutS
+// (~3s) worst case stalled the whole fleet.
+TEST_F(WardManagerTest, StopOnOneWardDoesNotBlockIsStartedOnAnother) {
+    auto manager = make_manager();
+    // Nothing ever listens on either port: connect_with_retry()'s first
+    // attempt blocks for the full, deterministic kAutopilotDiscoveryTimeoutS
+    // (3s), rather than racing a real autopilot's actual response time.
+    ASSERT_TRUE(manager.add_ward(make_config("slow-ward", "udpin://127.0.0.1:24994")));
+    ASSERT_TRUE(manager.add_ward(make_config("fast-ward", "udpin://127.0.0.1:24995")));
+    ASSERT_TRUE(manager.start("slow-ward"));
+
+    // stop() on a ward that has never connected: link_state() reads
+    // kNeverDiscovered (distinct from kLinkDown), which passes stop()'s
+    // guard, and is_in_air() defaults false, so stop() proceeds all the way
+    // to stop_worker()'s join - the exact path this test exercises. Runs on
+    // its own thread since it blocks for the discovery window.
+    std::thread slow_stop([&manager] { manager.stop("slow-ward"); });
+
+    // Give the reconnect worker a moment to actually enter its first
+    // connect() attempt before racing it from the assertion below.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const auto before = std::chrono::steady_clock::now();
+    const bool fast_started = manager.is_started("fast-ward");
+    const auto elapsed = std::chrono::steady_clock::now() - before;
+
+    slow_stop.join();
+
+    EXPECT_FALSE(fast_started);  // never start()ed; this call's speed is what's under test
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500))
+        << "is_started() on an unrelated ward must not block behind another "
+           "ward's slow stop_worker() join";
 }
 
 TEST_F(WardManagerPersistenceTest, PersistsOnAddAndRoundTripsOnReload) {

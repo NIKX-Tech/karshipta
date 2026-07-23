@@ -50,6 +50,15 @@ class Transport {
     // Sends bytes to every currently connected client.
     virtual void broadcast(const std::vector<uint8_t>& bytes) = 0;
 
+    // Forcibly closes one client's connection, e.g. after a protocol
+    // violation such as an oversized frame (gateway rule 5 doesn't apply
+    // here: closing a misbehaving connection is not a rejection a well-
+    // behaved caller needs an ack for). No-op if `client` is not currently
+    // connected. The client's own on_disconnect callback still fires
+    // normally once the underlying close completes, same as any other
+    // disconnect.
+    virtual void disconnect(ClientId client) = 0;
+
     // The role a currently-connected client was marked with at connect time.
     // Returns kViewer for a client that is not (or no longer) known: the
     // safe default is to treat an untracked connection as unprivileged, not

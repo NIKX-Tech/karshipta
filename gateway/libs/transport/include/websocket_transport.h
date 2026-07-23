@@ -70,6 +70,12 @@ class WebsocketTransport final : public Transport {
     void send(ClientId client, const std::vector<uint8_t>& bytes) override;
     void broadcast(const std::vector<uint8_t>& bytes) override;
 
+    // Closes the underlying ix::WebSocket with a normal-closure code; the
+    // server's own Close callback then does the usual clients_/client_ids_/
+    // client_roles_ cleanup and fires on_disconnect, same as a client-
+    // initiated close. No-op if `client` is not currently connected.
+    void disconnect(ClientId client) override;
+
     // Marked kViewer if the client's connection URI carried the query
     // parameter role=viewer (e.g. ws://host:port/?role=viewer), kOperator
     // otherwise (including plain ws://host:port with no query string, so
