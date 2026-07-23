@@ -50,8 +50,8 @@ TEST(RelayTransport, StopWithoutStartIsIdempotent) {
 
 TEST(RelayTransport, PairingBeforeStartThrows) {
     RelayTransport transport(kUnreachableUrl, RelayCredentials{"test-device", "", "test-token"});
-    EXPECT_THROW(transport.request_pair_code(), relayly::Error);
-    EXPECT_THROW(transport.accept_pair("483921"), relayly::Error);
+    EXPECT_THROW((void)transport.request_pair_code(), relayly::Error);
+    EXPECT_THROW((void)transport.accept_pair("483921"), relayly::Error);
 }
 
 TEST(RelayTransport, FromConfigMissingFileDefaultsToEmptyCredentials) {
