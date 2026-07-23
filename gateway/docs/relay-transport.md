@@ -197,14 +197,45 @@ Not covered by the automated suite above:
    `send`/`broadcast` reach the other side and `on_receive` fires for
    replies.
 
-## Not yet wired (open follow-up work)
+## Wiring: how `main.cpp` picks a transport
 
-- **`main.cpp` does not construct a `RelayTransport` yet.** Only
-  `WebsocketTransport` is wired in today. Deciding how the gateway picks
-  between the two (config-driven, most likely, mirroring
-  `gateway/config/gateway.yaml`) and how/when `request_pair_code`/
-  `accept_pair` get triggered operationally (a CLI flag, `gateway/tools/`,
-  or similar) is separate work.
+`gateway.yaml`'s top-level `transport` field selects the implementation
+(`build_transport()` in `main.cpp`):
+
+```yaml
+transport: relay   # "websocket" (default) or "relay"
+
+relay:
+  url: wss://relay.example.com/ws          # not a secret, safe to commit
+  credentials_path: gateway/config/relay_credentials.yaml   # gitignored, see the .example file
+```
+
+`transport: relay` only actually constructs a `RelayTransport` when this
+binary was built with `-DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON` *and*
+`relay.url` is set; either gap logs a clear error and falls back to
+`WebsocketTransport` rather than failing to start (verified: a
+relay-enabled binary given `transport: relay` with an empty `relay.url`
+logs the fallback and binds the websocket server normally). `main.cpp`
+wraps `transport->start()` in a try/catch since `RelayTransport::start()`
+can throw a `relayly::Error` (auth failure, bad handshake) where
+`WebsocketTransport::start()` never throws - logs and exits with a
+non-zero status rather than an unhandled-exception crash.
+
+Credentials (`device_id`, `device_token`, `private_key_path`) are
+deliberately **not** in `gateway.yaml` itself, unlike `relay.url` - see
+`relay_credentials.yaml.example` for the format. `gateway.yaml` is
+documented as safe to commit; device credentials are secrets and stay
+gitignored.
+
+`request_pair_code`/`accept_pair` still have no operational trigger (a CLI
+flag, `gateway/tools/`, or similar) - pairing today only happens through
+whatever calls `RelayTransport`'s methods directly (tests, or a manual tool
+not yet written). Separate follow-up work.
+
+## Still open
+
+- **A CLI/tool to actually trigger pairing** (`request_pair_code`/
+  `accept_pair`) outside of unit tests - see above.
 - **Console-side pairing UI and the relayly TypeScript SDK as an alternative
   `Transport`** on the console (`console/src/lib/transport/`) is TypeScript
   work, tracked separately from this C++ class.

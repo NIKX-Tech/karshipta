@@ -1,6 +1,14 @@
-# Gateway runtime config. Loaded once at startup by WebsocketTransport::from_config()
-# (see gateway/docs/websocket-transport.md). Safe to edit and commit: this file holds
-# operator-facing settings, not generated state (unlike fleet_state.yaml, gitignored).
+# Gateway runtime config. Loaded once at startup. Safe to edit and commit: this file
+# holds operator-facing settings, not generated state (unlike fleet_state.yaml,
+# gitignored) and no secrets (relay device credentials live in their own gitignored
+# file, see the relay section below).
+
+# Which Transport implementation main() constructs: "websocket" (default) listens
+# for inbound connections locally; "relay" connects outward through relayly for
+# remote operations (see gateway/docs/relay-transport.md). "relay" only works when
+# the gateway was built with -DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON; main() logs an
+# error and falls back to websocket otherwise, rather than failing to start.
+transport: websocket
 
 websocket:
   # Loopback only by default: the websocket server is not reachable from other
@@ -15,6 +23,14 @@ websocket:
   # connected ward. Only acceptable on a trusted, isolated network, and the
   # gateway logs a loud warning on every startup while this is true.
   allow_lan_bind: false
+
+# Only read when transport: relay above. url is not a secret, safe to commit.
+# Device credentials (device_id, private_key_path, device_token) are NOT here -
+# see relay_credentials.yaml.example and gateway/docs/relay-transport.md's
+# "Credentials" section.
+relay:
+  url: wss://relay.example.com/ws
+  credentials_path: gateway/config/relay_credentials.yaml
 
 # Herald HTTP ingestion (github issue #101): accepts a Herald message
 # (github.com/NIKX-Tech/herald) over POST /herald and reports it as a ward,
