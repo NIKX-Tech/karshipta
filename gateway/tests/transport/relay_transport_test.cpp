@@ -23,6 +23,19 @@ constexpr auto kUnreachableUrl = "ws://127.0.0.1:1";
 // loading, the role() stub, and the guard that refuses to connect with
 // incomplete credentials.
 
+TEST(RelayTransport, DisconnectBeforeStartIsANoOp) {
+    // disconnect() actually closing a live link needs a real relay server
+    // (gateway/docs/relay-transport.md's "Manual verification" section) -
+    // not exercised by this hermetic suite, same reasoning as every other
+    // live-connect behavior here. What's testable without one: calling it
+    // with no current peer (including the not-connected sentinel 0) is a
+    // safe no-op, not a crash, mirroring StopWithoutStartIsIdempotent.
+    RelayTransport transport(kUnreachableUrl, RelayCredentials{"test-device", "", "test-token"});
+    EXPECT_NO_THROW(transport.disconnect(0));
+    EXPECT_NO_THROW(transport.disconnect(42));
+    EXPECT_FALSE(transport.is_running());
+}
+
 TEST(RelayTransport, RoleIsAlwaysOperator) {
     RelayTransport transport(kUnreachableUrl, RelayCredentials{"test-device", "", "test-token"});
     EXPECT_EQ(transport.role(/*client=*/0), Transport::ClientRole::kOperator);

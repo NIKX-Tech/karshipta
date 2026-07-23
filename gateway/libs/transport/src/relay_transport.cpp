@@ -121,6 +121,21 @@ void RelayTransport::send(const ClientId client, const std::vector<uint8_t>& byt
     }
 }
 
+void RelayTransport::disconnect(const ClientId client) {
+    {
+        std::lock_guard lock(peer_mutex_);
+        if (!current_peer_id_ || assigned_id_ != client) return;
+    }
+    // v1 constraint: exactly one peer per device (see class comment), so
+    // there is no relayly API to close just this one peer's session while
+    // leaving the relay connection itself up (Client only exposes Close(),
+    // which stop() already calls) - disconnecting the only possible peer
+    // and stopping the transport are the same operation here. Reuses
+    // stop() rather than duplicating its teardown with different member
+    // names that could drift from it again.
+    stop();
+}
+
 void RelayTransport::broadcast(const std::vector<uint8_t>& bytes) {
     ClientId id = 0;
     {

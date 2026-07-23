@@ -98,6 +98,7 @@ repo that mints them.
 | `void stop() override` | Closes the `relayly::Client` if open. |
 | `void send(ClientId, const std::vector<uint8_t>&) override` | No-op unless `client` matches the currently paired-and-ready peer. Logs and swallows a `relayly::Error` from `Client::Send` (e.g. `kNotReady` mid-reconnect) rather than propagating it. |
 | `void broadcast(const std::vector<uint8_t>&) override` | Equivalent to `send` to the current peer: there is only ever one (v1 constraint). |
+| `void disconnect(ClientId) override` | No-op unless `client` matches the currently assigned peer. v1's one-peer-per-device constraint means there is no relayly API to close just this peer while leaving the connection up, so this delegates straight to `stop()`. |
 | `const RelayCredentials& credentials() const` | Read-only accessor; no setter, credentials are fixed for the instance's lifetime. |
 | `ClientRole role(ClientId) const override` | Always `kOperator`: relayly pairing has no per-peer role concept. |
 | `relayly::PairCode request_pair_code()` | Wraps `Client::RequestPairCode()`. Throws `relayly::Error(kClosed)` if called before `start()` has connected. |
@@ -170,6 +171,10 @@ covered instead:
   without ever reaching the network.
 - `StopWithoutStartIsIdempotent`: lifecycle safety when `stop()` is called
   without a prior `start()`.
+- `DisconnectBeforeStartIsANoOp`: calling `disconnect()` with no current
+  peer (including the not-connected sentinel `0`) is a safe no-op, not a
+  crash - `disconnect()` actually closing a live link needs a real relay
+  server, covered by manual verification below, not this hermetic suite.
 - `PairingBeforeStartThrows`: `request_pair_code`/`accept_pair` throw
   `relayly::Error(kClosed)` before `start()` has connected.
 - `FromConfigMissingFileDefaultsToEmptyCredentials` /
@@ -196,6 +201,8 @@ Not covered by the automated suite above:
    `Transport::on_connect` fires here with a `ClientId`, and that
    `send`/`broadcast` reach the other side and `on_receive` fires for
    replies.
+6. Call `disconnect()` with that `ClientId`; confirm `Transport::on_disconnect`
+   fires and the paired peer sees its side of the link close too.
 
 ## Not yet wired (open follow-up work)
 

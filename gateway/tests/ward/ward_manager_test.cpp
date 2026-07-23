@@ -38,6 +38,8 @@ public:
         std::lock_guard lock(mutex_);
         broadcast_.push_back(bytes);
     }
+    // Not exercised by these tests; satisfies the interface.
+    void disconnect(ClientId /*client*/) override {}
 
     void on_receive(ReceiveCallback callback) override { receive_callback_ = std::move(callback); }
     void on_connect(ConnectCallback callback) override { connect_callback_ = std::move(callback); }

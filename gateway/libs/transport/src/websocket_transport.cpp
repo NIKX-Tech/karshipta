@@ -259,6 +259,23 @@ void WebsocketTransport::send(const ClientId client, const std::vector<uint8_t>&
     web_socket->sendBinary(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
 }
 
+void WebsocketTransport::disconnect(const ClientId client) {
+    std::shared_ptr<ix::WebSocket> web_socket;
+    {
+        std::lock_guard lock(clients_mutex_);
+        if (const auto it = clients_.find(client); it != clients_.end()) {
+            web_socket = it->second;
+        }
+    }
+    if (!web_socket) return;
+    // Unlocked, same reasoning as send()/broadcast(): close() blocks on the
+    // connection's own thread until the close handshake is sent, and must
+    // not run while clients_mutex_ is held or a concurrent send()/broadcast()
+    // stalls behind it. The server's Close callback (invoked once the socket
+    // actually closes) does the clients_/client_ids_/client_roles_ cleanup.
+    web_socket->close();
+}
+
 void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
     std::vector<std::shared_ptr<ix::WebSocket>> targets;
     {
