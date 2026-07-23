@@ -22,9 +22,11 @@
 	let editName = $state('');
 	let editDescription = $state('');
 	let deleteConfirmOpen = $state(false);
-	/** toggles the member list between "browse" (WardCards) and "edit
-	 * membership" (checkboxes over every ward, not just current members) */
-	let editingMembers = $state(false);
+	/** the "Manage members / Delete" floating menu behind the row's kebab button */
+	let menuOpen = $state(false);
+	/** within that menu: the action list, or (once "Manage members" is picked)
+	 * checkboxes over every ward, not just current members */
+	let showMembers = $state(false);
 
 	function startEdit() {
 		if (!group) return;
@@ -76,85 +78,85 @@
 				</svg>
 			</button>
 
-			<button
-				type="button"
-				class="min-w-0 flex-1 truncate text-left text-[10px] font-medium tracking-widest text-fg-muted hover:text-fg"
-				onclick={startEdit}
-				title="Edit"
-			>
+			<span class="min-w-0 flex-1 truncate text-[10px] font-medium tracking-widest text-fg-muted">
 				{fleetLabel.toUpperCase()} &middot; {group.name}
 				<span class="font-mono text-fg-muted">({group.wardIds.length})</span>
-			</button>
+			</span>
 
 			<div class="relative">
 				<button
 					type="button"
 					class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
-					aria-expanded={editingMembers}
-					aria-label="Manage members"
-					title="Manage members"
-					onclick={() => (editingMembers = !editingMembers)}
+					aria-expanded={menuOpen}
+					aria-haspopup="true"
+					aria-label="Fleet actions"
+					title="Fleet actions"
+					onclick={() => {
+						menuOpen = !menuOpen;
+						if (menuOpen) showMembers = false;
+					}}
 				>
-					<svg
-						width="14"
-						height="14"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.75"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						aria-hidden="true"
-					>
-						<path d="M8 6h11M8 12h11M8 18h11" />
-						<path d="M3 6.5 4 7.5 6 5.5M3 12.5 4 13.5 6 11.5M3 18.5 4 19.5 6 17.5" />
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+						<circle cx="12" cy="5" r="1.75" />
+						<circle cx="12" cy="12" r="1.75" />
+						<circle cx="12" cy="19" r="1.75" />
 					</svg>
 				</button>
-				{#if editingMembers}
+				{#if menuOpen}
 					<div
-						class="absolute top-full right-0 z-30 mt-1 flex w-56 flex-col gap-1.5 rounded border border-edge bg-panel p-2"
-						aria-label="Manage members"
+						class="absolute top-full right-0 z-30 mt-1 flex w-56 flex-col gap-0.5 rounded border border-edge bg-panel p-1.5"
 					>
-						{#if fleet.wardIds.length === 0}
-							<p class="text-[10px] text-fg-muted">No wards to add yet.</p>
+						{#if !showMembers}
+							<button
+								type="button"
+								class="rounded px-2 py-1.5 text-left text-[10px] font-medium text-fg hover:bg-white/5"
+								onclick={() => {
+									menuOpen = false;
+									startEdit();
+								}}
+							>
+								Edit name & description
+							</button>
+							<button
+								type="button"
+								class="rounded px-2 py-1.5 text-left text-[10px] font-medium text-fg hover:bg-white/5"
+								onclick={() => (showMembers = true)}
+							>
+								Manage members
+							</button>
+							<button
+								type="button"
+								class="rounded px-2 py-1.5 text-left text-[10px] font-medium text-critical hover:bg-critical/15 disabled:cursor-not-allowed disabled:opacity-30"
+								disabled={pending}
+								onclick={() => {
+									menuOpen = false;
+									deleteConfirmOpen = true;
+								}}
+							>
+								Delete {fleetLabel}
+							</button>
 						{:else}
-							{#each fleet.wardIds as wardId (wardId)}
-								<label class="flex items-center gap-1.5 text-[10px]">
-									<input
-										type="checkbox"
-										checked={group.wardIds.includes(wardId)}
-										onchange={(event) => toggleMember(wardId, event.currentTarget.checked)}
-									/>
-									<span class="font-mono">{wardId}</span>
-								</label>
-							{/each}
+							<p class="px-1.5 pb-1 text-[9px] font-medium tracking-widest text-fg-muted">
+								MEMBERS
+							</p>
+							{#if fleet.wardIds.length === 0}
+								<p class="px-1.5 pb-1 text-[10px] text-fg-muted">No wards to add yet.</p>
+							{:else}
+								{#each fleet.wardIds as wardId (wardId)}
+									<label class="flex items-center gap-1.5 px-1.5 py-0.5 text-[10px]">
+										<input
+											type="checkbox"
+											checked={group.wardIds.includes(wardId)}
+											onchange={(event) => toggleMember(wardId, event.currentTarget.checked)}
+										/>
+										<span class="font-mono">{wardId}</span>
+									</label>
+								{/each}
+							{/if}
 						{/if}
 					</div>
 				{/if}
 			</div>
-			<button
-				type="button"
-				class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-critical/15 hover:text-critical disabled:cursor-not-allowed disabled:opacity-30"
-				aria-label="Delete {group.name}"
-				title="Delete {fleetLabel}"
-				disabled={pending}
-				onclick={() => (deleteConfirmOpen = true)}
-			>
-				<svg
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.75"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
-					<path d="M10 11v6M14 11v6" />
-				</svg>
-			</button>
 		</div>
 
 		{#if editing}
