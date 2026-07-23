@@ -111,9 +111,26 @@ generated `fleet_state.yaml` itself is gitignored.
 
 ## Threading
 
-- `wards_mutex_` guards `managed_wards_` and every element's
-  `executor`/`busy`/`reconnect_worker`. Lock order: `wards_mutex_` before
-  any `WardConnection`/`TelemetryInfo`/`WardActions` internal mutex.
+- Locking is two-level (gateway issue #70: replaces an earlier single
+  fleet-wide `wards_mutex_`). `wards_mutex_` is structural only -
+  `managed_wards_`'s shape (insert, erase, lookup) - and is always held
+  briefly. Each ward's own `executor`/`busy`/`reconnect_worker`/
+  `pending_auto_start_mission_id` lives behind that ward's own
+  `ManagedWard::mutex_` instead, so one ward's slow teardown (in particular
+  `stop_worker()`'s join of a reconnect attempt stuck mid-discovery, up to
+  `kAutopilotDiscoveryTimeoutS`) never blocks any other ward's calls. Lock
+  order: `wards_mutex_` before a ward's own `mutex_`, and that before any
+  `WardConnection`/`TelemetryInfo`/`WardActions` internal mutex; nothing
+  ever holds two different wards' `mutex_` at once.
+- `managed_wards_` stores `shared_ptr<ManagedWard>`, not `ManagedWard` by
+  value. `find_shared_locked()` copies the `shared_ptr` under the structural
+  lock and returns immediately, so the returned ward stays valid for the
+  rest of the call even if concurrently erased from the map by another
+  thread. Nothing may retain a copy of this `shared_ptr` beyond the
+  synchronous scope of the call that obtained it (no background thread, no
+  stored field) - see the invariant documented on `ManagedWard` itself,
+  which is what lets `~WardManager()` bound the object's true lifetime to
+  `managed_wards_`'s own destruction.
 - Each ward's `reconnect_worker` is an independent `jthread`: connects,
   broadcasts an INFO `LINK_CONNECTED` `Event`, requests the telemetry stream
   rate (re-requested on every reconnect - PX4 forgets it across a link drop),
@@ -128,26 +145,40 @@ generated `fleet_state.yaml` itself is gitignored.
   for another console to learn about.
 - One shared `publish_worker_` (not one per ward: the per-tick work is
   cheap cached-getter reads, not I/O, so batching it on one thread is simpler
-  and just as fast) builds every ward's `WardState` under the lock, then
-  releases it before broadcasting - broadcasting under the lock would stall
-  every other `WardManager` call behind one slow client for the whole
-  tick, the same hazard `dispatch_command`'s ack path and
-  `send_ward_info`'s blocking firmware query are equally careful to avoid.
+  and just as fast) snapshots every ward's `shared_ptr` under the structural
+  lock once, then builds each `WardState` and broadcasts it unlocked -
+  broadcasting under any lock would stall every other `WardManager` call
+  behind one slow client for the whole tick, the same hazard
+  `dispatch_command`'s ack path and `send_ward_info`'s blocking firmware
+  query are equally careful to avoid.
 - The same tick also polls each ward's `WardMission` (BRIEF.md M5):
   `get_progress()` into a `mission_progress` frame (only once something has
-  actually been uploaded), `take_pending_return_to_launch()` (deferred into
-  an unlocked synthetic `ReturnToLaunchCommand` enqueue, using the same
+  actually been uploaded, no lock needed - a cached, self-synchronized
+  read), `take_pending_return_to_launch()` (deferred into an unlocked
+  synthetic `ReturnToLaunchCommand` enqueue, using the same
   busy-then-unlocked pattern as `dispatch_command`, since a concurrent
-  `remove_ward` could otherwise destroy the executor mid-call),
+  `remove_ward` could otherwise destroy the executor mid-call - the busy
+  check-and-set itself runs under that one ward's own `mutex_`),
   `take_upload_result()`/`take_download_result()` (deferred into
-  `broadcast_mission_event()`/`broadcast_mission_download()` calls after the
-  lock releases, for the same blocking-socket-write reason).
+  `broadcast_mission_event()`/`broadcast_mission_download()` calls after
+  every lock releases, for the same blocking-socket-write reason; a
+  successful upload result also checks and clears
+  `pending_auto_start_mission_id` under that same ward's `mutex_`, arming a
+  deferred `StartMissionCommand` enqueue when it matches).
 - Both worker types are declared after `managed_wards_` (`publish_worker_`
   last of all), so C++'s reverse-declaration-order destruction stops and
   joins every thread before the wards they read are torn down. The
-  destructor additionally blocks until no ward is `busy`, since
-  `force_stop()` spends up to two minutes unlocked holding a raw
-  `ManagedWard*`.
+  destructor additionally snapshots every ward once (structural lock) and
+  then waits for each one's own `busy` flag to clear, since `force_stop()`
+  spends up to two minutes unlocked holding a `shared_ptr<ManagedWard>`. No
+  shared `condition_variable` spans this any more (`busy` now lives in N
+  per-ward mutexes, which one `condition_variable`'s one-mutex contract
+  can't wait across); each ward is polled on its own `mutex_` instead,
+  acceptable since this runs once, at shutdown, never on a hot path.
+  `make_executor()`'s ack callback captures `&transport_` directly, never
+  `this`, so a `CommandExecutor` that (incorrectly) outlived `WardManager`
+  via a leaked `shared_ptr<ManagedWard>` copy still couldn't touch a
+  destroyed `WardManager` through it.
 
 ## Automated tests
 
@@ -162,6 +193,13 @@ a real socket:
 - `DispatchCommandRejectsUnknownWardWithReason`: the broadcast `CommandAck`
   carries the offending id in its message.
 - `RemoveWardRemovesNeverStartedWard`.
+- `StopOnOneWardDoesNotBlockIsStartedOnAnother` (gateway issue #70): one
+  ward is `start()`ed against a port nothing listens on, so its first
+  `connect()` attempt blocks for the full, deterministic
+  `kAutopilotDiscoveryTimeoutS` (~3s); `stop()` on it is run on its own
+  thread, and `is_started()` on a second, unrelated ward is asserted to
+  return in well under 500ms while that's in flight - proving one ward's
+  slow `stop_worker()` join no longer stalls another ward's calls.
 - `PersistsOnAddAndRoundTripsOnReload`: two wards, distinct
   `ward_class`/`name`/`system_id`; a fresh manager pointed at the same file reloads
   both, and a `system_id` collision against a reloaded ward is still
