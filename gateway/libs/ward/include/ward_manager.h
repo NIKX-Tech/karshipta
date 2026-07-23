@@ -283,6 +283,10 @@ public:
     // error) if ward_id is unknown.
     [[nodiscard]] bool is_connected(const std::string& ward_id) const;
 
+    // True if ward_id's last-received telemetry reports it airborne. False
+    // (not an error) if ward_id is unknown or telemetry hasn't reported yet.
+    [[nodiscard]] bool is_in_air(const std::string& ward_id) const;
+
     // Snapshot of every registered ward's start/connect state.
     [[nodiscard]] std::vector<WardStatus> list_status() const;
 

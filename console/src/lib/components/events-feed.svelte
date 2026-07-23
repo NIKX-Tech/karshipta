@@ -2,10 +2,6 @@
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { Severity } from '$lib/gen/karshipta/v1/common';
 
-	const MAX_VISIBLE = 8;
-
-	const visible = $derived(fleet.events.slice(0, MAX_VISIBLE));
-
 	function dotClass(severity: Severity): string {
 		switch (severity) {
 			case Severity.SEVERITY_CRITICAL:
@@ -23,29 +19,24 @@
 	}
 </script>
 
-{#if visible.length > 0}
-	<section
-		class="absolute right-4 bottom-8 w-80 rounded border border-edge bg-panel/90 p-3"
-		aria-label="Events"
-		aria-live="polite"
-	>
-		<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">EVENTS</h3>
-		<ul class="mt-2 space-y-1">
-			<!-- keyed by index: identical (ts, code, ward) tuples can occur in one tick -->
-			{#each visible as event, index (index)}
-				<li class="flex items-baseline gap-2 text-[11px]">
-					<span
-						class="inline-block h-1.5 w-1.5 shrink-0 self-center rounded-full {dotClass(
-							event.severity
-						)}"
-					></span>
-					<span class="font-mono text-fg-muted tabular-nums">{time(event.timestampMs)}</span>
-					{#if event.wardId}
-						<span class="font-mono">{event.wardId}</span>
-					{/if}
-					<span class="truncate text-fg-muted">{event.message}</span>
-				</li>
-			{/each}
-		</ul>
-	</section>
+{#if fleet.events.length === 0}
+	<p class="text-xs text-fg-muted">No events yet.</p>
+{:else}
+	<ul class="flex flex-col gap-1.5" aria-live="polite">
+		<!-- keyed by index: identical (ts, code, ward) tuples can occur in one tick -->
+		{#each fleet.events as event, index (index)}
+			<li class="flex items-baseline gap-2 text-[11px]">
+				<span
+					class="inline-block h-1.5 w-1.5 shrink-0 self-center rounded-full {dotClass(
+						event.severity
+					)}"
+				></span>
+				<span class="font-mono text-fg-muted tabular-nums">{time(event.timestampMs)}</span>
+				{#if event.wardId}
+					<span class="font-mono">{event.wardId}</span>
+				{/if}
+				<span class="text-fg-muted">{event.message}</span>
+			</li>
+		{/each}
+	</ul>
 {/if}

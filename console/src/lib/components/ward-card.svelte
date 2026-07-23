@@ -73,11 +73,8 @@
 		? 'opacity-50 grayscale'
 		: ''}"
 >
-	<div class="flex items-center gap-2">
+	<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
 		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
-		{#if ward.source === 'demo'}
-			<span class="text-[9px] font-medium tracking-widest text-fg-muted">DEMO</span>
-		{/if}
 		{#if synthetic}
 			<span
 				class="text-[9px] font-medium tracking-widest text-synthetic"
@@ -93,7 +90,7 @@
 			<span class="text-[9px] font-medium tracking-widest text-fg-muted">VIEW ONLY</span>
 		{/if}
 		<span
-			class="ml-auto inline-block h-2 w-2 rounded-full {connected
+			class="ml-auto inline-block h-2 w-2 shrink-0 rounded-full {connected
 				? 'animate-pulse bg-accent'
 				: 'bg-critical'}"
 			role="status"
@@ -102,7 +99,7 @@
 		></span>
 		{#if !effectiveReadonly}
 			<button
-				class="px-0.5 text-xs leading-none text-fg-muted hover:text-critical disabled:cursor-not-allowed disabled:opacity-30"
+				class="shrink-0 px-0.5 text-xs leading-none text-fg-muted hover:text-critical disabled:cursor-not-allowed disabled:opacity-30"
 				aria-label="Remove {wardId}"
 				title={removable ? 'Remove ward' : 'Land and disarm before removing'}
 				disabled={!removable || removePending}

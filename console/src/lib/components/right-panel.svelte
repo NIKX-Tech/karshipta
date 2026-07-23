@@ -21,7 +21,7 @@
 	// set of wards; Zones is the safety-area drawing tool.
 	const TABS: TabItem[] = [
 		{ id: 'ward', label: 'Ward' },
-		{ id: 'mission', label: 'Mission' },
+		{ id: 'mission', label: 'Missions' },
 		{ id: 'zones', label: 'Zones' }
 	];
 
@@ -47,7 +47,15 @@
 		localStorage.setItem(COLLAPSED_STORAGE_KEY, String(value));
 	}
 
+	// Clicking whichever tab is already active (and open) closes the panel,
+	// the same "click to toggle" affordance the rail button gives left-rail's
+	// single directory button; clicking a different tab always switches to
+	// it and ensures the panel is open, never closes on a real selection.
 	function onTabChange(id: string) {
+		if (id === activeTab && !collapsed) {
+			setCollapsed(true);
+			return;
+		}
 		activeTab = id;
 		setCollapsed(false);
 	}
@@ -73,11 +81,33 @@
 <div class="flex h-full bg-panel">
 	{#if !collapsed}
 		<div id="right-panel-content" class="flex w-72 flex-col border-l border-edge">
-			<p
-				class="border-b border-edge px-3 py-2 font-mono text-[10px] font-medium tracking-widest text-fg-muted"
-			>
-				{activeLabel.toUpperCase()}
-			</p>
+			<div class="flex items-center justify-between gap-2 border-b border-edge px-3 py-2">
+				<p class="font-mono text-[10px] font-medium tracking-widest text-fg-muted">
+					{activeLabel.toUpperCase()}
+				</p>
+				<button
+					type="button"
+					class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
+					aria-controls="right-panel-content"
+					aria-label="Collapse panel"
+					title="Collapse panel"
+					onclick={() => setCollapsed(true)}
+				>
+					<svg
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m9 6 6 6-6 6" />
+					</svg>
+				</button>
+			</div>
 
 			{#if fleet.selectedWardId}
 				<WardStatusStrip wardId={fleet.selectedWardId} />
@@ -124,19 +154,13 @@
 	     content panel above grows/shrinks on its inboard side instead of
 	     ever displacing the rail itself. -->
 	<div class="flex w-10 shrink-0 flex-col items-center gap-1 border-l border-edge py-2">
-		<button
-			type="button"
-			class="mb-1 flex h-8 w-8 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
-			aria-expanded={!collapsed}
-			aria-controls="right-panel-content"
-			aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
-			title={collapsed ? 'Expand panel' : 'Collapse panel'}
-			onclick={() => setCollapsed(!collapsed)}
+		<Tabs
+			tabs={TABS}
+			activeId={activeTab}
+			showSelection={!collapsed}
+			onchange={onTabChange}
+			orientation="vertical"
 		>
-			{collapsed ? '‹' : '›'}
-		</button>
-
-		<Tabs tabs={TABS} activeId={activeTab} onchange={onTabChange} orientation="vertical">
 			{#snippet children(tab)}
 				{#if tab.id === 'ward'}
 					<svg
@@ -165,8 +189,11 @@
 						stroke-linejoin="round"
 						aria-hidden="true"
 					>
-						<path d="M22 2 11 13" />
-						<path d="M22 2 15 22l-4-9-9-4Z" />
+						<path d="M4 19 9 8 14 14 20 4" stroke-dasharray="1.2 3" />
+						<circle cx="4" cy="19" r="1.5" fill="currentColor" stroke="none" />
+						<circle cx="9" cy="8" r="1.5" fill="currentColor" stroke="none" />
+						<circle cx="14" cy="14" r="1.5" fill="currentColor" stroke="none" />
+						<circle cx="20" cy="4" r="1.5" fill="currentColor" stroke="none" />
 					</svg>
 				{:else if tab.id === 'zones'}
 					<svg

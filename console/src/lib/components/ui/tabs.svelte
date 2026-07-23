@@ -13,13 +13,26 @@
 		activeId: string;
 		/** 'vertical' is an icon rail (ArrowUp/Down); 'horizontal' is a text tab strip (ArrowLeft/Right) */
 		orientation?: 'horizontal' | 'vertical';
+		/** Suppresses the active tab's highlight styling without touching
+		 * aria-selected or roving tabindex - for a rail whose panel is
+		 * currently collapsed, where no tab should visually read as "showing"
+		 * even though one is still the logically active tab underneath.
+		 * Defaults true (normal tab-strip behavior). */
+		showSelection?: boolean;
 		onchange: (id: string) => void;
 		/** per-tab content, e.g. an icon for a vertical rail or a label for a horizontal strip;
 		 * `tab.label` is still what's read out via aria-label/title regardless of what this renders */
 		children: Snippet<[TabItem]>;
 	}
 
-	const { tabs, activeId, orientation = 'horizontal', onchange, children }: Props = $props();
+	const {
+		tabs,
+		activeId,
+		orientation = 'horizontal',
+		showSelection = true,
+		onchange,
+		children
+	}: Props = $props();
 
 	let buttonEls = $state<(HTMLButtonElement | undefined)[]>([]);
 
@@ -78,7 +91,7 @@
 			onkeydown={(event) => onkeydown(event, index)}
 			class="flex items-center justify-center rounded {orientation === 'vertical'
 				? 'h-8 w-8'
-				: 'px-3 py-2 text-xs font-medium'} {tab.id === activeId
+				: 'px-3 py-2 text-xs font-medium'} {tab.id === activeId && showSelection
 				? 'bg-accent/15 text-accent'
 				: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
 		>
