@@ -7,7 +7,7 @@
 	import { themeStore } from '$lib/theme.svelte';
 	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
-	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
+	import { FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import LeftRail from '$lib/components/left-rail.svelte';
 	import RightPanel from '$lib/components/right-panel.svelte';
@@ -21,8 +21,16 @@
 	// might prefer "Herd"); purely cosmetic, does not rename any schema field.
 	let fleetLabel = $state(DEFAULT_FLEET_LABEL);
 
+	// Amsterdam: this app's own fallback wherever geolocation is denied or
+	// unavailable (the initial map view, a new demo ward's default spot),
+	// distinct from FAKE_FLEET_CENTER (Zurich Irchel, PX4 SITL's actual
+	// default home) - that constant stays as-is so the fake fleet's own
+	// internal simulation still matches the real docker-compose demo; see
+	// fleet-sim.ts.
+	const DEFAULT_MAP_CENTER = { lat: 52.3676, lon: 4.9041 };
+
 	// The map's initial camera position: centered on the operator's own
-	// location by default, falling back to FAKE_FLEET_CENTER on denial or
+	// location by default, falling back to DEFAULT_MAP_CENTER on denial or
 	// unavailability. Resolved once, undefined until then - FleetMap reads
 	// centerLat/centerLon only at mount (see its own untrack'd creation
 	// effect), so it must not render until this settles, rather than
@@ -32,17 +40,21 @@
 
 	// Demo ward placement: geolocation as the default, a map click as the
 	// override, matching the pattern already proven in karshipta-cloud.
+	// Falls back to DEFAULT_MAP_CENTER, not FAKE_FLEET_CENTER: this is a
+	// user-facing "where do we put it if we don't know where you are"
+	// default, the same concern the map's own fallback above resolves, not
+	// the simulation engine's own Zurich-matching invariant.
 	let placing = $state(false);
 	let placingLocating = $state(false);
-	let placeLat = $state(FAKE_FLEET_CENTER.lat);
-	let placeLon = $state(FAKE_FLEET_CENTER.lon);
+	let placeLat = $state(DEFAULT_MAP_CENTER.lat);
+	let placeLon = $state(DEFAULT_MAP_CENTER.lon);
 
 	function startPlacement() {
 		placing = true;
-		placeLat = FAKE_FLEET_CENTER.lat;
-		placeLon = FAKE_FLEET_CENTER.lon;
+		placeLat = DEFAULT_MAP_CENTER.lat;
+		placeLon = DEFAULT_MAP_CENTER.lon;
 		placingLocating = true;
-		void locateOrFallback(FAKE_FLEET_CENTER).then((point) => {
+		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {
 			placingLocating = false;
 			placeLat = point.lat;
 			placeLon = point.lon;
@@ -90,7 +102,7 @@
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
-		void locateOrFallback(FAKE_FLEET_CENTER).then((point) => {
+		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {
 			mapCenterLat = point.lat;
 			mapCenterLon = point.lon;
 		});
