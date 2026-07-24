@@ -13,6 +13,7 @@
 #include <karshipta/v1/envelope.pb.h>
 
 #include "fleet_manager.h"
+#include "gt06_tcp_server.h"
 #include "herald_http_server.h"
 #include "herald_ward_manager.h"
 #include "transport.h"
@@ -157,6 +158,7 @@ int main() {
     auto herald_manager = std::make_unique<HeraldWardManager>(*transport);
 #endif
     auto herald_http = HeraldHttpServer::from_config(kNetworkConfigPath, *herald_manager);
+    auto gt06_tcp = Gt06TcpServer::from_config(kNetworkConfigPath, *herald_manager);
 
     transport->on_connect(
         [
@@ -336,6 +338,7 @@ int main() {
     ward_manager->start_publishing();
 #endif
     herald_http->start();
+    gt06_tcp->start();
 
     // Runs until externally killed: with a dynamic fleet there's no longer
     // one hardcoded ward whose disconnect should end the process. No
