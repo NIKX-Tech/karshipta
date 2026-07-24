@@ -10,7 +10,13 @@
 
 #include <fleet_zone_store.h>
 #include <transport.h>
-#include <ward_manager.h>
+
+// Forward-declared, not included: only handle_fleet_mission_assignment()
+// below actually needs WardManager (to fan a mission out to it), and that
+// method only exists in KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON builds (see root
+// CMakeLists.txt) - every other Fleet/Zone CRUD path here is source-agnostic
+// and must stay MAVSDK-free so a Herald-only build never links it in.
+class WardManager;
 
 // Owns Fleet/Zone persistence (via FleetZoneStore) and the wire-level
 // request/ack translation for them - the Fleet/Zone counterpart to
@@ -60,6 +66,7 @@ class FleetManager {
     [[nodiscard]] karshipta::v1::ZoneAck handle_delete_zone(
         const karshipta::v1::DeleteZone& request);
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     // Fans a fleet-wide mission out to each selected ward as an independent
     // upload + start (fleet.proto FleetMissionAssignment's comment: fresh
     // mission_id and ward_id per recipient, otherwise identical items/
@@ -69,9 +76,12 @@ class FleetManager {
     // WARNING Event (Event.ward_id empty, "gateway-level event" per its own
     // comment); each ward's own upload/start outcome surfaces through
     // ward_manager's existing CommandAck/Event channels, exactly as it would
-    // for a solo mission.
+    // for a solo mission. Only exists in MAVLink-enabled builds: fanning a
+    // mission out inherently needs flight control, which a Herald-only
+    // build has none of (Herald wards have no command surface at all).
     void handle_fleet_mission_assignment(const karshipta::v1::FleetMissionAssignment& request,
                                           WardManager& ward_manager);
+#endif
 
     // Rejects an upstream Fleet/Zone/mission-assignment envelope from a
     // connection Transport marked ClientRole::kViewer (gateway issue #20).

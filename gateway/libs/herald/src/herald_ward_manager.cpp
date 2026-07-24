@@ -3,6 +3,10 @@
 #include <karshipta/v1/envelope.pb.h>
 #include <spdlog/spdlog.h>
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+#include <ward_manager.h>
+#endif
+
 #include <utility>
 #include <vector>
 
@@ -104,16 +108,21 @@ karshipta::v1::WardState build_ward_state(const herald::v0::Herald& msg) {
 }  // namespace
 
 HeraldWardManager::HeraldWardManager(Transport& transport, WardManager& ward_manager)
-    : transport_(transport), ward_manager_(ward_manager) {}
+    : transport_(transport), ward_manager_(&ward_manager) {}
+
+HeraldWardManager::HeraldWardManager(Transport& transport)
+    : transport_(transport), ward_manager_(nullptr) {}
 
 HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     const std::string& entity_id = msg.entity_id();
 
-    if (ward_manager_.has_ward(entity_id)) {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+    if (ward_manager_ != nullptr && ward_manager_->has_ward(entity_id)) {
         spdlog::error("rejected Herald message for entity_id '{}': already a MAVLink ward_id",
                       entity_id);
         return HeraldIngestResult::kWardIdCollision;
     }
+#endif
 
     bool first_sight = false;
     karshipta::v1::WardInfo info;

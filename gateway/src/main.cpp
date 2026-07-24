@@ -16,11 +16,18 @@
 #include "herald_http_server.h"
 #include "herald_ward_manager.h"
 #include "transport.h"
-#include "ward_manager.h"
 #include "websocket_transport.h"
 
 #ifdef KARSHIPTA_GATEWAY_ENABLE_RELAY
 #include "relay_transport.h"
+#endif
+
+// karshipta-gateway (drones) vs karshipta-herald (generic tags/GPS devices)
+// are two separate, fixed release artifacts built from this one main.cpp
+// (see root CMakeLists.txt's KARSHIPTA_GATEWAY_ENABLE_MAVLINK). ward_manager.h
+// is only included, and WardManager only constructed, when this flag is on.
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+#include "ward_manager.h"
 #endif
 
 namespace {
@@ -28,8 +35,12 @@ namespace {
 // be run (docs/quickstart-windows.md, gateway/CLAUDE.local.md).
 // gateway/config/ is a tracked directory (see .gitkeep).
 constexpr auto kNetworkConfigPath = "gateway/config/gateway.yaml";
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 // Generated state, not operator-managed; gitignored (gateway/.gitignore).
+// Only WardManager persists to this path; unused (and would otherwise be an
+// unused-const-variable warning under -Werror) in a MAVLink-disabled build.
 constexpr auto kPersistencePath = "gateway/config/fleet_state.yaml";
+#endif
 // Same treatment for Fleet/Zone's SQLite store (gateway/.gitignore).
 constexpr auto kFleetZoneDbPath = "gateway/config/fleet_zones.db";
 // Default when gateway.yaml's relay.credentials_path is unset; secrets, so
@@ -131,21 +142,40 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
 
 int main() {
     std::unique_ptr<Transport> transport = build_transport(kNetworkConfigPath);
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     auto ward_manager = WardManager::create(*transport, kPersistencePath);
+#endif
     auto fleet_manager = std::make_unique<FleetManager>(*transport, kFleetZoneDbPath);
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     // Depends on ward_manager (has_ward() rejects an entity_id collision
     // with a MAVLink ward), so it's constructed after it.
     auto herald_manager = std::make_unique<HeraldWardManager>(*transport, *ward_manager);
+#else
+    // No WardManager exists in this build to collide-check against - there
+    // are no MAVLink ward_ids at all, so nothing for a Herald entity_id to
+    // collide with.
+    auto herald_manager = std::make_unique<HeraldWardManager>(*transport);
+#endif
     auto herald_http = HeraldHttpServer::from_config(kNetworkConfigPath, *herald_manager);
 
     transport->on_connect(
-        [&ward_manager, &fleet_manager, &herald_manager](const Transport::ClientId client) {
+        [
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+            &ward_manager,
+#endif
+            &fleet_manager, &herald_manager](const Transport::ClientId client) {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             ward_manager->send_ward_info(client);
+#endif
             fleet_manager->send_fleet_zone_snapshot(client);
             herald_manager->send_known_wards(client);
         });
 
-    transport->on_receive([&ward_manager, &fleet_manager, &transport](
+    transport->on_receive([
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                               &ward_manager,
+#endif
+                               &fleet_manager, &transport](
                                const Transport::ClientId client, const std::vector<uint8_t>& bytes) {
         if (bytes.size() > kMaxEnvelopeBytes) {
             spdlog::warn("client {} sent an oversized frame ({} bytes > {} limit), disconnecting",
@@ -164,12 +194,19 @@ int main() {
         if (transport->role(client) == Transport::ClientRole::kViewer) {
             if (is_fleet_payload(envelope.payload_case())) {
                 fleet_manager->reject_viewer_envelope(client, envelope);
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             } else {
                 ward_manager->reject_viewer_envelope(client, envelope);
+#else
+            } else {
+                spdlog::warn("viewer client {} sent unexpected payload kind {}, ignoring", client,
+                             static_cast<int>(envelope.payload_case()));
+#endif
             }
             return;
         }
         switch (envelope.payload_case()) {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             case karshipta::v1::Envelope::kCommand:
                 ward_manager->dispatch_command(envelope.command());
                 break;
@@ -196,6 +233,7 @@ int main() {
             case karshipta::v1::Envelope::kMissionDownloadRequest:
                 ward_manager->handle_mission_download_request(envelope.mission_download_request());
                 break;
+#endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             case karshipta::v1::Envelope::kCreateFleet: {
                 const auto ack = fleet_manager->handle_create_fleet(envelope.create_fleet());
                 karshipta::v1::Envelope ack_envelope;
@@ -254,8 +292,16 @@ int main() {
                 break;
             }
             case karshipta::v1::Envelope::kFleetMissionAssignment:
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
                 fleet_manager->handle_fleet_mission_assignment(envelope.fleet_mission_assignment(),
                                                                  *ward_manager);
+#else
+                spdlog::warn(
+                    "client {} sent fleet_mission_assignment but this gateway was not built with "
+                    "KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON (fanning a mission out inherently needs "
+                    "flight control); ignoring",
+                    client);
+#endif
                 break;
             default:
                 spdlog::warn("unexpected downstream payload kind {} from client {}",
@@ -276,6 +322,7 @@ int main() {
         return 1;
     }
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     if (ward_manager->restore_and_start() == 0) {
         // First run, nothing persisted yet: seed the same default SITL
         // ward earlier milestones connected to, so `cmake --build && run`
@@ -287,6 +334,7 @@ int main() {
         ward_manager->handle_add_ward(seed);
     }
     ward_manager->start_publishing();
+#endif
     herald_http->start();
 
     // Runs until externally killed: with a dynamic fleet there's no longer

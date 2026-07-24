@@ -26,6 +26,21 @@ else()
   target_compile_options(karshipta_warnings INTERFACE -Wall -Wextra -Werror)
 endif()
 
+# karshipta-gateway (drones, MAVLink) and karshipta-herald (generic tags/GPS
+# devices via Herald ingest) are two separate, fixed release artifacts built
+# from this one codebase - not a runtime toggle either product exposes, a
+# build-time switch used only when producing the two artifacts. Verified
+# directly before adding this: FleetManager (Fleet/Zone CRUD) and
+# HeraldWardManager/HeraldHttpServer link zero MAVSDK; only the `ward`
+# library (and its one touchpoint into `fleet`,
+# FleetManager::handle_fleet_mission_assignment) does. When OFF, MAVSDK is
+# not linked and `ward` is not built at all - a livestock-tag-only user
+# should never have to build/run a MAVSDK-linked binary. Default ON: the
+# flagship drone demo is still the primary, default artifact.
+option(KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+  "Build the MAVSDK-backed ward/fleet-mission-assignment path (karshipta-gateway). OFF builds the Herald-only artifact (karshipta-herald)."
+  ON)
+
 # On Linux, MAVSDK comes from the prebuilt release .deb and spdlog from apt
 # (libspdlog-dev); macOS gets both from Homebrew. On Windows, fall back to
 # vendored copies under third_party/ (kept in sync with vcpkg.json for anyone
@@ -38,7 +53,9 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/third_party/vcpkg/installed/x64-windows"
   )
 endif()
-find_package(MAVSDK REQUIRED)
+if(KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+  find_package(MAVSDK REQUIRED)
+endif()
 find_package(spdlog REQUIRED)
 # Homebrew/vcpkg protobuf ships a CMake config; apt's ships only the classic
 # find module. Try config mode first, fall back to module mode, which also
@@ -269,7 +286,9 @@ target_include_directories(karshipta_proto PUBLIC "${KARSHIPTA_PROTO_GEN_DIR}")
 target_link_libraries(karshipta_proto PUBLIC protobuf::libprotobuf)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/transport)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
+if(KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/ward)
+endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/fleet)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/herald)
 add_subdirectory(${CMAKE_SOURCE_DIR}/src)
@@ -281,6 +300,18 @@ if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
 endif()
 
 option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
+
+if(KARSHIPTA_GATEWAY_BUILD_TESTS AND NOT KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+  # herald_ward_manager_test.cpp and fleet_manager_test.cpp both construct
+  # real WardManager instances to exercise the collision-check/mission-
+  # assignment paths, so the existing suite only builds against the
+  # MAVLink-enabled configuration today. A hard error here is more honest
+  # than silently building a trimmed, under-covered suite for the Herald-only
+  # artifact - expanding coverage for that build is a followup, not done yet.
+  message(FATAL_ERROR
+    "KARSHIPTA_GATEWAY_BUILD_TESTS=ON requires KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON: "
+    "the test suite is not yet adapted for a MAVLink-disabled build.")
+endif()
 
 if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   # GoogleTest is fetched and pinned rather than system-installed: hermetic on
@@ -295,6 +326,9 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   enable_testing()
 
   # Stacked milestone branches append their own test sources to this list.
+  # KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON is guaranteed above this point (the
+  # FATAL_ERROR check), so every ward/fleet-mission-assignment test source
+  # here is always safe to build.
   set(KARSHIPTA_TEST_SOURCES
     tests/ward/ward_connection_test.cpp
     tests/ward/telemetry_test.cpp

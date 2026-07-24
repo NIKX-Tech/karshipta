@@ -7,6 +7,10 @@
 
 #include <spdlog/spdlog.h>
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+#include <ward_manager.h>
+#endif
+
 namespace {
 
 // Rejection reason for every upstream envelope from a viewer connection
@@ -31,15 +35,18 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
     return bytes;
 }
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 // Not a real UUID, same rationale as mission_importer.cpp's
 // synthesize_mission_id: only needs to be unique enough for one gateway
-// process to tell fanned-out missions apart.
+// process to tell fanned-out missions apart. Only handle_fleet_mission_assignment
+// (below, also guarded) calls this - unused otherwise.
 std::string synthesize_fleet_mission_id(const std::string& fleet_id, const std::string& ward_id) {
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
     return "fleet-" + fleet_id + "-" + ward_id + "-" + std::to_string(now_ns);
 }
+#endif
 
 }  // namespace
 
@@ -238,6 +245,7 @@ karshipta::v1::ZoneAck FleetManager::handle_delete_zone(const karshipta::v1::Del
 
 // ---------- Fleet-wide mission assignment ----------
 
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 void FleetManager::handle_fleet_mission_assignment(
     const karshipta::v1::FleetMissionAssignment& request, WardManager& ward_manager) {
     // Empty fleet_id means an ad-hoc ward selection, not tied to a saved
@@ -278,6 +286,7 @@ void FleetManager::handle_fleet_mission_assignment(
         (void)ward_manager.dispatch_mission_upload_and_start(mission);
     }
 }
+#endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 
 // ---------- Viewer rejection ----------
 

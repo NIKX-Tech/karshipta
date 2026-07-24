@@ -11,12 +11,19 @@ target_include_directories(fleet
 target_link_libraries(fleet
         PUBLIC
             karshipta_proto
-            # fleet_manager.h includes ward_manager.h (handle_fleet_mission_assignment
-            # takes a WardManager&) and transport.h directly, so both are part
-            # of fleet's own public interface, not just its implementation.
-            ward
             transport
         PRIVATE
             karshipta_warnings
             SQLite::SQLite3
 )
+
+# fleet_manager.h only forward-declares WardManager; handle_fleet_mission_assignment
+# (the one method that actually needs it, to fan a mission out) only exists
+# in KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON builds, so `ward` (and MAVSDK) is
+# only needed - and only exists as a target, see root CMakeLists.txt - then.
+# PUBLIC compile definition: main.cpp (which links fleet) needs to see this
+# same macro to decide whether to call that method at all.
+if(KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+    target_link_libraries(fleet PUBLIC ward)
+    target_compile_definitions(fleet PUBLIC KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+endif()

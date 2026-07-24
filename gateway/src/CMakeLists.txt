@@ -11,10 +11,8 @@ endif()
 
 target_link_libraries(karshipta_gateway
         PRIVATE
-            MAVSDK::mavsdk
             spdlog::spdlog
             yaml-cpp::yaml-cpp
-            ward
             fleet
             herald
             transport
@@ -29,4 +27,13 @@ target_link_libraries(karshipta_gateway
 # option is off.
 if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     target_compile_definitions(karshipta_gateway PRIVATE KARSHIPTA_GATEWAY_ENABLE_RELAY)
+endif()
+
+# Lets main.cpp #ifdef around WardManager construction and the MAVLink-only
+# envelope cases (also propagated transitively via fleet/herald's own PUBLIC
+# compile definition of the same macro - redefined here too, explicitly,
+# matching the KARSHIPTA_GATEWAY_ENABLE_RELAY precedent above).
+if(KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
+    target_link_libraries(karshipta_gateway PRIVATE MAVSDK::mavsdk ward)
+    target_compile_definitions(karshipta_gateway PRIVATE KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
 endif()

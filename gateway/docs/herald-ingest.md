@@ -19,6 +19,31 @@ SensorThings bridge (github issues #105/#106) translates its own protocol
 into a Herald message and calls `ingest()` here too, rather than getting its
 own manager.
 
+## Two release artifacts, one codebase
+
+`karshipta-gateway` (drones, MAVLink) and `karshipta-herald` (generic tags/GPS
+devices via this Herald path, no MAVLink) are two separate, fixed products
+built from this same repo - not a runtime toggle either exposes, a
+build-time CMake option (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK`, default `ON`,
+see the root `CMakeLists.txt`) used only when producing the two artifacts.
+Everything in this file - `HeraldWardManager`, `HeraldHttpServer`,
+`FleetManager` (Fleet/Zone CRUD) - links zero MAVSDK and is compiled into
+both artifacts identically. A livestock-tag-only user runs the lean
+`karshipta-herald` build and never needs MAVSDK installed, never sees
+"gateway"/relay-pairing language (that's specifically a MAVLink-behind-NAT
+concern, see `relay-transport.md`), and connects the console to it exactly
+the same way as any WebSocket gateway.
+
+Build it with `-DKARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF`; CI's
+`gateway-herald-only` job builds this configuration on every push (gcc and
+clang, no MAVSDK installed in that job at all - the point is proving it's
+genuinely not needed, not just that the flag compiles). Not yet covered:
+`KARSHIPTA_GATEWAY_BUILD_TESTS=ON` requires `KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON`
+(a hard CMake error otherwise) - the existing test suite constructs real
+`WardManager` instances throughout and isn't adapted for this configuration
+yet; only the plain build is verified today, expanding coverage is a
+followup.
+
 ## Responsibilities
 
 - Decode a Herald message (binary protobuf, or JSON via
@@ -27,9 +52,12 @@ own manager.
   `entity_id`, a `karshipta::v1::WardInfo` (`ward_class` mapped from
   `entity_class`, `origin = WARD_ORIGIN_HARDWARE`, `autopilot`/
   `firmware_version` empty, `mavlink_system_id = 0`).
-- Reject a message whose `entity_id` collides with an existing MAVLink
-  `ward_id` (`WardManager::has_ward`), logging the rejection and returning
-  HTTP 409, broadcasting nothing.
+- In `karshipta-gateway` builds only: reject a message whose `entity_id`
+  collides with an existing MAVLink `ward_id` (`WardManager::has_ward`),
+  logging the rejection and returning HTTP 409, broadcasting nothing.
+  `karshipta-herald` builds have no `WardManager` to collide-check against -
+  there are no MAVLink `ward_id`s in that build at all - so this check is
+  skipped entirely, never a no-op call.
 - Replay known Herald wards' `WardInfo` to a newly-connected client
   (`send_known_wards`), wired the same way as `WardManager::send_ward_info`.
 
@@ -56,8 +84,9 @@ own manager.
 
 | Member | Behavior |
 |---|---|
-| `HeraldWardManager(Transport&, WardManager&)` | `WardManager&` is used read-only, via `has_ward()`, to detect an `entity_id` collision. |
-| `HeraldIngestResult ingest(const herald::v0::Herald&)` | Builds and broadcasts `WardState` (and, on first sight, `WardInfo`). Returns `kWardIdCollision` and broadcasts nothing if `entity_id` is already a MAVLink `ward_id`. |
+| `HeraldWardManager(Transport&, WardManager&)` | `karshipta-gateway` builds. `WardManager&` is used read-only, via `has_ward()`, to detect an `entity_id` collision. |
+| `HeraldWardManager(Transport&)` | `karshipta-herald` builds (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF`). No `WardManager` exists to collide-check against. |
+| `HeraldIngestResult ingest(const herald::v0::Herald&)` | Builds and broadcasts `WardState` (and, on first sight, `WardInfo`). In `karshipta-gateway` builds, returns `kWardIdCollision` and broadcasts nothing if `entity_id` is already a MAVLink `ward_id`. |
 | `void send_known_wards(Transport::ClientId) const` | Sends one `WardInfo` per known Herald `entity_id` to exactly this client. Wire to `Transport::on_connect`. |
 
 ### `HeraldHttpServer`

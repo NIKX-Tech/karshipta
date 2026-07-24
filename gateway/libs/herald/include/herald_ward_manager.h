@@ -4,11 +4,19 @@
 #include <herald/v0/herald.pb.h>
 #include <karshipta/v1/telemetry.pb.h>
 #include <transport.h>
-#include <ward_manager.h>
 
 #include <map>
 #include <mutex>
 #include <string>
+
+// Forward-declared, not included: this header only ever holds a WardManager*
+// (never dereferenced here), so it does not need WardManager's full
+// definition, which transitively pulls in MAVSDK. Keeping the include out
+// lets this library compile with zero MAVSDK dependency in
+// KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF builds (see root CMakeLists.txt);
+// herald_ward_manager.cpp includes the real header only where it actually
+// calls a WardManager method, guarded by that same flag.
+class WardManager;
 
 // Result of ingesting one Herald message. kOk means a WardState (and, on
 // first sight of entity_id, a WardInfo) was built and broadcast; kWardIdCollision
@@ -34,6 +42,13 @@ class HeraldWardManager {
     // ward_id; this class never mutates it.
     HeraldWardManager(Transport& transport, WardManager& ward_manager);
 
+    // MAVLink-disabled builds (KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF, see root
+    // CMakeLists.txt): no WardManager exists to collide-check against, since
+    // there are no MAVLink ward_ids in that build at all. ingest() simply
+    // skips the collision check rather than taking a dangling/optional
+    // reference.
+    explicit HeraldWardManager(Transport& transport);
+
     HeraldWardManager(const HeraldWardManager&) = delete;
     HeraldWardManager& operator=(const HeraldWardManager&) = delete;
     HeraldWardManager(HeraldWardManager&&) = delete;
@@ -57,7 +72,11 @@ class HeraldWardManager {
 
    private:
     Transport& transport_;
-    WardManager& ward_manager_;
+    // Nullable: absent in MAVLink-disabled builds (see the single-argument
+    // constructor above). Never owned by this class either way. [[maybe_unused]]
+    // because a MAVLink-disabled build only ever writes it (both constructors),
+    // never reads it (ingest()'s read is behind the same #ifdef, see the .cpp).
+    [[maybe_unused]] WardManager* ward_manager_;
     mutable std::mutex mutex_;
     // Every entity_id ingest() has ever built a WardInfo for, so a repeat
     // message from the same source doesn't re-announce it. In-memory only,
