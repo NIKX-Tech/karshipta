@@ -75,7 +75,7 @@
 
 		{#if !fleet.gatewayConnected}
 			<p class="mt-3 text-[10px] text-fg-muted">
-				Simulated and real wards need a running gateway; the amber GATEWAY button top-right connects
+				Simulated and real wards need a running gateway; the Gateway tab in the left rail connects
 				one.
 			</p>
 		{/if}

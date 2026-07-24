@@ -5,19 +5,18 @@
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
+	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
 	import { FAKE_FLEET_CENTER, FakeGateway } from '$lib/fake/fleet-sim';
 	import FleetMap from '$lib/components/fleet-map.svelte';
 	import LeftRail from '$lib/components/left-rail.svelte';
 	import RightPanel from '$lib/components/right-panel.svelte';
-	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import LocationPickerBar from '$lib/components/location-picker-bar.svelte';
 	import logoMark from '$lib/assets/logo-mark.svg';
 
 	const DEFAULT_FLEET_LABEL = 'Fleet';
 
-	let connectionPanelOpen = $state(false);
 	// Overridable display label for "fleet" (e.g. a livestock-tracking deploy
 	// might prefer "Herd"); purely cosmetic, does not rename any schema field.
 	let fleetLabel = $state(DEFAULT_FLEET_LABEL);
@@ -97,15 +96,6 @@
 		});
 		return () => fleet.teardown();
 	});
-
-	const linkLabel = $derived(fleet.link.toUpperCase());
-	const linkTone = $derived(
-		fleet.link === 'down'
-			? 'bg-critical'
-			: fleet.link === 'connecting'
-				? 'bg-fg-muted'
-				: 'bg-accent animate-pulse'
-	);
 </script>
 
 <svelte:head>
@@ -119,62 +109,48 @@
 	>
 		<img src={logoMark} alt="" class="h-3 w-auto" aria-hidden="true" />
 		<span class="font-display text-xs font-medium tracking-[0.25em]">KARSHIPTA</span>
-		<span class="ml-auto font-mono text-[10px] text-fg-muted tabular-nums">
-			WARDS {fleet.wardIds.length}
-		</span>
-		{#if fleet.readonly}
-			<span
-				class="rounded border border-edge px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
-				role="status"
-				aria-label="Read-only session"
-			>
-				VIEWER
-			</span>
-		{/if}
-		<button
-			class="flex h-6 w-6 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
-			onclick={() => themeStore.toggle()}
-			aria-label="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
-			title="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
-		>
-			{#if themeStore.current === 'dark'}
-				<svg
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.75"
-					stroke-linecap="round"
-					stroke-linejoin="round"
+		<div class="ml-auto flex items-center gap-2">
+			{#if fleet.readonly}
+				<span
+					class="rounded border border-edge px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
+					role="status"
+					aria-label="Read-only session"
 				>
-					<circle cx="12" cy="12" r="4" />
-					<path
-						d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
-					/>
-				</svg>
-			{:else}
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-					<path d="M20.5 14.5a8.5 8.5 0 1 1-9-13 7 7 0 0 0 9 13Z" />
-				</svg>
+					VIEWER
+				</span>
 			{/if}
-		</button>
-		<button
-			class="flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-white/5"
-			onclick={() => (connectionPanelOpen = !connectionPanelOpen)}
-			aria-expanded={connectionPanelOpen}
-			aria-label="Gateway connection, currently {linkLabel}"
-		>
-			<span class="inline-block h-2 w-2 rounded-full {linkTone}"></span>
-			<span class="font-mono text-[10px] text-fg-muted">{linkLabel}</span>
-		</button>
+			<button
+				class="flex h-6 w-6 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
+				onclick={() => themeStore.toggle()}
+				aria-label="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
+				title="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
+			>
+				{#if themeStore.current === 'dark'}
+					<svg
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<circle cx="12" cy="12" r="4" />
+						<path
+							d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+						/>
+					</svg>
+				{:else}
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+						<path d="M20.5 14.5a8.5 8.5 0 1 1-9-13 7 7 0 0 0 9 13Z" />
+					</svg>
+				{/if}
+			</button>
+		</div>
 	</header>
 
-	<LeftRail
-		{fleetLabel}
-		onopenconnection={() => (connectionPanelOpen = true)}
-		onstartdemoplacement={startPlacement}
-	/>
+	<LeftRail {fleetLabel} onstartdemoplacement={startPlacement} />
 
 	<div class="relative">
 		{#if mapCenterLat !== undefined && mapCenterLon !== undefined}
@@ -193,7 +169,7 @@
 		     click meant for it. -->
 		{#if fleet.wardIds.length === 0 && !placing && !zoneStore.draft}
 			<EmptyState
-				onopenconnection={() => (connectionPanelOpen = true)}
+				onopenconnection={() => leftRailUi.openGatewayTab()}
 				onstartdemoplacement={startPlacement}
 			/>
 		{/if}
@@ -219,8 +195,4 @@
 	</div>
 
 	<RightPanel {fleetLabel} />
-
-	{#if connectionPanelOpen}
-		<ConnectionPanel onclose={() => (connectionPanelOpen = false)} />
-	{/if}
 </div>

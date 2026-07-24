@@ -1,12 +1,6 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 
-	interface Props {
-		onclose: () => void;
-	}
-
-	const { onclose }: Props = $props();
-
 	const DEFAULT_GATEWAY_URL = 'ws://localhost:8765';
 	const DEFAULT_RELAY_URL = 'wss://relay.example.com/ws';
 
@@ -18,10 +12,6 @@
 	let pairCodeInput = $state('');
 	let pairError = $state('');
 	let pairing = $state(false);
-
-	function onkeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') onclose();
-	}
 
 	function connect() {
 		if (mode === 'websocket') {
@@ -53,24 +43,8 @@
 	}
 </script>
 
-<svelte:window {onkeydown} />
-
-<section
-	class="absolute top-11 right-3 z-40 w-72 rounded border border-edge bg-panel p-3"
-	aria-label="Gateway connection"
->
-	<div class="flex items-center justify-between">
-		<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">GATEWAY</h3>
-		<button
-			class="rounded px-1 text-sm leading-none text-fg-muted hover:text-fg"
-			aria-label="Close connection panel"
-			onclick={onclose}
-		>
-			&#x2715;
-		</button>
-	</div>
-
-	<div class="mt-2 flex gap-1.5 text-[10px]" role="group" aria-label="Transport">
+<div class="flex flex-col gap-2 text-[10px]">
+	<div class="flex gap-1.5" role="group" aria-label="Transport">
 		<button
 			type="button"
 			aria-pressed={mode === 'websocket'}
@@ -94,7 +68,7 @@
 	</div>
 
 	{#if mode === 'websocket'}
-		<label class="mt-2 block text-[10px]">
+		<label class="block">
 			<span class="text-fg-muted">WebSocket URL</span>
 			<input
 				type="text"
@@ -105,7 +79,7 @@
 			/>
 		</label>
 	{:else}
-		<label class="mt-2 block text-[10px]">
+		<label class="block">
 			<span class="text-fg-muted">Relay URL</span>
 			<input
 				type="text"
@@ -115,7 +89,7 @@
 				class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
 			/>
 		</label>
-		<label class="mt-2 block text-[10px]">
+		<label class="block">
 			<span class="text-fg-muted">Device ID</span>
 			<input
 				type="text"
@@ -124,7 +98,7 @@
 				class="mt-1 w-full rounded border border-edge bg-ink px-2 py-1 font-mono text-xs disabled:opacity-50"
 			/>
 		</label>
-		<label class="mt-2 block text-[10px]">
+		<label class="block">
 			<span class="text-fg-muted">Device token</span>
 			<input
 				type="password"
@@ -135,7 +109,7 @@
 		</label>
 	{/if}
 
-	<div class="mt-2 flex gap-1.5">
+	<div class="flex gap-1.5">
 		{#if fleet.gatewayConnected || fleet.link === 'connecting'}
 			<button class="connection-button" onclick={() => fleet.disconnectGateway()}>
 				{fleet.link === 'connecting' ? 'Cancel' : 'Disconnect'}
@@ -146,8 +120,8 @@
 	</div>
 
 	{#if mode === 'relay' && fleet.link !== 'down' && fleet.relayAwaitingPair}
-		<div class="mt-3 border-t border-edge pt-2">
-			<label class="block text-[10px]">
+		<div class="border-t border-edge pt-2">
+			<label class="block">
 				<span class="text-fg-muted">Pairing code</span>
 				<input
 					type="text"
@@ -161,15 +135,13 @@
 				{pairing ? 'Pairing...' : 'Pair'}
 			</button>
 			{#if pairError}
-				<p class="mt-1 text-[10px] text-critical">{pairError}</p>
+				<p class="mt-1 text-critical">{pairError}</p>
 			{/if}
-			<p class="mt-1 text-[10px] text-fg-muted">
-				Enter the code shown by the gateway's pairing tool.
-			</p>
+			<p class="mt-1 text-fg-muted">Enter the code shown by the gateway's pairing tool.</p>
 		</div>
 	{/if}
 
-	<p class="mt-2 text-[10px] text-fg-muted">
+	<p class="text-fg-muted">
 		{#if mode === 'websocket'}
 			Real hardware and simulated (PX4 SITL) wards both connect through a running gateway. See
 			<a
@@ -190,7 +162,7 @@
 			>.
 		{/if}
 	</p>
-</section>
+</div>
 
 <style>
 	@reference '../../routes/layout.css';
