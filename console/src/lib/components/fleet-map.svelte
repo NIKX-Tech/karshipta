@@ -425,18 +425,17 @@
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
 		});
-		const currentViewport = (): ViewportBounds => {
+		const requestGeozones = () => {
 			const bounds = created.getBounds();
-			return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+			const viewport: ViewportBounds = [
+				bounds.getWest(),
+				bounds.getSouth(),
+				bounds.getEast(),
+				bounds.getNorth()
+			];
+			geozoneStore.requestViewport(viewport);
 		};
-		const requestGeozones = () => geozoneStore.requestViewport(currentViewport());
-		// Lets fleet.connectGateway() stream only wards actually on screen,
-		// same debounced-viewport shape as requestGeozones above - see
-		// FleetStore.setViewport's own doc comment for why this is safe to
-		// call unconditionally (no-ops with no plain gateway connection).
-		const reportViewportToFleet = () => fleet.setViewport(currentViewport());
 		created.on('moveend', requestGeozones);
-		created.on('moveend', reportViewportToFleet);
 		created.on('load', () => {
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
@@ -628,7 +627,6 @@
 				?.classList.remove('maplibregl-compact-show');
 			mapLoaded = true;
 			requestGeozones();
-			reportViewportToFleet();
 		});
 		map = created;
 		return () => {
