@@ -102,6 +102,12 @@ karshipta::v1::WardState build_ward_state(const herald::v0::Herald& msg) {
     // WardState carries no org scoping today (github issue #104).
     // Intentionally dropped here rather than stored in a made-up field.
 
+    // msg.source() (human-readable label for which system sent this) has no
+    // WardState equivalent either, and isn't the same thing as tags (which
+    // are operator-defined grouping labels, not a provenance string).
+    // Intentionally dropped for the same reason as org_id above, not stored
+    // in a made-up field or conflated with tags.
+
     return state;
 }
 

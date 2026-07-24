@@ -361,6 +361,8 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/herald/herald_ward_manager_test.cpp
     tests/herald/gt06_parser_test.cpp
     tests/herald/herald_field_mapper_test.cpp
+    tests/herald/herald_http_server_test.cpp
+    tests/herald/gt06_tcp_server_test.cpp
   )
   if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     list(APPEND KARSHIPTA_TEST_SOURCES tests/transport/relay_transport_test.cpp)
@@ -378,6 +380,10 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     transport
     # the transport test drives the server with a real ix client
     ixwebsocket::ixwebsocket
+    # herald_http_server_test.cpp drives HeraldHttpServer with a real
+    # httplib::Client, the same "real client against a real listener"
+    # approach websocket_transport_test.cpp already uses for WebsocketTransport
+    httplib::httplib
     karshipta_warnings
   )
 
