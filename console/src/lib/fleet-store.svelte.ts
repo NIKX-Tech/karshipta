@@ -8,7 +8,7 @@ import {
 	type MissionProgress
 } from '$lib/gen/karshipta/v1/command';
 import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
-import type { WardClass } from '$lib/gen/karshipta/v1/common';
+import { Severity, type WardClass } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
@@ -559,7 +559,34 @@ class FleetStore {
 				const ack = payload.commandAck;
 				const tracker = this.commands[ack.commandId];
 				if (!tracker) {
-					console.warn(`fleet: CommandAck for unknown command_id ${ack.commandId}`);
+					// Not necessarily a bug: the gateway itself synthesizes and
+					// enqueues a StartMissionCommand once a FleetMissionAssignment's
+					// per-ward upload lands (ward_manager.cpp's pending_start), a
+					// command this client never sent and so never tracked. A
+					// rejection of that auto-start would otherwise vanish with
+					// nothing but this console.warn - surfaced as an Event instead,
+					// the same channel a fleet mission's upload-phase rejection
+					// already uses (MISSION_UPLOAD_REJECTED), so a failure on one
+					// ward in a multi-ward assignment is never silently invisible.
+					// A success needs no separate surfacing: missionProgress ticks
+					// already show the ward flying.
+					if (
+						ack.status === CommandStatus.COMMAND_STATUS_REJECTED ||
+						ack.status === CommandStatus.COMMAND_STATUS_TIMEOUT
+					) {
+						this.events = [
+							{
+								wardId: ack.wardId,
+								timestampMs: Date.now(),
+								severity: Severity.SEVERITY_WARNING,
+								code: 'COMMAND_REJECTED',
+								message: ack.message
+							},
+							...this.events
+						].slice(0, MAX_EVENTS);
+					} else {
+						console.warn(`fleet: CommandAck for unknown command_id ${ack.commandId}`);
+					}
 					break;
 				}
 				this.settle(ack.commandId, ack.status, ack.message);

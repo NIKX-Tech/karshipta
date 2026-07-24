@@ -157,8 +157,13 @@ class FleetGroupsStore {
 
 	/** Sends the draft as one FleetMissionAssignment; no correlated ack
 	 * exists for this request (mirrors solo Envelope.mission_upload, which
-	 * has none either) - per-ward outcomes surface through the normal
-	 * CommandAck/Event channels fleet-store.svelte.ts already displays. */
+	 * has none either). Per-ward outcomes surface through fleet-store's
+	 * events feed: an upload rejection as MISSION_UPLOAD_REJECTED, and a
+	 * rejected auto-start (the gateway's own synthesized StartMissionCommand,
+	 * never tracked client-side since this client never sent it) as
+	 * COMMAND_REJECTED via applyEnvelope's commandAck fallback - see its
+	 * comment. A successful start needs no separate surfacing: the ward's
+	 * own missionProgress ticks already show it running. */
 	assignMission(missionName: string): boolean {
 		const draft = this.missionAssignmentDraft;
 		if (!draft || draft.waypoints.length === 0 || draft.wardIds.length === 0) return false;
