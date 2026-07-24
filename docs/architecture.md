@@ -1,8 +1,44 @@
 # Karshipta Architecture
 
-![How a ward gets from the field onto the map: proto contract, gateway core, MAVLink and Herald ingestion, distribution, and roadmap](images/architecture.png)
+One shared wire contract, one gateway process, and two ways in for a ward: MAVLink for flight vehicles via MAVSDK, or Herald for anything else that is not an autopilot.
 
-*The proto contract both sides generate from, the gateway core and its two ingestion domains, how the same core reaches customers who would rather not run it themselves (dashed, separate repos), and what is still on the roadmap (dashed chips). Reflects `dev`; regenerate this diagram when the shape of the system actually changes, not on every commit.*
+```mermaid
+flowchart TD
+    proto["<b>proto/karshipta/v1</b><br/><span style='font-size:11px'>the wire contract</span>"]:::contractNode
+    console["<b>Console</b><br/><span style='font-size:11px'>SvelteKit + MapLibre</span>"]:::consoleNode
+    gateway["<b>Gateway</b> <span style='font-size:11px'>C++20</span><br/><span style='font-size:11px'>WardManager &middot; HeraldWardManager &middot; FleetManager</span>"]:::gatewayNode
+
+    proto -. "protoc: C++" .-> gateway
+    proto -. "ts-proto: TS" .-> console
+
+    console == "WebSocket, LAN direct" ==> gateway
+    console -- "Relay (relayly), NAT traversal" --> gateway
+
+    subgraph flight ["<b>FLIGHT</b> &middot; MAVLink vehicles"]
+        mavsdk["<b>MAVSDK</b>"]:::flightNode -- "MAVLink, UDP 14540+" --> vehicle["<b>PX4 / ArduPilot</b><br/><span style='font-size:11px'>SITL or real autopilot</span>"]:::flightNode
+    end
+
+    subgraph herald ["<b>HERALD</b> &middot; anything without an autopilot"]
+        native["<b>Native</b><br/><span style='font-size:11px'>POST /herald</span>"]:::heraldNode --> tags["<b>Tags &amp; generic<br/>trackers</b>"]:::heraldNode
+        mapped["<b>Mapped</b><br/><span style='font-size:11px'>POST /herald/mapped/&lt;source&gt;</span>"]:::heraldNode --> tags
+        gt06["<b>GT06</b><br/><span style='font-size:11px'>TCP :5023</span>"]:::heraldNode --> tags
+    end
+
+    gateway --> flight
+    gateway --> herald
+
+    classDef contractNode fill:none,stroke:#f5a623,stroke-width:2px
+    classDef gatewayNode fill:none,stroke:#f5a623,stroke-width:2px
+    classDef consoleNode fill:none,stroke:#3b9eff,stroke-width:2px
+    classDef flightNode fill:none,stroke:#2ecc71,stroke-width:1.5px
+    classDef heraldNode fill:none,stroke:#a78bfa,stroke-width:1.5px
+
+    style flight fill:none,stroke:#2ecc71,stroke-width:1.5px
+    style herald fill:none,stroke:#a78bfa,stroke-width:1.5px
+```
+
+> [!NOTE]
+> **On the roadmap, not built yet:** a DJI-to-MAVLink bridge, a Cursor-on-Target bridge ([#105](https://github.com/NIKX-Tech/karshipta/issues/105)), an OGC SensorThings bridge ([#106](https://github.com/NIKX-Tech/karshipta/issues/106)), and org scoping for Herald's `org_id` field ([#104](https://github.com/NIKX-Tech/karshipta/issues/104)).
 
 ## Components
 
