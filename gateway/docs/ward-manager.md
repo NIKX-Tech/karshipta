@@ -5,9 +5,14 @@
 
 ## Overview
 
-`WardManager` owns the fleet: one `ManagedWard` (a `WardConnection` +
-`TelemetryInfo` + `WardActions` + `CommandExecutor` quartet) per registered
-ward, all sharing one `mavsdk::Mavsdk` core, keyed by `ward_id`. It is the
+`WardManager` owns the fleet: one `ManagedWard` per registered ward, all
+sharing one `mavsdk::Mavsdk` core, keyed by `ward_id`. Each `ManagedWard`
+holds five always-present members, set once at construction and never
+reassigned (`WardConnection`, `TelemetryInfo`, `WardActions`, `WardMission`,
+`MissionImporter`), plus one `CommandExecutor` with a different lifecycle:
+null while the ward is stopped or mid-transition, built and torn down
+separately from the other five (see `ManagedWard`'s own struct comment in
+`ward_manager.h` and the Threading section below). It is the
 **only** class `main.cpp` (or any future consumer) talks to for ward
 interaction: nothing outside `gateway/libs/ward/` constructs or calls
 `WardConnection`/`TelemetryInfo`/`WardActions`/`CommandExecutor` directly.

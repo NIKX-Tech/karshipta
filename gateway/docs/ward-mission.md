@@ -314,6 +314,9 @@ list). From a throwaway call (e.g. a scratch harness or a temporary line in
 
 followed by progress-driven log lines as the ward flies it, and, if the
 mission's last item was `MISSION_ACTION_RTL`, a `pending_return_to_launch_`
-flip once the final pass completes (observable today only by polling
-`take_pending_return_to_launch()` directly; `WardManager` does not yet
-act on it - that wiring is a separate follow-up task).
+flip once the final pass completes. `WardManager::run_publish_loop()` now
+polls `take_pending_return_to_launch()` on every tick and turns a flip into
+a deferred, synthetic `ReturnToLaunchCommand` dispatch (see
+`ward-manager.md`'s Threading section) - the standalone-harness call above
+still shows the flag flipping in isolation, but a real gateway process acts
+on it automatically without any separate call needed.

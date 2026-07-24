@@ -67,9 +67,9 @@ Leave this running too. It publishes one ward, `sitl-1`, at
 The gateway binds to loopback only by default (`gateway/config/gateway.yaml`),
 so it is not reachable from another machine on your network. If the console
 runs on a different machine than the gateway, do not widen this bind:
-cross-machine access is meant to go through the relay transport (see
-`gateway/docs/relay-transport.md`), which is still scaffold-only as of M4.
-If you understand the risk and need a bare-LAN bind anyway (no
+cross-machine access is meant to go through the relay transport instead
+(see `gateway/docs/relay-transport.md`, verified end to end). If you
+understand the risk and need a bare-LAN bind anyway (no
 authentication exists yet: anyone who can reach the address can command
 every connected ward), set `websocket.allow_lan_bind: true` and
 `websocket.host` to a reachable address in `gateway/config/gateway.yaml`;
@@ -121,10 +121,15 @@ full mapping and the HTTP status codes a POST can come back with.
 
 ## Multiple wards
 
-Not yet: the gateway connects to exactly one ward
-(`kConnectionUrl`/`kWardId` in `gateway/src/main.cpp`) until the config
-file and `WardManager` land in gateway M4
-([tracking issue](https://github.com/NIKX-Tech/karshipta/issues/16)).
+The gateway manages any number of wards concurrently (`WardManager`, see
+`gateway/docs/ward-manager.md`), each independently reconnecting. It seeds
+one default (`sitl-1`, `udp://:14540`) on first run with nothing persisted
+yet; add more with an `AddWard` envelope (the console's "Add real ward"
+dialog, or by hand with `gateway/tools/ws_client.py`) naming a distinct
+`ward_id` and `connection_url` (e.g. `udp://:14541` for a second SITL
+instance started the same way as step 1, on a different port). Every
+successful add/remove persists to `gateway/config/fleet_state.yaml`, so the
+fleet survives a gateway restart.
 
 ## Troubleshooting
 

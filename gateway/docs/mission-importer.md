@@ -38,7 +38,8 @@ succeeded (`ensure_mission_raw()`).
   already enforces these on whatever `Mission` it receives, imported or not;
   duplicating that here would just be two places to keep in sync.
 - **Wiring the wire-level `MissionFileUpload`/`MissionDownloadRequest`
-  payloads to this class.** `WardManager`'s job, not yet implemented.
+  payloads to this class.** `WardManager`'s job (`handle_mission_file_upload`/
+  `handle_mission_download_request`; see `ward-manager.md`'s Public API).
 - **Any command a raw mission item can carry that our schema has no field
   for** (camera/gimbal actions, survey patterns, an embedded
   `DO_CHANGE_SPEED` item). Rejected explicitly, not approximated.

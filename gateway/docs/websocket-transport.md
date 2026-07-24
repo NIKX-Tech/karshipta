@@ -122,11 +122,13 @@ websocket:
     **ignored** and the transport binds to `127.0.0.1` anyway, with a
     logged warning explaining why and how to opt in.
 - **Cross-machine access is meant to go through `RelayTransport` instead**
-  (`gateway/docs/relay-transport.md`), not a LAN-exposed plain websocket.
-  `allow_lan_bind` exists for cases (LAN testing, a trusted isolated
-  network) where that is not yet practical, not as the recommended path.
-  `container_bind` is narrower still: it is meant only for the
-  docker-compose demo, not as a general substitute for `allow_lan_bind`.
+  (`gateway/docs/relay-transport.md`, verified end to end), not a
+  LAN-exposed plain websocket. `allow_lan_bind` exists for cases (LAN
+  testing, a trusted isolated network) where standing up a relay server is
+  more overhead than the situation calls for, not as the recommended path
+  for a real deployment. `container_bind` is narrower still: it is meant
+  only for the docker-compose demo, not as a general substitute for
+  `allow_lan_bind`.
 
 This policy lives in `from_config()`, not the plain constructor: the
 constructor still binds wherever it is told, unconditionally, since tests
