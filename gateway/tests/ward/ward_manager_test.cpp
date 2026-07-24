@@ -630,3 +630,39 @@ TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsMissionDownloadRequestWithEve
     EXPECT_EQ(event->ward_id(), "alpha-1");
     EXPECT_EQ(event->message(), "read-only session");
 }
+
+// ---------- Flight mode mapping ----------
+
+// mavsdk::Telemetry::FlightMode's mapping onto karshipta.v1.FlightMode
+// (ward_manager_internal::to_proto_flight_mode) is a plain switch with a
+// default case, unlike herald_ward_manager.cpp's to_ward_class(), which was
+// already exhaustively tested. A default silently absorbs a mode MAVSDK adds
+// in a future SDK bump into FLIGHT_MODE_UNKNOWN with no compiler warning and
+// no test failure; this test pins every mode MAVSDK 3.17 actually defines to
+// its expected proto value, so a new mode shows up here as a case this list
+// doesn't cover, not as a silent behavior change.
+TEST(WardManagerFlightModeMapping, MapsEveryKnownFlightModeToExpectedProtoValue) {
+    using mavsdk::Telemetry;
+    const std::vector<std::pair<Telemetry::FlightMode, karshipta::v1::FlightMode>> cases = {
+        {Telemetry::FlightMode::Unknown, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Ready, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Takeoff, karshipta::v1::FLIGHT_MODE_TAKEOFF},
+        {Telemetry::FlightMode::Hold, karshipta::v1::FLIGHT_MODE_HOLD},
+        {Telemetry::FlightMode::Mission, karshipta::v1::FLIGHT_MODE_MISSION},
+        {Telemetry::FlightMode::ReturnToLaunch, karshipta::v1::FLIGHT_MODE_RETURN},
+        {Telemetry::FlightMode::Land, karshipta::v1::FLIGHT_MODE_LAND},
+        {Telemetry::FlightMode::Offboard, karshipta::v1::FLIGHT_MODE_OFFBOARD},
+        {Telemetry::FlightMode::FollowMe, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Manual, karshipta::v1::FLIGHT_MODE_MANUAL},
+        {Telemetry::FlightMode::Altctl, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Posctl, karshipta::v1::FLIGHT_MODE_POSITION},
+        {Telemetry::FlightMode::Acro, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Stabilized, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+        {Telemetry::FlightMode::Rattitude, karshipta::v1::FLIGHT_MODE_UNKNOWN},
+    };
+
+    for (const auto& [mavsdk_mode, expected] : cases) {
+        EXPECT_EQ(ward_manager_internal::to_proto_flight_mode(mavsdk_mode), expected)
+            << "mavsdk::Telemetry::FlightMode index " << static_cast<int>(mavsdk_mode);
+    }
+}

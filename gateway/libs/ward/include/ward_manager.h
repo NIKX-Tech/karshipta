@@ -492,4 +492,15 @@ private:
     void stop_worker(ManagedWard& ward);
 };
 
+// Not part of WardManager's own API: a pure, dependency-free mapping
+// function that used to live in ward_manager.cpp's anonymous namespace,
+// pulled out here so gateway/tests/ward/ward_manager_test.cpp can exercise
+// it directly (an exhaustive enum-to-enum switch is exactly the kind of
+// thing a one-line default silently hides a missed case for otherwise;
+// mirrors herald_ward_manager.cpp's to_ward_class(), which is proven the
+// same way, through its own MapsEveryEntityClassToExpectedWardClass test).
+namespace ward_manager_internal {
+karshipta::v1::FlightMode to_proto_flight_mode(mavsdk::Telemetry::FlightMode flight_mode);
+}  // namespace ward_manager_internal
+
 #endif  // KARSHIPTA_GATEWAY_WARD_MANAGER_H

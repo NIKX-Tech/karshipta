@@ -82,33 +82,6 @@ karshipta::v1::GpsFixType to_proto_fix_type(const mavsdk::Telemetry::FixType fix
     }
 }
 
-// mavsdk::Telemetry::FlightMode has more granularity than karshipta.v1.FlightMode; modes
-// with no proto equivalent (Ready, FollowMe, Altctl, Acro, Stabilized, Rattitude) map to
-// FLIGHT_MODE_UNKNOWN rather than UNSPECIFIED, since a mode IS active, it just isn't one
-// the schema names yet.
-karshipta::v1::FlightMode to_proto_flight_mode(const mavsdk::Telemetry::FlightMode flight_mode) {
-    switch (flight_mode) {
-        case mavsdk::Telemetry::FlightMode::Manual:
-            return karshipta::v1::FLIGHT_MODE_MANUAL;
-        case mavsdk::Telemetry::FlightMode::Hold:
-            return karshipta::v1::FLIGHT_MODE_HOLD;
-        case mavsdk::Telemetry::FlightMode::Mission:
-            return karshipta::v1::FLIGHT_MODE_MISSION;
-        case mavsdk::Telemetry::FlightMode::ReturnToLaunch:
-            return karshipta::v1::FLIGHT_MODE_RETURN;
-        case mavsdk::Telemetry::FlightMode::Takeoff:
-            return karshipta::v1::FLIGHT_MODE_TAKEOFF;
-        case mavsdk::Telemetry::FlightMode::Land:
-            return karshipta::v1::FLIGHT_MODE_LAND;
-        case mavsdk::Telemetry::FlightMode::Offboard:
-            return karshipta::v1::FLIGHT_MODE_OFFBOARD;
-        case mavsdk::Telemetry::FlightMode::Posctl:
-            return karshipta::v1::FLIGHT_MODE_POSITION;
-        default:
-            return karshipta::v1::FLIGHT_MODE_UNKNOWN;
-    }
-}
-
 karshipta::v1::WardState build_ward_state(const std::string& ward_id,
                                           const WardConnection& connection,
                                           const TelemetryInfo& telemetry) {
@@ -152,7 +125,8 @@ karshipta::v1::WardState build_ward_state(const std::string& ward_id,
     // populated here; a future non-MAVLink ingestion path would be the one
     // to leave it unset, not this function.
     auto* flight = state.mutable_flight();
-    flight->set_flight_mode(to_proto_flight_mode(telemetry.get_flight_mode()));
+    flight->set_flight_mode(
+        ward_manager_internal::to_proto_flight_mode(telemetry.get_flight_mode()));
     flight->set_armed(telemetry.is_armed());
     flight->set_in_air(telemetry.is_in_air());
     state.set_health_ok(telemetry.is_health_ok());
@@ -225,6 +199,37 @@ void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck&
 }
 
 }  // namespace
+
+namespace ward_manager_internal {
+
+// mavsdk::Telemetry::FlightMode has more granularity than karshipta.v1.FlightMode; modes
+// with no proto equivalent (Ready, FollowMe, Altctl, Acro, Stabilized, Rattitude) map to
+// FLIGHT_MODE_UNKNOWN rather than UNSPECIFIED, since a mode IS active, it just isn't one
+// the schema names yet.
+karshipta::v1::FlightMode to_proto_flight_mode(const mavsdk::Telemetry::FlightMode flight_mode) {
+    switch (flight_mode) {
+        case mavsdk::Telemetry::FlightMode::Manual:
+            return karshipta::v1::FLIGHT_MODE_MANUAL;
+        case mavsdk::Telemetry::FlightMode::Hold:
+            return karshipta::v1::FLIGHT_MODE_HOLD;
+        case mavsdk::Telemetry::FlightMode::Mission:
+            return karshipta::v1::FLIGHT_MODE_MISSION;
+        case mavsdk::Telemetry::FlightMode::ReturnToLaunch:
+            return karshipta::v1::FLIGHT_MODE_RETURN;
+        case mavsdk::Telemetry::FlightMode::Takeoff:
+            return karshipta::v1::FLIGHT_MODE_TAKEOFF;
+        case mavsdk::Telemetry::FlightMode::Land:
+            return karshipta::v1::FLIGHT_MODE_LAND;
+        case mavsdk::Telemetry::FlightMode::Offboard:
+            return karshipta::v1::FLIGHT_MODE_OFFBOARD;
+        case mavsdk::Telemetry::FlightMode::Posctl:
+            return karshipta::v1::FLIGHT_MODE_POSITION;
+        default:
+            return karshipta::v1::FLIGHT_MODE_UNKNOWN;
+    }
+}
+
+}  // namespace ward_manager_internal
 
 WardManager::WardManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
                          std::filesystem::path persistence_path)
