@@ -340,6 +340,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/fleet/fleet_zone_store_test.cpp
     tests/fleet/fleet_manager_test.cpp
     tests/herald/herald_ward_manager_test.cpp
+    tests/herald/gt06_parser_test.cpp
   )
   if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     list(APPEND KARSHIPTA_TEST_SOURCES tests/transport/relay_transport_test.cpp)
