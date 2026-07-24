@@ -79,15 +79,9 @@ instead of the fake fleet, no extra setup.
 
 ## Architecture
 
-```
- PX4 / ArduPilot wards (real or SITL)
-        |  MAVLink
-   [ gateway ]        C++20 + MAVSDK edge service
-        |  protobuf Envelopes over WebSocket (E2E-encrypted relay optional)
-   [ console ]        SvelteKit web dashboard
-```
+![How a ward gets from the field onto the map: proto contract, gateway core, MAVLink and Herald ingestion, distribution, and roadmap](docs/images/architecture.png)
 
-The protobuf schema in [`proto/karshipta/v1/`](proto/karshipta/v1/) is the contract everything is generated from: C++ types at gateway build time, TypeScript types via ts-proto. One binary Envelope per WebSocket frame, in both directions. See [docs/architecture.md](docs/architecture.md).
+The protobuf schema in [`proto/karshipta/v1/`](proto/karshipta/v1/) is the contract everything is generated from: C++ types at gateway build time, TypeScript types via ts-proto. One binary Envelope per WebSocket frame, in both directions. A ward reaches the gateway either as a MAVLink vehicle via MAVSDK, or through [Herald](gateway/docs/herald-ingest.md) for anything without an autopilot: tags, generic trackers, cheap GT06-family GPS hardware. See [docs/architecture.md](docs/architecture.md) for the full breakdown, including how the same core reaches customers who would rather not run it themselves.
 
 ## Contributing
 
