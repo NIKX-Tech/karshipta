@@ -216,3 +216,39 @@ TEST(FleetZoneStorePersistenceTest, PersistsOnMutateAndRoundTripsOnReload) {
 
     std::filesystem::remove(path);
 }
+
+// A read-only containing directory forces every write SQLite attempts to
+// fail with a real error, not a simulated one - the same failure mode a full
+// disk or a permissions problem produces in production. (A read-only
+// permission bit on the database file itself is not enough: POSIX permission
+// checks happen at open(), not on every write() to an already-open
+// descriptor, and the store's db handle is already open by the time this
+// test runs. SQLite's rollback journal, by contrast, is a fresh file created
+// alongside the main db on every write transaction, so it does hit the
+// permission check.) Proves create_zone()'s zone-row-plus-vertices insert is
+// genuinely all-or-nothing: before this, each INSERT ran unguarded, so a
+// failure partway through the vertex loop left the zone row committed with
+// an incomplete vertex list, a corrupted polygon permanently in the database.
+TEST(FleetZoneStorePersistenceTest, CreateZoneOnReadOnlyDirectoryThrowsWithoutPartialWrite) {
+    const auto dir =
+        std::filesystem::temp_directory_path() / "karshipta_fleet_zone_store_readonly_test_dir";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    const auto path = dir / "store.db";
+    FleetZoneStore store(path);  // opened while the directory is still writable
+
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_write,
+                                  std::filesystem::perm_options::remove);
+
+    EXPECT_THROW(store.create_zone("No-fly", karshipta::v1::ZONE_TYPE_KEEP_OUT, make_triangle(),
+                                    std::nullopt, std::nullopt),
+                 std::exception);
+    // The real assertion: not just that it threw, but that nothing from the
+    // failed attempt is visible afterward - list_zones() is a read, so it
+    // still works against the read-only directory.
+    EXPECT_TRUE(store.list_zones().empty());
+
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_write,
+                                  std::filesystem::perm_options::add);
+    std::filesystem::remove_all(dir);
+}

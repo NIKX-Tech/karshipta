@@ -1,5 +1,6 @@
 #include "fleet_manager.h"
 
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -403,4 +404,43 @@ TEST_F(FleetManagerTest, SendFleetZoneSnapshotSendsOneEnvelopePerEntity) {
     EXPECT_EQ(sent[0].fleet().name(), "Team A");
     EXPECT_TRUE(sent[1].has_zone());
     EXPECT_EQ(sent[1].zone().name(), "No-fly");
+}
+
+// ---------- Store failure safety ----------
+
+// A read-only containing directory forces the underlying FleetZoneStore to
+// throw (see fleet_zone_store_test.cpp's matching test for why the directory,
+// not the file itself, has to be the one made read-only) on every write it
+// attempts. Before this fix, that exception propagated straight out of the
+// handler: uncaught in main.cpp's envelope switch, it would have terminated
+// the whole gateway process over one bad request. Not a fixture test (needs
+// its own real file in its own directory, not manager_'s ":memory:"
+// database).
+TEST(FleetManagerCrashSafetyTest, StoreFailureBecomesRejectedAckInsteadOfAnUncaughtException) {
+    const auto dir =
+        std::filesystem::temp_directory_path() / "karshipta_fleet_manager_readonly_test_dir";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    const auto path = dir / "store.db";
+    FakeTransport transport;
+    FleetManager manager(transport, path);  // opened while the directory is still writable
+
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_write,
+                                  std::filesystem::perm_options::remove);
+
+    karshipta::v1::CreateFleet request;
+    request.set_request_id("req-1");
+    request.set_name("Team A");
+
+    // If this throws, it propagates out of the TEST body uncaught: gtest
+    // reports it as a crash, not a normal assertion failure, exactly
+    // mirroring the uncaught-exception-kills-the-process failure mode this
+    // fix closes.
+    const auto ack = manager.handle_create_fleet(request);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("internal error"), std::string::npos) << ack.message();
+
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_write,
+                                  std::filesystem::perm_options::add);
+    std::filesystem::remove_all(dir);
 }
