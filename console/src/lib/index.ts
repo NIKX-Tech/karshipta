@@ -106,6 +106,12 @@ export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './
 // display components
 export { default as FleetMap } from './components/fleet-map.svelte';
 export { default as LocationPickerBar } from './components/location-picker-bar.svelte';
+// Tabs is the icon-rail/tab-strip primitive left-rail.svelte and
+// right-panel.svelte are both built from - unlike them, it carries zero
+// self-host opinions (just ARIA tablist semantics + orientation), so a
+// consuming app can build its own rail shell in the same visual/interaction
+// language without forking either app-shell component wholesale.
+export { default as Tabs, type TabItem } from './components/ui/tabs.svelte';
 export { default as WardCard } from './components/ward-card.svelte';
 // WardDetail is now WardTab (its former self-scrolling <section> chrome
 // moved to right-panel.svelte's tabpanel wrapper, since the console's own
