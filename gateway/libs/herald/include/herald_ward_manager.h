@@ -37,17 +37,20 @@ enum class HeraldIngestResult { kOk, kWardIdCollision };
 // non-MAVLink ward," permanently, not just Herald's own native wire format.
 class HeraldWardManager {
    public:
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     // ward_manager is consulted (read-only, via has_ward()) to reject a
     // Herald message whose entity_id collides with an existing MAVLink
     // ward_id; this class never mutates it.
     HeraldWardManager(Transport& transport, WardManager& ward_manager);
-
+#else
     // MAVLink-disabled builds (KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF, see root
     // CMakeLists.txt): no WardManager exists to collide-check against, since
-    // there are no MAVLink ward_ids in that build at all. ingest() simply
-    // skips the collision check rather than taking a dangling/optional
-    // reference.
+    // there are no MAVLink ward_ids in that build at all. Only this
+    // constructor exists here (not the WardManager&-taking one above,
+    // conditionally compiled out) - a build where WardManager barely exists
+    // as a type should not expose a constructor that implies it does.
     explicit HeraldWardManager(Transport& transport);
+#endif
 
     HeraldWardManager(const HeraldWardManager&) = delete;
     HeraldWardManager& operator=(const HeraldWardManager&) = delete;
@@ -72,11 +75,17 @@ class HeraldWardManager {
 
    private:
     Transport& transport_;
-    // Nullable: absent in MAVLink-disabled builds (see the single-argument
-    // constructor above). Never owned by this class either way. [[maybe_unused]]
-    // because a MAVLink-disabled build only ever writes it (both constructors),
-    // never reads it (ingest()'s read is behind the same #ifdef, see the .cpp).
-    [[maybe_unused]] WardManager* ward_manager_;
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+    // Never owned by this class. Conditionally compiled out entirely in
+    // MAVLink-disabled builds (rather than kept as a nullable pointer marked
+    // [[maybe_unused]]): GCC rejects that attribute on a data member here
+    // ('maybe_unused' attribute ignored, -Werror=attributes) even though
+    // it's valid per the standard, and since the two constructors are
+    // already mutually exclusive per build (see above), there is no reason
+    // for this to be nullable at all - a plain reference is simpler and
+    // portable across both compilers this repo builds with.
+    WardManager& ward_manager_;
+#endif
     mutable std::mutex mutex_;
     // Every entity_id ingest() has ever built a WardInfo for, so a repeat
     // message from the same source doesn't re-announce it. In-memory only,
