@@ -1,63 +1,51 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
+	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
 	import WardCard from '$lib/components/ward-card.svelte';
 	import FleetRow from '$lib/components/fleet-row.svelte';
 	import EventsFeed from '$lib/components/events-feed.svelte';
+	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import Tabs, { type TabItem } from '$lib/components/ui/tabs.svelte';
 
 	interface Props {
 		fleetLabel: string;
-		onopenconnection: () => void;
 		onstartdemoplacement: () => void;
 	}
 
-	const { fleetLabel, onopenconnection, onstartdemoplacement }: Props = $props();
+	const { fleetLabel, onstartdemoplacement }: Props = $props();
 
-	const COLLAPSED_STORAGE_KEY = 'karshipta.leftRailCollapsed';
-
-	function readStoredCollapsed(): boolean {
-		if (typeof localStorage === 'undefined') return false;
-		return localStorage.getItem(COLLAPSED_STORAGE_KEY) === 'true';
-	}
-
-	// Starts expanded, unlike the right panel: the fleet list is core,
-	// always-relevant content (it was a fixed-width, always-visible aside
-	// before this restructure), not something that only becomes relevant
-	// after a later action the way ward detail does.
-	let collapsed = $state(readStoredCollapsed());
-
-	function setCollapsed(value: boolean) {
-		collapsed = value;
-		if (typeof localStorage === 'undefined') return;
-		localStorage.setItem(COLLAPSED_STORAGE_KEY, String(value));
-	}
-
+	// Gateway first: it's the prerequisite for anything else here to show
+	// real (non-demo) data, not just another content tab - the empty
+	// state's "Connect real ward"/"Add simulated ward" CTAs already funnel
+	// into it (leftRailUi.openGatewayTab()).
 	const TABS: TabItem[] = [
+		{ id: 'gateway', label: 'Gateway' },
 		{ id: 'fleets', label: 'Fleets' },
 		{ id: 'events', label: 'Events' }
 	];
-	let activeTab = $state<'fleets' | 'events'>('fleets');
-	const activeLabel = $derived(TABS.find((tab) => tab.id === activeTab)?.label ?? '');
+	const activeLabel = $derived(TABS.find((tab) => tab.id === leftRailUi.activeTab)?.label ?? '');
 
-	// Same "click the active tab to close, click a different one to switch
-	// and open" toggle the right panel's tabs use.
-	function onTabChange(id: string) {
-		if (id === activeTab && !collapsed) {
-			setCollapsed(true);
-			return;
-		}
-		activeTab = id as typeof activeTab;
-		setCollapsed(false);
-	}
+	const linkLabel = $derived(fleet.link.toUpperCase());
+	// Same tone logic the header used to own; always shown on the Gateway
+	// icon itself (not just while its tab is open), so connection status is
+	// visible at a glance regardless of which tab is active or whether the
+	// rail is collapsed - the thing that was missing before.
+	const linkTone = $derived(
+		fleet.link === 'down'
+			? 'bg-critical'
+			: fleet.link === 'connecting'
+				? 'bg-fg-muted'
+				: 'bg-accent animate-pulse'
+	);
 
 	// A small badge on the rail's Events icon for events that arrived while
 	// that tab wasn't the visible one - cleared the moment it actually is.
 	let lastSeenEventCount = $state(0);
 	const hasUnseenEvents = $derived(fleet.events.length > lastSeenEventCount);
 	$effect(() => {
-		if (activeTab === 'events' && !collapsed) {
+		if (leftRailUi.activeTab === 'events' && !leftRailUi.collapsed) {
 			lastSeenEventCount = fleet.events.length;
 		}
 	});
@@ -95,13 +83,37 @@
 	<div class="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-edge py-2">
 		<Tabs
 			tabs={TABS}
-			activeId={activeTab}
-			showSelection={!collapsed}
-			onchange={onTabChange}
+			activeId={leftRailUi.activeTab}
+			showSelection={!leftRailUi.collapsed}
+			onchange={(id) => leftRailUi.onTabChange(id)}
 			orientation="vertical"
 		>
 			{#snippet children(tab)}
-				{#if tab.id === 'fleets'}
+				{#if tab.id === 'gateway'}
+					<span class="relative flex items-center justify-center">
+						<svg
+							width="16"
+							height="16"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.75"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<circle cx="12" cy="12" r="2.5" />
+							<path d="M7.5 16.5a7 7 0 0 1 0-9" />
+							<path d="M16.5 7.5a7 7 0 0 1 0 9" />
+							<path d="M4.5 19.5a11 11 0 0 1 0-15" />
+							<path d="M19.5 4.5a11 11 0 0 1 0 15" />
+						</svg>
+						<span
+							class="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-panel {linkTone}"
+							aria-hidden="true"
+						></span>
+					</span>
+				{:else if tab.id === 'fleets'}
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 						<path d="M12 2 15 9 12 7.3 9 9Z" />
 						<path d="M5 12 8 19 5 17.3 2 19Z" />
@@ -135,19 +147,31 @@
 		</Tabs>
 	</div>
 
-	{#if !collapsed}
+	{#if !leftRailUi.collapsed}
 		<aside id="left-rail-content" class="flex w-80 flex-col" aria-label={activeLabel}>
 			<div class="flex items-center justify-between gap-2 border-b border-edge px-3 py-2">
-				<p class="font-mono text-[10px] font-medium tracking-widest text-fg-muted">
-					{activeLabel.toUpperCase()}
-				</p>
+				<div class="flex items-center gap-2">
+					<p class="font-mono text-[10px] font-medium tracking-widest text-fg-muted">
+						{activeLabel.toUpperCase()}
+					</p>
+					{#if leftRailUi.activeTab === 'gateway'}
+						<span class="flex items-center gap-1">
+							<span class="inline-block h-2 w-2 rounded-full {linkTone}"></span>
+							<span class="font-mono text-[10px] text-fg-muted">{linkLabel}</span>
+						</span>
+					{:else if leftRailUi.activeTab === 'fleets'}
+						<span class="font-mono text-[10px] text-fg-muted tabular-nums">
+							{fleet.wardIds.length} ward{fleet.wardIds.length === 1 ? '' : 's'}
+						</span>
+					{/if}
+				</div>
 				<button
 					type="button"
 					class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
 					aria-controls="left-rail-content"
 					aria-label="Collapse panel"
 					title="Collapse panel"
-					onclick={() => setCollapsed(true)}
+					onclick={() => leftRailUi.setCollapsed(true)}
 				>
 					<svg
 						width="14"
@@ -164,15 +188,30 @@
 					</svg>
 				</button>
 			</div>
+
+			<div
+				role="tabpanel"
+				id="tabpanel-gateway"
+				aria-labelledby="tab-gateway"
+				hidden={leftRailUi.activeTab !== 'gateway'}
+				class="min-h-0 flex-1 overflow-y-auto p-3"
+			>
+				<ConnectionPanel />
+			</div>
+
 			<div
 				role="tabpanel"
 				id="tabpanel-fleets"
 				aria-labelledby="tab-fleets"
-				hidden={activeTab !== 'fleets'}
+				hidden={leftRailUi.activeTab !== 'fleets'}
 				class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3"
 			>
 				<div class="flex gap-1.5">
-					<AddWardMenu variant="compact" {onopenconnection} {onstartdemoplacement} />
+					<AddWardMenu
+						variant="compact"
+						onopenconnection={() => leftRailUi.openGatewayTab()}
+						{onstartdemoplacement}
+					/>
 
 					<div class="relative">
 						<button
@@ -276,7 +315,7 @@
 				role="tabpanel"
 				id="tabpanel-events"
 				aria-labelledby="tab-events"
-				hidden={activeTab !== 'events'}
+				hidden={leftRailUi.activeTab !== 'events'}
 				class="min-h-0 flex-1 overflow-y-auto p-3"
 			>
 				<EventsFeed />
