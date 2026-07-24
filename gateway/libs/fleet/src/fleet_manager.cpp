@@ -97,11 +97,23 @@ void FleetManager::broadcast_gateway_warning(const std::string& code,
 karshipta::v1::FleetAck FleetManager::handle_create_fleet(const karshipta::v1::CreateFleet& request) {
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
-    const auto fleet_id = store_.create_fleet(request.name(), request.description());
-    ack.set_fleet_id(fleet_id);
-    ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
-    ack.set_message("fleet created");
-    if (const auto fleet = find_fleet(fleet_id)) broadcast_fleet(*fleet);
+    try {
+        const auto fleet_id = store_.create_fleet(request.name(), request.description());
+        ack.set_fleet_id(fleet_id);
+        ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
+        ack.set_message("fleet created");
+        if (const auto fleet = find_fleet(fleet_id)) broadcast_fleet(*fleet);
+    } catch (const std::exception& error) {
+        // FleetZoneStore throws on a SQLite failure (disk full, permissions,
+        // a concurrent-mutation race) - a per-request condition, not grounds
+        // to take the whole gateway down over one Fleet/Zone request. Caught
+        // here, at the boundary this class's own header already documents
+        // ("Never throw on bad input"), and turned into the same observable
+        // rejection shape every other store failure already produces.
+        spdlog::error("create_fleet request '{}' failed: {}", request.request_id(), error.what());
+        ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
+    }
     return ack;
 }
 
@@ -109,15 +121,25 @@ karshipta::v1::FleetAck FleetManager::handle_rename_fleet(const karshipta::v1::R
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
     ack.set_fleet_id(request.fleet_id());
-    const auto error = store_.rename_fleet(request.fleet_id(), request.name(), request.description());
-    if (error) {
-        spdlog::warn("rename_fleet request '{}' rejected: {}", request.request_id(), *error);
+    // See handle_create_fleet()'s comment. The whole body is one try, not
+    // just the mutation: find_fleet() below can throw too, and a rejection
+    // built from that must not be lost to an uncaught exception either.
+    try {
+        const auto error =
+            store_.rename_fleet(request.fleet_id(), request.name(), request.description());
+        if (error) {
+            spdlog::warn("rename_fleet request '{}' rejected: {}", request.request_id(), *error);
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
+            ack.set_message(*error);
+        } else {
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
+            ack.set_message("fleet renamed");
+            if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("rename_fleet request '{}' failed: {}", request.request_id(), error.what());
         ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
-        ack.set_message(*error);
-    } else {
-        ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
-        ack.set_message("fleet renamed");
-        if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        ack.set_message(std::string("internal error: ") + error.what());
     }
     return ack;
 }
@@ -126,7 +148,12 @@ karshipta::v1::FleetAck FleetManager::handle_delete_fleet(const karshipta::v1::D
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
     ack.set_fleet_id(request.fleet_id());
-    const auto error = store_.delete_fleet(request.fleet_id());
+    std::optional<std::string> error;
+    try {
+        error = store_.delete_fleet(request.fleet_id());
+    } catch (const std::exception& store_error) {
+        error = std::string("internal error: ") + store_error.what();
+    }
     if (error) {
         spdlog::warn("delete_fleet request '{}' rejected: {}", request.request_id(), *error);
         ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
@@ -146,15 +173,25 @@ karshipta::v1::FleetAck FleetManager::handle_add_ward_to_fleet(
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
     ack.set_fleet_id(request.fleet_id());
-    const auto error = store_.add_ward_to_fleet(request.fleet_id(), request.ward_id());
-    if (error) {
-        spdlog::warn("add_ward_to_fleet request '{}' rejected: {}", request.request_id(), *error);
+    // Whole body in one try, same reasoning as handle_rename_fleet(): the
+    // post-success find_fleet() below can throw too.
+    try {
+        const auto error = store_.add_ward_to_fleet(request.fleet_id(), request.ward_id());
+        if (error) {
+            spdlog::warn("add_ward_to_fleet request '{}' rejected: {}", request.request_id(),
+                         *error);
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
+            ack.set_message(*error);
+        } else {
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
+            ack.set_message("ward added to fleet");
+            if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("add_ward_to_fleet request '{}' failed: {}", request.request_id(),
+                      error.what());
         ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
-        ack.set_message(*error);
-    } else {
-        ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
-        ack.set_message("ward added to fleet");
-        if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        ack.set_message(std::string("internal error: ") + error.what());
     }
     return ack;
 }
@@ -164,16 +201,24 @@ karshipta::v1::FleetAck FleetManager::handle_remove_ward_from_fleet(
     karshipta::v1::FleetAck ack;
     ack.set_request_id(request.request_id());
     ack.set_fleet_id(request.fleet_id());
-    const auto error = store_.remove_ward_from_fleet(request.fleet_id(), request.ward_id());
-    if (error) {
-        spdlog::warn("remove_ward_from_fleet request '{}' rejected: {}", request.request_id(),
-                     *error);
+    // Whole body in one try, same reasoning as handle_rename_fleet().
+    try {
+        const auto error = store_.remove_ward_from_fleet(request.fleet_id(), request.ward_id());
+        if (error) {
+            spdlog::warn("remove_ward_from_fleet request '{}' rejected: {}", request.request_id(),
+                         *error);
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
+            ack.set_message(*error);
+        } else {
+            ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
+            ack.set_message("ward removed from fleet");
+            if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("remove_ward_from_fleet request '{}' failed: {}", request.request_id(),
+                      error.what());
         ack.set_status(karshipta::v1::FLEET_ACK_STATUS_REJECTED);
-        ack.set_message(*error);
-    } else {
-        ack.set_status(karshipta::v1::FLEET_ACK_STATUS_ACCEPTED);
-        ack.set_message("ward removed from fleet");
-        if (const auto fleet = find_fleet(request.fleet_id())) broadcast_fleet(*fleet);
+        ack.set_message(std::string("internal error: ") + error.what());
     }
     return ack;
 }
@@ -196,12 +241,18 @@ karshipta::v1::ZoneAck FleetManager::handle_create_zone(const karshipta::v1::Cre
         request.has_altitude_min_m() ? std::optional(request.altitude_min_m()) : std::nullopt;
     const std::optional<float> altitude_max_m =
         request.has_altitude_max_m() ? std::optional(request.altitude_max_m()) : std::nullopt;
-    const auto zone_id =
-        store_.create_zone(request.name(), request.type(), vertices, altitude_min_m, altitude_max_m);
-    ack.set_zone_id(zone_id);
-    ack.set_status(karshipta::v1::ZONE_ACK_STATUS_ACCEPTED);
-    ack.set_message("zone created");
-    if (const auto zone = find_zone(zone_id)) broadcast_zone(*zone);
+    try {
+        const auto zone_id = store_.create_zone(request.name(), request.type(), vertices,
+                                                 altitude_min_m, altitude_max_m);
+        ack.set_zone_id(zone_id);
+        ack.set_status(karshipta::v1::ZONE_ACK_STATUS_ACCEPTED);
+        ack.set_message("zone created");
+        if (const auto zone = find_zone(zone_id)) broadcast_zone(*zone);
+    } catch (const std::exception& error) {
+        spdlog::error("create_zone request '{}' failed: {}", request.request_id(), error.what());
+        ack.set_status(karshipta::v1::ZONE_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
+    }
     return ack;
 }
 
@@ -213,16 +264,24 @@ karshipta::v1::ZoneAck FleetManager::handle_update_zone(const karshipta::v1::Upd
         request.has_altitude_min_m() ? std::optional(request.altitude_min_m()) : std::nullopt;
     const std::optional<float> altitude_max_m =
         request.has_altitude_max_m() ? std::optional(request.altitude_max_m()) : std::nullopt;
-    const auto error = store_.update_zone(request.zone_id(), request.name(), request.type(),
-                                           altitude_min_m, altitude_max_m);
-    if (error) {
-        spdlog::warn("update_zone request '{}' rejected: {}", request.request_id(), *error);
+    // Whole body in one try, same reasoning as handle_rename_fleet(): the
+    // post-success find_zone() below can throw too.
+    try {
+        const auto error = store_.update_zone(request.zone_id(), request.name(), request.type(),
+                                               altitude_min_m, altitude_max_m);
+        if (error) {
+            spdlog::warn("update_zone request '{}' rejected: {}", request.request_id(), *error);
+            ack.set_status(karshipta::v1::ZONE_ACK_STATUS_REJECTED);
+            ack.set_message(*error);
+        } else {
+            ack.set_status(karshipta::v1::ZONE_ACK_STATUS_ACCEPTED);
+            ack.set_message("zone updated");
+            if (const auto zone = find_zone(request.zone_id())) broadcast_zone(*zone);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("update_zone request '{}' failed: {}", request.request_id(), error.what());
         ack.set_status(karshipta::v1::ZONE_ACK_STATUS_REJECTED);
-        ack.set_message(*error);
-    } else {
-        ack.set_status(karshipta::v1::ZONE_ACK_STATUS_ACCEPTED);
-        ack.set_message("zone updated");
-        if (const auto zone = find_zone(request.zone_id())) broadcast_zone(*zone);
+        ack.set_message(std::string("internal error: ") + error.what());
     }
     return ack;
 }
@@ -231,7 +290,12 @@ karshipta::v1::ZoneAck FleetManager::handle_delete_zone(const karshipta::v1::Del
     karshipta::v1::ZoneAck ack;
     ack.set_request_id(request.request_id());
     ack.set_zone_id(request.zone_id());
-    const auto error = store_.delete_zone(request.zone_id());
+    std::optional<std::string> error;
+    try {
+        error = store_.delete_zone(request.zone_id());
+    } catch (const std::exception& store_error) {
+        error = std::string("internal error: ") + store_error.what();
+    }
     if (error) {
         spdlog::warn("delete_zone request '{}' rejected: {}", request.request_id(), *error);
         ack.set_status(karshipta::v1::ZONE_ACK_STATUS_REJECTED);
@@ -253,12 +317,27 @@ void FleetManager::handle_fleet_mission_assignment(
     // Fleet or a handful of individual wards); only a non-empty fleet_id
     // is validated against the store, same as everywhere else fleet_id is
     // looked up.
-    if (!request.fleet_id().empty() && !find_fleet(request.fleet_id())) {
-        spdlog::warn("fleet_mission_assignment request '{}' rejected: unknown fleet_id '{}'",
-                     request.request_id(), request.fleet_id());
-        broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
-                                   "unknown fleet_id: " + request.fleet_id());
-        return;
+    if (!request.fleet_id().empty()) {
+        // See handle_create_fleet()'s comment: find_fleet() can throw if the
+        // store itself fails, and that must become a rejection here too, not
+        // an uncaught exception on this connection's worker thread.
+        bool fleet_exists = false;
+        try {
+            fleet_exists = find_fleet(request.fleet_id()).has_value();
+        } catch (const std::exception& error) {
+            spdlog::error("fleet_mission_assignment request '{}' failed: {}", request.request_id(),
+                          error.what());
+            broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
+                                       std::string("internal error: ") + error.what());
+            return;
+        }
+        if (!fleet_exists) {
+            spdlog::warn("fleet_mission_assignment request '{}' rejected: unknown fleet_id '{}'",
+                         request.request_id(), request.fleet_id());
+            broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
+                                       "unknown fleet_id: " + request.fleet_id());
+            return;
+        }
     }
     if (request.ward_ids_size() == 0) {
         spdlog::warn("fleet_mission_assignment request '{}' rejected: no wards selected",
@@ -411,14 +490,24 @@ void FleetManager::reject_viewer_envelope(const Transport::ClientId client,
 // ---------- Snapshot ----------
 
 void FleetManager::send_fleet_zone_snapshot(const Transport::ClientId client) const {
-    for (const auto& fleet : store_.list_fleets()) {
-        karshipta::v1::Envelope envelope;
-        *envelope.mutable_fleet() = fleet;
-        transport_.send(client, serialize_envelope(envelope));
-    }
-    for (const auto& zone : store_.list_zones()) {
-        karshipta::v1::Envelope envelope;
-        *envelope.mutable_zone() = zone;
-        transport_.send(client, serialize_envelope(envelope));
+    // Called from Transport::on_connect (see main.cpp), a path with no
+    // request to reject if the store fails - just log and skip this
+    // client's snapshot rather than let the exception escape uncaught and
+    // take the whole gateway down over one new connection. See
+    // handle_create_fleet()'s comment for the same reasoning applied to the
+    // request/ack handlers.
+    try {
+        for (const auto& fleet : store_.list_fleets()) {
+            karshipta::v1::Envelope envelope;
+            *envelope.mutable_fleet() = fleet;
+            transport_.send(client, serialize_envelope(envelope));
+        }
+        for (const auto& zone : store_.list_zones()) {
+            karshipta::v1::Envelope envelope;
+            *envelope.mutable_zone() = zone;
+            transport_.send(client, serialize_envelope(envelope));
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("send_fleet_zone_snapshot to client {} failed: {}", client, error.what());
     }
 }

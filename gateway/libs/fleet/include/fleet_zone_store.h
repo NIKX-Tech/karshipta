@@ -2,6 +2,7 @@
 #define KARSHIPTA_GATEWAY_FLEET_ZONE_STORE_H
 
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -21,7 +22,21 @@ struct sqlite3;  // opaque; keeps sqlite3.h out of every consumer's include path
 // RAII: opens the database and ensures the schema exists in the constructor,
 // closes in the destructor. Every mutating call commits immediately - a
 // handful of rows at this scale, not a hot path, so no explicit transaction
-// batching across calls.
+// batching across calls (create_zone is the one exception: its zone-row and
+// per-vertex inserts are wrapped in a single SQLite transaction, so a
+// mid-operation failure can never leave a zone committed with a partial
+// vertex list).
+//
+// Every public method takes mutex_ for its entire body: Transport::on_receive
+// fires on a per-connection worker thread, one thread per connection (see
+// websocket_transport.h), so two clients mutating Fleet/Zone state
+// concurrently is a real scenario, not a hypothetical. Coarse-grained (one
+// mutex for the whole store, not per-table/per-row) deliberately, matching
+// this class's own "not a hot path" framing above - this also closes a real
+// TOCTOU gap add_ward_to_fleet()/remove_ward_from_fleet() otherwise have
+// (existence check, then a separate mutating statement): a concurrent
+// delete_fleet() between the two could turn the mutation into a foreign-key
+// violation. One lock around each method makes that interleaving impossible.
 class FleetZoneStore {
    public:
     // path: the SQLite database file. ":memory:" works for tests (a fresh,
@@ -80,6 +95,8 @@ class FleetZoneStore {
     void create_schema();
 
     sqlite3* db_ = nullptr;
+    // Guards every public method's entire body; see the class comment above.
+    mutable std::mutex mutex_;
 };
 
 #endif  // KARSHIPTA_GATEWAY_FLEET_ZONE_STORE_H

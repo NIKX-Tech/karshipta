@@ -95,6 +95,37 @@ void exec(sqlite3* db, const char* sql) {
     }
 }
 
+// RAII SQLite transaction: BEGIN in the constructor, COMMIT via commit().
+// If commit() is never reached (a statement inside threw), the destructor
+// rolls back best-effort so a mid-operation failure never leaves a partial
+// multi-statement write committed. sqlite3_exec's own return here is
+// deliberately ignored: a destructor must not throw, and if ROLLBACK itself
+// fails there is nothing more this code can do beyond what the original
+// exception already reports.
+class Transaction {
+   public:
+    explicit Transaction(sqlite3* db) : db_(db) { exec(db_, "BEGIN;"); }
+    ~Transaction() {
+        if (!committed_) {
+            sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    }
+
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+    Transaction(Transaction&&) = delete;
+    Transaction& operator=(Transaction&&) = delete;
+
+    void commit() {
+        exec(db_, "COMMIT;");
+        committed_ = true;
+    }
+
+   private:
+    sqlite3* db_;
+    bool committed_ = false;
+};
+
 }  // namespace
 
 FleetZoneStore::FleetZoneStore(std::filesystem::path path) {
@@ -154,6 +185,7 @@ void FleetZoneStore::create_schema() {
 // ---------- Fleet ----------
 
 std::string FleetZoneStore::create_fleet(const std::string& name, const std::string& description) {
+    std::lock_guard lock(mutex_);
     const std::string fleet_id = synthesize_id("fleet");
     Statement insert(db_, "INSERT INTO fleets (fleet_id, name, description) VALUES (?, ?, ?);");
     insert.bind(1, fleet_id);
@@ -166,6 +198,7 @@ std::string FleetZoneStore::create_fleet(const std::string& name, const std::str
 std::optional<std::string> FleetZoneStore::rename_fleet(const std::string& fleet_id,
                                                           const std::string& name,
                                                           const std::string& description) {
+    std::lock_guard lock(mutex_);
     Statement update(db_, "UPDATE fleets SET name = ?, description = ? WHERE fleet_id = ?;");
     update.bind(1, name);
     update.bind(2, description);
@@ -178,6 +211,7 @@ std::optional<std::string> FleetZoneStore::rename_fleet(const std::string& fleet
 }
 
 std::optional<std::string> FleetZoneStore::delete_fleet(const std::string& fleet_id) {
+    std::lock_guard lock(mutex_);
     Statement remove(db_, "DELETE FROM fleets WHERE fleet_id = ?;");
     remove.bind(1, fleet_id);
     remove.run();
@@ -189,6 +223,7 @@ std::optional<std::string> FleetZoneStore::delete_fleet(const std::string& fleet
 
 std::optional<std::string> FleetZoneStore::add_ward_to_fleet(const std::string& fleet_id,
                                                                const std::string& ward_id) {
+    std::lock_guard lock(mutex_);
     {
         Statement exists(db_, "SELECT 1 FROM fleets WHERE fleet_id = ?;");
         exists.bind(1, fleet_id);
@@ -207,6 +242,7 @@ std::optional<std::string> FleetZoneStore::add_ward_to_fleet(const std::string& 
 
 std::optional<std::string> FleetZoneStore::remove_ward_from_fleet(const std::string& fleet_id,
                                                                     const std::string& ward_id) {
+    std::lock_guard lock(mutex_);
     {
         Statement exists(db_, "SELECT 1 FROM fleets WHERE fleet_id = ?;");
         exists.bind(1, fleet_id);
@@ -224,6 +260,7 @@ std::optional<std::string> FleetZoneStore::remove_ward_from_fleet(const std::str
 }
 
 std::vector<karshipta::v1::Fleet> FleetZoneStore::list_fleets() const {
+    std::lock_guard lock(mutex_);
     std::vector<karshipta::v1::Fleet> fleets;
     Statement select(db_, "SELECT fleet_id, name, description FROM fleets ORDER BY name;");
     while (select.step()) {
@@ -248,7 +285,16 @@ std::string FleetZoneStore::create_zone(const std::string& name, const karshipta
                                          const std::vector<karshipta::v1::GeoPoint>& vertices,
                                          const std::optional<float> altitude_min_m,
                                          const std::optional<float> altitude_max_m) {
+    std::lock_guard lock(mutex_);
     const std::string zone_id = synthesize_id("zone");
+    // Transaction, not just the mutex above: the mutex only rules out another
+    // thread interleaving, it does nothing for a mid-loop SQLite failure on
+    // this thread. Without BEGIN/COMMIT, a vertex insert failing partway
+    // through would leave the zone row committed with an incomplete vertex
+    // list - a corrupted polygon permanently in the DB. COMMIT only runs
+    // after every insert below succeeds; any exception before that rolls
+    // back via the Transaction destructor.
+    Transaction txn(db_);
     Statement insert(
         db_, "INSERT INTO zones (zone_id, name, type, altitude_min_m, altitude_max_m) "
              "VALUES (?, ?, ?, ?, ?);");
@@ -269,6 +315,7 @@ std::string FleetZoneStore::create_zone(const std::string& name, const karshipta
         insert_vertex.run();
         sqlite3_reset(insert_vertex.stmt_);
     }
+    txn.commit();
     return zone_id;
 }
 
@@ -277,6 +324,7 @@ std::optional<std::string> FleetZoneStore::update_zone(const std::string& zone_i
                                                          const karshipta::v1::ZoneType type,
                                                          const std::optional<float> altitude_min_m,
                                                          const std::optional<float> altitude_max_m) {
+    std::lock_guard lock(mutex_);
     Statement update(
         db_, "UPDATE zones SET name = ?, type = ?, altitude_min_m = ?, altitude_max_m = ? "
              "WHERE zone_id = ?;");
@@ -293,6 +341,7 @@ std::optional<std::string> FleetZoneStore::update_zone(const std::string& zone_i
 }
 
 std::optional<std::string> FleetZoneStore::delete_zone(const std::string& zone_id) {
+    std::lock_guard lock(mutex_);
     Statement remove(db_, "DELETE FROM zones WHERE zone_id = ?;");
     remove.bind(1, zone_id);
     remove.run();
@@ -303,6 +352,7 @@ std::optional<std::string> FleetZoneStore::delete_zone(const std::string& zone_i
 }
 
 std::vector<karshipta::v1::Zone> FleetZoneStore::list_zones() const {
+    std::lock_guard lock(mutex_);
     std::vector<karshipta::v1::Zone> zones;
     Statement select(db_,
                       "SELECT zone_id, name, type, altitude_min_m, altitude_max_m FROM zones ORDER BY name;");
