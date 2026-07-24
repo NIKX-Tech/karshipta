@@ -2,20 +2,27 @@
 
 `libs/herald/include/herald_ward_manager.h`, `libs/herald/src/herald_ward_manager.cpp`,
 `libs/herald/include/herald_http_server.h`, `libs/herald/src/herald_http_server.cpp`,
+`libs/herald/include/herald_field_mapper.h`, `libs/herald/src/herald_field_mapper.cpp`,
 `libs/herald/include/gt06_parser.h`, `libs/herald/src/gt06_parser.cpp`,
 `libs/herald/include/gt06_tcp_server.h`, `libs/herald/src/gt06_tcp_server.cpp`
 
 ## Overview
 
-Two independent ingestion paths, both normalizing onto the same
+Three independent ingestion paths, all normalizing onto the same
 `herald::v0::Herald` message and the same `HeraldWardManager::ingest()` entry
-point, so a ward reported through either looks identical downstream: one
+point, so a ward reported through any of them looks identical downstream: one
 `WardInfo` the first time an `entity_id` is seen, one `WardState` per message
 after that, broadcast over the same `Transport` every other ward uses.
 
-- **HTTP** (github issue #101): `POST /herald` with a native
-  `herald::v0::Herald` body (binary protobuf or JSON). `HeraldHttpServer` is a
-  thin listener that decodes the request body and calls `ingest()`.
+- **HTTP, native** (github issue #101): `POST /herald` with a body that's
+  already a `herald::v0::Herald` message (binary protobuf or JSON).
+  `HeraldHttpServer` is a thin listener that decodes the request body and
+  calls `ingest()`.
+- **HTTP, mapped** (github issue #102, the Herald spec's "Mapped" adoption
+  path): `POST /herald/mapped/<source_name>` with a vendor's own JSON
+  payload, translated via a declarative field-mapping config
+  (`HeraldFieldMapper`) instead of a bespoke per-vendor integration. See
+  "The Mapped path" below.
 - **GT06** (github issue #123): a raw binary TCP protocol (0x78 0x78 frame
   header, conventionally port 5023) hundreds of low-cost GPS tracker models
   speak natively (Concox/Jimi/iTrack family and countless OEM rebrands -
@@ -32,8 +39,8 @@ after that, broadcast over the same `Transport` every other ward uses.
   connection doesn't desync) but come back as `kUnsupported`, silently
   acknowledged where GT06 expects an ack and otherwise ignored.
 
-`HeraldWardManager` owns the mapping and broadcast for both paths equally -
-neither listener talks to `Transport` directly.
+`HeraldWardManager` owns the mapping and broadcast for all three paths
+equally - none of the three listeners talk to `Transport` directly.
 
 Herald is intentionally the normalization point for every non-MAVLink
 source, not just its own native wire format: a future CoT bridge or
@@ -49,9 +56,9 @@ built from this same repo - not a runtime toggle either exposes, a
 build-time CMake option (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK`, default `ON`,
 see the root `CMakeLists.txt`) used only when producing the two artifacts.
 Everything in this file - `HeraldWardManager`, `HeraldHttpServer`,
-`Gt06Parser`, `Gt06TcpServer`, `FleetManager` (Fleet/Zone CRUD) - links zero
-MAVSDK and is compiled into both artifacts identically. A livestock-tag-only
-or generic-tracker-only user runs the lean
+`HeraldFieldMapper`, `Gt06Parser`, `Gt06TcpServer`, `FleetManager` (Fleet/Zone
+CRUD) - links zero MAVSDK and is compiled into both artifacts identically. A
+livestock-tag-only or generic-tracker-only user runs the lean
 `karshipta-herald` build and never needs MAVSDK installed, never sees
 "gateway"/relay-pairing language (that's specifically a MAVLink-behind-NAT
 concern, see `relay-transport.md`), and connects the console to it exactly
@@ -97,6 +104,63 @@ Herald message needs additional per-connection state or trigonometry not
 required by issue #123's "basic tracking" scope; a natural future
 extension, not implemented today.
 
+## The Mapped path
+
+`POST /herald/mapped/<source_name>` - for a vendor source that won't (or
+can't) be rewritten to send Herald natively. Instead of a bespoke
+integration per vendor, a declarative YAML config says where each Herald
+field lives in that vendor's own JSON field names; `HeraldFieldMapper`
+reads the config once at startup and applies it to every request against
+that route.
+
+Every `*.yaml` file in `gateway.yaml`'s `herald.mapping_config_dir`
+(default `gateway/config/herald_mappings`) is loaded as one
+`HeraldFieldMapping`, keyed by its own `source_name`. A file that fails to
+parse is logged and skipped, not fatal - one broken mapping config must not
+take down the native or GT06 paths, or any other mapping. See
+`gateway/config/herald_mappings/example-generic.yaml` for the one
+clearly-documented generic worked example this scope calls for - a
+template to copy and adapt, not a specific closed vendor's integration.
+
+Config shape:
+
+```yaml
+source_name: example-generic       # also the URL segment: /herald/mapped/example-generic
+entity_class: ENTITY_CLASS_GENERIC_TRACKER   # fixed per mapping, see below
+timestamp_unit: unix_ms            # or unix_seconds
+fields:                            # Herald field name -> dot-path into the vendor payload
+  entity_id: device_id
+  timestamp_ms: timestamp
+  latitude_deg: location.lat
+  longitude_deg: location.lon
+  altitude_msl_m: location.alt     # optional
+  battery_voltage_v: battery.voltage       # optional
+  battery_remaining_pct: battery.percent   # optional
+  num_satellites: gps.satellites   # optional
+  health_ok: status.ok             # optional; defaults true if unmapped
+```
+
+`entity_id`/`timestamp_ms`/`latitude_deg`/`longitude_deg` are required -
+both at load time (the mapping config must map them to *some* path) and at
+request time (that path must resolve to a real value in the payload, or the
+whole request is rejected with 400). Every other field is optional at both
+levels: omit it from the config, or have it simply be absent from a given
+payload, and that part of the Herald message is left unset rather than
+rejecting the request. `entity_id` accepts a JSON string or number
+(coerced to its string form); the four numeric fields accept a JSON number
+or a numeric string (some vendors send coordinates as strings).
+
+Deliberate simplifications, not oversights (see `herald_field_mapper.h` for
+the full reasoning): `entity_class` is one fixed value per mapping config,
+not a further per-message value-to-`EntityClass` lookup table - a source
+reporting more than one device type needs a separate mapping config per
+type, which the existing one-config-per-source model already supports.
+`velocity`, `hdop`, `tags`, and `metadata` have no mapping keys at all in
+this pass - not fields a "generic worked example" needs to demonstrate the
+mechanism. ISO 8601 string timestamps aren't supported, only numeric
+`unix_ms`/`unix_seconds` - real timezone/format complexity not needed for
+one worked example.
+
 ## Explicitly out of scope
 
 - **Commands.** A Herald-reporting source has no autopilot; there is nothing
@@ -107,9 +171,12 @@ extension, not implemented today.
   entirely "it has posted a message"; there is nothing meaningful to persist
   across a process restart the way `WardManager` persists operator-added
   `WardConfig`s.
-- **Vendor mapping / CoT / SensorThings bridges** (github issues #102/#105/#106).
-  Those translate some other format into a Herald message; this class only
-  consumes the Herald message once it exists.
+- **CoT / SensorThings bridges** (github issues #105/#106). Those translate
+  some other protocol into a Herald message; this class only consumes the
+  Herald message once it exists.
+- **Value-to-EntityClass mapping tables, per-message overrides, everything
+  in the Mapped path beyond the narrow scope in "The Mapped path" below**
+  (github issue #102's original, broader milestone scope).
 - **Org scoping.** `Herald.org_id` is read but has no `WardState` destination
   yet (github issue #104); it is intentionally dropped, not stored in an
   invented field.
@@ -129,10 +196,17 @@ extension, not implemented today.
 
 | Member | Behavior |
 |---|---|
-| `HeraldHttpServer(HeraldWardManager&, string host, uint16_t port)` | Direct construction; prefer `from_config()`. |
-| `static unique_ptr<HeraldHttpServer> from_config(const string& config_path, HeraldWardManager&)` | Reads `herald.host`/`herald.http_port`/`herald.allow_lan_bind` from the gateway YAML config, same safe-loopback-by-default policy as `WebsocketTransport::from_config`. Falls back to `127.0.0.1:8766` on a missing or malformed file. |
+| `HeraldHttpServer(HeraldWardManager&, string host, uint16_t port, map<string, HeraldFieldMapping> mappings = {})` | Direct construction; prefer `from_config()`. |
+| `static unique_ptr<HeraldHttpServer> from_config(const string& config_path, HeraldWardManager&)` | Reads `herald.host`/`herald.http_port`/`herald.allow_lan_bind`/`herald.mapping_config_dir` from the gateway YAML config, same safe-loopback-by-default policy as `WebsocketTransport::from_config`. Falls back to `127.0.0.1:8766` on a missing or malformed file; loads every `*.yaml` in `herald.mapping_config_dir` (default `gateway/config/herald_mappings`) as a `HeraldFieldMapping`. |
 | `void start()` | Starts listening on its own thread. Idempotent. |
 | `void stop()` | Stops the server and joins its thread. Idempotent. |
+
+### `HeraldFieldMapper` (pure logic, no networking)
+
+| Member | Behavior |
+|---|---|
+| `static optional<HeraldFieldMapping> load_mapping(const string& yaml_path)` | Parses one mapping config file. `nullopt` (logging why) on a missing file, malformed YAML, or a config missing `source_name` or any required field's path. |
+| `static optional<herald::v0::Herald> apply(const HeraldFieldMapping&, const nlohmann::json& payload)` | Applies a mapping to an already-parsed vendor JSON payload. `nullopt` (logging why) if a required field's path is missing from the payload, resolves to the wrong JSON type, or `timestamp_ms` can't be read as a number. |
 
 ### `Gt06Parser` (pure logic, no networking)
 
@@ -175,6 +249,27 @@ curl -X POST http://127.0.0.1:8766/herald -H "Content-Type: application/json" -d
 
 Expect `200`. A connected console shows `tag-1` as a livestock-tag ward with
 no flight-mode UI, using the existing ward rendering with no console changes.
+
+Mapped path, using the bundled `example-generic` config:
+
+```
+curl -X POST http://127.0.0.1:8766/herald/mapped/example-generic \
+  -H "Content-Type: application/json" -d '{
+    "device_id": "tracker-42",
+    "timestamp": 1710505845000,
+    "location": {"lat": 52.37, "lon": 4.90, "alt": 12.5},
+    "battery": {"voltage": 3.98, "percent": 76},
+    "gps": {"satellites": 9},
+    "status": {"ok": true}
+  }'
+```
+
+Expect `200` and a gateway log line `loaded Herald mapping
+'example-generic' from '...'` at startup. A connected console shows
+`tracker-42` as a generic-tracker ward. `POST` the same body to
+`/herald/mapped/does-not-exist` and expect `404`; drop `"location"` from
+the body and expect `400` with a gateway log line naming the missing field
+and path.
 
 GT06 path (raw TCP, port 5023 by default) - a real login + location frame
 pair, Python one-liner style:

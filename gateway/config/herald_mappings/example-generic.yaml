@@ -1,0 +1,49 @@
+# Generic worked example for Herald's "Mapped" adoption path (github issue
+# #102): a template for translating a vendor's own JSON payload into a
+# Herald message via a declarative field mapping, when that vendor doesn't
+# (or can't) send Herald natively. Not a specific closed vendor's format -
+# copy this file, rename source_name, and point each field at wherever the
+# equivalent value actually lives in your vendor's real payload shape.
+#
+# Loaded from gateway/config/herald_mappings/*.yaml at startup (see
+# gateway/docs/herald-ingest.md); reachable at
+# POST /herald/mapped/example-generic once the gateway is running.
+#
+# Try it:
+#   curl -X POST http://127.0.0.1:8766/herald/mapped/example-generic \
+#     -H "Content-Type: application/json" -d '{
+#       "device_id": "tracker-42",
+#       "timestamp": 1710505845000,
+#       "location": {"lat": 52.37, "lon": 4.90, "alt": 12.5},
+#       "battery": {"voltage": 3.98, "percent": 76},
+#       "gps": {"satellites": 9},
+#       "status": {"ok": true}
+#     }'
+
+source_name: example-generic
+
+# What kind of thing every device using this mapping is. One fixed value
+# per mapping config - a source that reports more than one device type
+# needs a separate mapping config per type (see herald_field_mapper.h for
+# why this is a deliberate simplification, not an oversight). Any value
+# from karshipta/v1/herald.proto's EntityClass enum is valid here.
+entity_class: ENTITY_CLASS_GENERIC_TRACKER
+
+# "unix_ms" or "unix_seconds" - whichever unit this vendor's own timestamp
+# field actually uses.
+timestamp_unit: unix_ms
+
+# Herald field name -> dot-path into the vendor's own JSON payload.
+# entity_id/timestamp_ms/latitude_deg/longitude_deg are required; every
+# other key below is optional - omit any you don't have, or that this
+# vendor doesn't send at all.
+fields:
+  entity_id: device_id
+  timestamp_ms: timestamp
+  latitude_deg: location.lat
+  longitude_deg: location.lon
+  altitude_msl_m: location.alt
+  battery_voltage_v: battery.voltage
+  battery_remaining_pct: battery.percent
+  num_satellites: gps.satellites
+  health_ok: status.ok

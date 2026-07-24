@@ -1,6 +1,7 @@
 add_library(herald
         src/herald_ward_manager.cpp
         src/herald_http_server.cpp
+        src/herald_field_mapper.cpp
         src/gt06_parser.cpp
         src/gt06_tcp_server.cpp
 )
@@ -22,6 +23,12 @@ target_link_libraries(herald
             # transport's own ixwebsocket dependency (transport only uses
             # ix types in its .cpp, never in a public base class).
             ixwebsocket::ixwebsocket
+            # herald_field_mapper.h includes nlohmann/json_fwd.hpp, and
+            # herald_http_server.h (which every consumer of this library
+            # includes, including main.cpp) includes herald_field_mapper.h
+            # for HeraldFieldMapping - PUBLIC so that include path is
+            # visible to consumers, not just herald's own .cpp files.
+            nlohmann_json::nlohmann_json
         PRIVATE
             karshipta_warnings
             yaml-cpp::yaml-cpp

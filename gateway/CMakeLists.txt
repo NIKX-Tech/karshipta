@@ -201,6 +201,25 @@ if(NOT httplib_FOUND)
   endif()
 endif()
 
+# nlohmann/json: pre-approved in gateway/CLAUDE.md's dependency list ("yaml-cpp
+# or nlohmann/json for config"). Used by HeraldFieldMapper (github issue #102)
+# to parse an arbitrary vendor JSON payload against a declarative field-mapping
+# config - genuinely dynamic, schema-less JSON, unlike the native Herald HTTP
+# path's use of protobuf's own JSON parser (google::protobuf::util::
+# JsonStringToMessage), which requires a fixed target message and can't walk
+# an unknown vendor's own field names. vcpkg/Homebrew installs provide a
+# CMake config; when absent (Linux CI, bare dev machines) fall back to a
+# pinned FetchContent build, same pattern as yaml-cpp/httplib above.
+find_package(nlohmann_json CONFIG QUIET)
+if(NOT nlohmann_json_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
 # SQLite: used by FleetZoneStore (gateway issue #85) to persist Fleet and
 # Zone, a narrow, explicitly-signed-off exception to "no backend, no
 # database in the MVP" (root CLAUDE.md), scoped to exactly those two
@@ -341,6 +360,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/fleet/fleet_manager_test.cpp
     tests/herald/herald_ward_manager_test.cpp
     tests/herald/gt06_parser_test.cpp
+    tests/herald/herald_field_mapper_test.cpp
   )
   if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     list(APPEND KARSHIPTA_TEST_SOURCES tests/transport/relay_transport_test.cpp)
