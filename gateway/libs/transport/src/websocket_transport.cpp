@@ -14,6 +14,15 @@ namespace {
 constexpr auto kDefaultHost = "127.0.0.1";
 constexpr uint16_t kDefaultPort = 8765;
 
+// Force-disconnect a client once its outbound backlog crosses this many
+// bytes: IXWebSocket's sockets are non-blocking, so a slow or non-reading
+// client's unsent bytes just accumulate in userspace forever instead of
+// blocking the sender - a memory problem, not a fan-out latency one.
+// Generous relative to one telemetry frame (well under 200 bytes), so this
+// only trips for a client that is genuinely stuck, not one that is merely a
+// little behind.
+constexpr size_t kMaxBufferedBytes = 4 * 1024 * 1024;
+
 // Deliberately exact-match only (not a CIDR/subnet check): the values a
 // config file is expected to spell out for "this machine only" are exactly
 // these three. Anything else, including 0.0.0.0, is treated as a wider bind
@@ -37,9 +46,8 @@ Transport::ClientRole parse_role_from_uri(const std::string& uri) {
     std::size_t start = 0;
     while (start <= query.size()) {
         const auto amp_pos = query.find('&', start);
-        const std::string pair = query.substr(start, amp_pos == std::string::npos
-                                                           ? std::string::npos
-                                                           : amp_pos - start);
+        const std::string pair =
+            query.substr(start, amp_pos == std::string::npos ? std::string::npos : amp_pos - start);
         if (pair == "role=viewer") return Transport::ClientRole::kViewer;
         if (amp_pos == std::string::npos) break;
         start = amp_pos + 1;
@@ -69,9 +77,8 @@ std::unique_ptr<WebsocketTransport> WebsocketTransport::from_config(
 
     std::error_code exists_error;
     if (!std::filesystem::exists(config_path, exists_error) || exists_error) {
-        spdlog::info(
-            "gateway config '{}' not found; binding to the safe default {}:{}", config_path,
-            kDefaultHost, kDefaultPort);
+        spdlog::info("gateway config '{}' not found; binding to the safe default {}:{}",
+                     config_path, kDefaultHost, kDefaultPort);
     } else {
         try {
             const YAML::Node root = YAML::LoadFile(config_path);
@@ -286,8 +293,21 @@ void WebsocketTransport::broadcast(const std::vector<uint8_t>& bytes) {
         }
     }
     const std::string payload(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::vector<std::shared_ptr<ix::WebSocket>> stuck;
     for (const auto& web_socket : targets) {
         web_socket->sendBinary(payload);
+        if (web_socket->bufferedAmount() > kMaxBufferedBytes) {
+            stuck.push_back(web_socket);
+        }
+    }
+    // Closed after this tick's sends are all issued, not inline in the loop
+    // above: close() blocks until the close handshake is sent, so closing a
+    // stuck client mid-loop would stall every other, healthy client's frame
+    // behind that one client's teardown.
+    for (const auto& web_socket : stuck) {
+        spdlog::warn("disconnecting a client with {} bytes buffered (limit {})",
+                     web_socket->bufferedAmount(), kMaxBufferedBytes);
+        web_socket->close();
     }
 }
 

@@ -4,6 +4,12 @@
 
 #include "ward_manager.h"
 
+#include <google/protobuf/arena.h>
+#include <karshipta/v1/envelope.pb.h>
+#include <mavsdk/plugins/info/info.h>
+#include <spdlog/spdlog.h>
+#include <yaml-cpp/yaml.h>
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -12,12 +18,6 @@
 #include <system_error>
 #include <thread>
 #include <utility>
-
-#include <mavsdk/plugins/info/info.h>
-#include <yaml-cpp/yaml.h>
-
-#include <karshipta/v1/envelope.pb.h>
-#include <spdlog/spdlog.h>
 
 namespace {
 
@@ -46,8 +46,8 @@ constexpr auto kReadOnlySessionMessage = "read-only session";
 
 uint64_t unix_epoch_ms() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch())
-                                      .count());
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
 }
 
 // Sizes come from ByteSizeLong() just above the failing call, so SerializeToArray
@@ -110,8 +110,8 @@ karshipta::v1::FlightMode to_proto_flight_mode(const mavsdk::Telemetry::FlightMo
 }
 
 karshipta::v1::WardState build_ward_state(const std::string& ward_id,
-                                                 const WardConnection& connection,
-                                                 const TelemetryInfo& telemetry) {
+                                          const WardConnection& connection,
+                                          const TelemetryInfo& telemetry) {
     karshipta::v1::WardState state;
     state.set_ward_id(ward_id);
     state.set_timestamp_ms(unix_epoch_ms());
@@ -227,13 +227,13 @@ void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck&
 }  // namespace
 
 WardManager::WardManager(std::shared_ptr<mavsdk::Mavsdk> mavsdk, Transport& tp,
-                                std::filesystem::path persistence_path)
+                         std::filesystem::path persistence_path)
     : mavsdk_(std::move(mavsdk)), transport_(tp), persistence_path_(std::move(persistence_path)) {}
 
 std::unique_ptr<WardManager> WardManager::create(Transport& tp,
-                                                         std::filesystem::path persistence_path) {
+                                                 std::filesystem::path persistence_path) {
     return std::make_unique<WardManager>(WardConnection::create_shared_core(), tp,
-                                             std::move(persistence_path));
+                                         std::move(persistence_path));
 }
 
 WardManager::~WardManager() {
@@ -288,14 +288,13 @@ std::unique_ptr<CommandExecutor> WardManager::make_executor(ManagedWard& ward) {
         });
 }
 
-std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg,
-                                                              bool should_persist) {
+std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, bool should_persist) {
     if (cfg.ward_id.empty()) {
         return "ward_id is empty";
     }
 
-    spdlog::debug("add_ward: building object graph for '{}' (system_id={}, url={})",
-                  cfg.ward_id, cfg.system_id, cfg.connection_url);
+    spdlog::debug("add_ward: building object graph for '{}' (system_id={}, url={})", cfg.ward_id,
+                  cfg.system_id, cfg.connection_url);
 
     // Built entirely without wards_mutex_: constructing this object graph
     // touches nothing shared (each object only binds to the previous one by
@@ -397,8 +396,7 @@ void WardManager::dispatch_command(const karshipta::v1::Command& command) {
     } else {
         std::lock_guard lock(ward->mutex_);
         if (ward->executor == nullptr) {
-            spdlog::warn("dispatch_command rejected: ward_id '{}' is stopped",
-                         command.ward_id());
+            spdlog::warn("dispatch_command rejected: ward_id '{}' is stopped", command.ward_id());
             rejection = make_rejected_ack(command, "ward is stopped");
         } else if (ward->busy) {
             // busy here means either a stop/force_stop/remove transition is
@@ -546,7 +544,7 @@ void WardManager::handle_mission_download_request(
 }
 
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
-                                          const karshipta::v1::Envelope& envelope) {
+                                         const karshipta::v1::Envelope& envelope) {
     switch (envelope.payload_case()) {
         case karshipta::v1::Envelope::kCommand: {
             const auto& command = envelope.command();
@@ -594,16 +592,16 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
             spdlog::warn("viewer client {} attempted mission_upload on ward_id '{}', rejecting",
                          client, mission.ward_id());
             broadcast_mission_event(mission.ward_id(), "MISSION_UPLOAD_REJECTED",
-                                     kReadOnlySessionMessage);
+                                    kReadOnlySessionMessage);
             break;
         }
         case karshipta::v1::Envelope::kMissionFileUpload: {
             const auto& upload = envelope.mission_file_upload();
             spdlog::warn(
-                "viewer client {} attempted mission_file_upload on ward_id '{}', rejecting",
-                client, upload.ward_id());
+                "viewer client {} attempted mission_file_upload on ward_id '{}', rejecting", client,
+                upload.ward_id());
             broadcast_mission_event(upload.ward_id(), "MISSION_UPLOAD_REJECTED",
-                                     kReadOnlySessionMessage);
+                                    kReadOnlySessionMessage);
             break;
         }
         case karshipta::v1::Envelope::kMissionDownloadRequest: {
@@ -613,7 +611,7 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                 "rejecting",
                 client, request.ward_id());
             broadcast_mission_event(request.ward_id(), "MISSION_DOWNLOAD_REJECTED",
-                                     kReadOnlySessionMessage);
+                                    kReadOnlySessionMessage);
             break;
         }
         default:
@@ -649,7 +647,7 @@ void WardManager::broadcast_link_event(const std::string& ward_id, bool connecte
 }
 
 void WardManager::broadcast_mission_event(const std::string& ward_id, const std::string& code,
-                                             const std::string& message) const {
+                                          const std::string& message) const {
     karshipta::v1::Envelope envelope;
     auto* event = envelope.mutable_event();
     event->set_ward_id(ward_id);
@@ -745,15 +743,29 @@ void WardManager::persist_locked() const {
 
     // gateway/config/ is a tracked directory (see .gitkeep); this is internal
     // machinery, not an operator-managed path, so no runtime mkdir here.
-    std::ofstream out(persistence_path_, std::ios::trunc);
-    if (!out) {
-        spdlog::error("failed to open '{}' for writing persisted fleet state",
-                      persistence_path_.string());
-        return;
+    //
+    // Written to a temp file in the same directory first, then renamed over
+    // the real path: rename() is atomic on both POSIX and NTFS, so a crash
+    // mid-write can never corrupt or empty the only crash-recovery record
+    // for the fleet the way a direct truncate-write could.
+    const auto temp_path = persistence_path_.string() + ".tmp";
+    {
+        std::ofstream out(temp_path, std::ios::trunc);
+        if (!out) {
+            spdlog::error("failed to open '{}' for writing persisted fleet state", temp_path);
+            return;
+        }
+        out << root;
+        if (!out) {
+            spdlog::error("failed to write persisted fleet state to '{}'", temp_path);
+            return;
+        }
     }
-    out << root;
-    if (!out) {
-        spdlog::error("failed to write persisted fleet state to '{}'", persistence_path_.string());
+    std::error_code rename_error;
+    std::filesystem::rename(temp_path, persistence_path_, rename_error);
+    if (rename_error) {
+        spdlog::error("failed to replace '{}' with the freshly written '{}': {}",
+                      persistence_path_.string(), temp_path, rename_error.message());
     }
 }
 
@@ -792,8 +804,9 @@ std::size_t WardManager::load_persisted() {
                 entry["ward_class"] ? entry["ward_class"].as<std::string>() : std::string{};
             if (!ward_class_name.empty() &&
                 !karshipta::v1::WardClass_Parse(ward_class_name, &cfg.ward_class)) {
-                spdlog::warn("persisted ward '{}' has unknown class '{}', defaulting to unspecified",
-                             cfg.ward_id, ward_class_name);
+                spdlog::warn(
+                    "persisted ward '{}' has unknown class '{}', defaulting to unspecified",
+                    cfg.ward_id, ward_class_name);
             }
             // should_persist=false: reconstructing entries already on disk
             // must not rewrite the file once per entry while loading it.
@@ -822,7 +835,15 @@ void WardManager::start_publishing(std::chrono::milliseconds interval) {
 }
 
 void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop_token stop_token) {
+    auto next_tick = std::chrono::steady_clock::now() + interval;
     while (!stop_token.stop_requested()) {
+        // One Arena per tick: an Envelope's mutable_*() otherwise heap-new's
+        // its submessage individually, up to twice per ward per tick (state
+        // + mission progress) forever. Arena-allocating the Envelope makes
+        // every submessage set on it arena-allocated too, so a tick's worth
+        // of messages is one bump-pointer region freed in one shot when
+        // `arena` goes out of scope, not N/2N individual new/delete pairs.
+        google::protobuf::Arena arena;
         std::vector<std::vector<uint8_t>> frames;
         // Deferred so broadcast_mission_event()/broadcast_mission_download()
         // (blocking socket writes) never run while any lock is held, same
@@ -867,10 +888,10 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
         frames.reserve(wards.size());
         for (const auto& ward : wards) {
             const std::string& id = ward->config.ward_id;
-            karshipta::v1::Envelope state_envelope;
-            *state_envelope.mutable_ward_state() =
+            auto* state_envelope = google::protobuf::Arena::Create<karshipta::v1::Envelope>(&arena);
+            *state_envelope->mutable_ward_state() =
                 build_ward_state(id, *ward->connection, *ward->telemetry);
-            frames.push_back(serialize_envelope(state_envelope));
+            frames.push_back(serialize_envelope(*state_envelope));
 
             if (!ward->mission) continue;  // always built by add_ward_impl; defensive only
 
@@ -879,9 +900,10 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
             // spam empty progress frames every tick.
             const auto progress = ward->mission->get_progress();
             if (!progress.mission_id().empty()) {
-                karshipta::v1::Envelope progress_envelope;
-                *progress_envelope.mutable_mission_progress() = progress;
-                frames.push_back(serialize_envelope(progress_envelope));
+                auto* progress_envelope =
+                    google::protobuf::Arena::Create<karshipta::v1::Envelope>(&arena);
+                *progress_envelope->mutable_mission_progress() = progress;
+                frames.push_back(serialize_envelope(*progress_envelope));
             }
 
             if (ward->mission->take_pending_return_to_launch()) {
@@ -960,7 +982,7 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
         for (auto& [ward, executor] : pending_rtl) {
             karshipta::v1::Command rtl;
             rtl.set_command_id("gateway-mission-rtl-" + ward->config.ward_id + "-" +
-                                std::to_string(unix_epoch_ms()));
+                               std::to_string(unix_epoch_ms()));
             rtl.set_ward_id(ward->config.ward_id);
             rtl.set_timestamp_ms(unix_epoch_ms());
             rtl.mutable_rtl();
@@ -970,7 +992,7 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
         for (auto& [ward, executor] : pending_start) {
             karshipta::v1::Command start;
             start.set_command_id("gateway-fleet-mission-start-" + ward->config.ward_id + "-" +
-                                  std::to_string(unix_epoch_ms()));
+                                 std::to_string(unix_epoch_ms()));
             start.set_ward_id(ward->config.ward_id);
             start.set_timestamp_ms(unix_epoch_ms());
             start.mutable_start_mission();
@@ -984,7 +1006,21 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
                 broadcast_mission_event(broadcast.ward_id, broadcast.code, broadcast.message);
             }
         }
-        std::this_thread::sleep_for(interval);
+        // steady_clock deadline, not sleep_for(interval): sleeping for a
+        // fixed interval after doing this tick's work means the actual
+        // period is interval + tick_work_time, which grows silently as the
+        // fleet grows. A deadline anchored before the tick's own work keeps
+        // the average rate correct; if a tick still overran (a stall, not
+        // just steady growth), skip ahead to the next real deadline rather
+        // than firing a burst of zero-sleep ticks to catch up on whatever
+        // was missed.
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_tick) {
+            std::this_thread::sleep_until(next_tick);
+            next_tick += interval;
+        } else {
+            next_tick = now + interval;
+        }
     }
 }
 
@@ -1041,8 +1077,7 @@ bool WardManager::disarm_if_armed(const std::string& ward_id, ManagedWard& ward)
         spdlog::info("ward_id '{}' disarmed", ward_id);
         return true;
     }
-    spdlog::warn("disarm failed for ward_id '{}': {}", ward_id,
-                 WardActions::result_name(result));
+    spdlog::warn("disarm failed for ward_id '{}': {}", ward_id, WardActions::result_name(result));
     return false;
 }
 
@@ -1066,8 +1101,8 @@ void WardManager::clear_busy(const std::shared_ptr<ManagedWard>& ward) {
     ward->busy = false;
 }
 
-std::optional<std::string> WardManager::verify_grounded_and_disarm(
-    const std::string& ward_id, ManagedWard& ward) {
+std::optional<std::string> WardManager::verify_grounded_and_disarm(const std::string& ward_id,
+                                                                   ManagedWard& ward) {
     // Unlocked: is_in_air()/is_armed()/disarm() are blocking MAVSDK calls.
     // Safe because ward.busy == true, set by the caller before its own
     // executor-retiring unlock window began.
@@ -1118,9 +1153,10 @@ bool WardManager::stop(const std::string& ward_id) {
         // is_armed() alone can't stand in for this check). Never-discovered
         // passes; nothing we ever saw can be airborne because of us.
         if (ward->connection->link_state() == WardConnection::LinkState::kLinkDown) {
-            spdlog::warn("stop rejected: ward_id '{}' link is down, state unknown; "
-                         "use force_stop",
-                         ward_id);
+            spdlog::warn(
+                "stop rejected: ward_id '{}' link is down, state unknown; "
+                "use force_stop",
+                ward_id);
             return false;
         }
         if (ward->telemetry->is_in_air()) {
@@ -1208,8 +1244,7 @@ bool WardManager::force_stop(const std::string& ward_id) {
         while (std::chrono::steady_clock::now() < deadline) {
             const bool connected =
                 ward->connection->link_state() == WardConnection::LinkState::kConnected;
-            if (connected && !ward->telemetry->is_in_air() &&
-                !ward->telemetry->is_armed()) {
+            if (connected && !ward->telemetry->is_in_air() && !ward->telemetry->is_armed()) {
                 safe_on_ground = true;
                 break;
             }
@@ -1218,9 +1253,10 @@ bool WardManager::force_stop(const std::string& ward_id) {
         if (!safe_on_ground) {
             std::lock_guard lock(ward->mutex_);
             ward->executor = make_executor(*ward);
-            spdlog::error("force_stop timed out for ward_id '{}': not confirmed landed and "
-                          "disarmed within {}s; monitoring stays active",
-                          ward_id, kForceStopLandingTimeout.count());
+            spdlog::error(
+                "force_stop timed out for ward_id '{}': not confirmed landed and "
+                "disarmed within {}s; monitoring stays active",
+                ward_id, kForceStopLandingTimeout.count());
             return false;
         }
     }
@@ -1323,11 +1359,21 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
         return *error;
     }
 
-    // Structural lock outer, this ward's own mutex_ inner (the documented
-    // lock order): stop_worker() needs the latter, erase() needs the
-    // former. ward->mutex_ is released again before erase(): erasing from
-    // the map needs no state that lock guards, and this keeps the
-    // structural lock's hold time as short as possible.
+    // stop_worker() only needs this ward's own mutex_, never wards_mutex_
+    // (see stop_worker()'s own doc comment: its reconnect_worker join is
+    // worst-case ~3s, and must not stall the fleet-wide structural lock
+    // every other ward's dispatch_command/publish-tick/add-or-remove also
+    // needs). Kept in its own unlocked-from-wards_mutex_ scope, the same
+    // shape stop() itself already uses; ward->busy stayed true since it was
+    // set above, so no concurrent transition on this same ward can start
+    // regardless of which lock is or isn't held here.
+    {
+        std::lock_guard vlock(ward->mutex_);
+        stop_worker(*ward);
+    }
+
+    // Structural lock, now covering only the fast, bounded part: the map
+    // shape change and the persisted-state write.
     //
     // A plain erase() here is correct, not a regression of an earlier fix
     // that used std::map::extract() instead: that version's map held
@@ -1343,10 +1389,6 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
     // which happens after every lock here has already released.
     {
         std::lock_guard lock(wards_mutex_);
-        {
-            std::lock_guard vlock(ward->mutex_);
-            stop_worker(*ward);
-        }
         managed_wards_.erase(ward_id);
         persist_locked();
         spdlog::info("ward_id '{}' removed (total={})", ward_id, managed_wards_.size());
@@ -1369,8 +1411,7 @@ void WardManager::remove_all() {
     }
 }
 
-karshipta::v1::WardConfigAck WardManager::handle_add_ward(
-    const karshipta::v1::AddWard& request) {
+karshipta::v1::WardConfigAck WardManager::handle_add_ward(const karshipta::v1::AddWard& request) {
     karshipta::v1::WardConfigAck ack;
     ack.set_request_id(request.request_id());
     ack.set_ward_id(request.ward_id());
