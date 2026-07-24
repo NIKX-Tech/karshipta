@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import * as maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
 	import { fleet } from '$lib/fleet-store.svelte';
@@ -153,6 +154,14 @@
 	const TRAIL_MAX_POINTS = 3000;
 	const MEASURE_SOURCE = 'measure-line';
 	const EARTH_RADIUS_M = 6_371_000;
+	// Pixel radius supercluster groups points within, at any given zoom -
+	// matches the library's own documented default, a reasonable "close
+	// enough to be visual clutter" threshold at typical marker sizes.
+	const CLUSTER_RADIUS_PX = 60;
+	// Above this zoom, individual wards are always shown separately even if
+	// still nominally close together - deep zoom is exactly when an operator
+	// wants to distinguish specific wards, not see them folded into a count.
+	const CLUSTER_MAX_ZOOM = 16;
 
 	// Distance measurement: a self-contained map tool, not a store-level
 	// concept like goto-arming - nothing outside this component needs to
@@ -178,6 +187,17 @@
 
 	// imperative per-ward marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
+	// One bubble marker per supercluster cluster_id, only populated at zoom
+	// levels where two or more nearby wards get grouped - see the sync
+	// effect below. Wards absorbed into a cluster keep their `markers`
+	// entry removed for as long as they're grouped, the same way any other
+	// removed ward's marker is cleaned up.
+	let clusterMarkers: Record<number, maplibregl.Marker> = {};
+	// Rebuilt every time the sync effect below runs; supercluster's own
+	// index build is fast enough (designed for hundreds of thousands of
+	// points) that rebuilding on every telemetry tick for a self-hosted
+	// deployment's ward count is not a real cost.
+	let clusterIndex: Supercluster<{ wardId: string }> | undefined;
 	let waypointMarkers: maplibregl.Marker[] = [];
 	let zoneVertexMarkers: maplibregl.Marker[] = [];
 	let placementMarker: maplibregl.Marker | undefined;
@@ -277,6 +297,39 @@
 			ownerAvatar,
 			ownerNameEl
 		};
+	}
+
+	/**
+	 * A cluster bubble is deliberately much simpler than an individual ward
+	 * marker: a count, nothing else - it represents several wards at once,
+	 * so there is no single heading/altitude/battery/owner to show. Clicking
+	 * it zooms in to supercluster's own expansion zoom for that cluster,
+	 * the standard "cluster click drills in" pattern. `lngLat` is read back
+	 * out of the marker itself (via maplibregl.Marker.getLngLat()) at click
+	 * time by the caller, not baked into this closure - see the sync effect
+	 * below, which always has the current, correct coordinates on hand.
+	 */
+	function clusterMarkerElement(onExpand: () => void): HTMLElement {
+		const element = document.createElement('button');
+		element.type = 'button';
+		element.className =
+			'border-accent bg-accent/25 text-fg flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border-2 font-mono text-xs font-semibold backdrop-blur-sm';
+		element.addEventListener('click', (event) => {
+			event.stopPropagation();
+			onExpand();
+		});
+		return element;
+	}
+
+	// supercluster's cluster_id is only a stable identity within one
+	// getClusters() call at a fixed zoom - the same numeric id can end up
+	// reused for an unrelated grouping as zoom changes (e.g. mid-easeTo
+	// animation), so a cluster marker kept alive across renders under that
+	// id must have its displayed count refreshed every run, not just at
+	// creation, or it silently shows a stale number.
+	function updateClusterMarkerElement(element: HTMLElement, pointCount: number): void {
+		element.setAttribute('aria-label', `${pointCount} wards, click to zoom in`);
+		element.textContent = pointCount > 99 ? '99+' : String(pointCount);
 	}
 
 	$effect(() => {
@@ -888,22 +941,110 @@
 		}
 	});
 
-	// sync one marker per ward from the store
+	// sync one marker per ward from the store, folding nearby wards into a
+	// count-bubble cluster marker at low zoom (github issue: console-core
+	// map scalability). fleet-map.svelte renders wards as individual
+	// maplibregl.Marker DOM objects, not a GeoJSON layer, so MapLibre's own
+	// cluster: true does not apply - supercluster (the library MapLibre's
+	// clustering is itself built on) does the same grouping client-side.
 	$effect(() => {
 		if (!map) return;
+
+		const points: Array<GeoJSON.Feature<GeoJSON.Point, { wardId: string }>> = [];
+		for (const wardId of fleet.wardIds) {
+			const position = fleet.wards[wardId]?.state?.position;
+			if (!position) continue;
+			points.push({
+				type: 'Feature',
+				properties: { wardId },
+				geometry: { type: 'Point', coordinates: [position.longitudeDeg, position.latitudeDeg] }
+			});
+		}
+		clusterIndex = new Supercluster<{ wardId: string }>({
+			radius: CLUSTER_RADIUS_PX,
+			maxZoom: CLUSTER_MAX_ZOOM
+		}).load(points);
+		const clusters = clusterIndex.getClusters([-180, -85, 180, 85], Math.floor(zoomLevel));
+
+		// Every point supercluster returns is either the original leaf
+		// (ungrouped - render its full individual marker below) or a
+		// synthetic cluster point standing in for two or more wards. Any
+		// wardId from the input set that isn't one of the leaves in this
+		// result is, by construction, inside some cluster - built in one
+		// pass over `clusters` (not by starting from "everything" and
+		// deleting entries, which svelte/prefer-svelte-reactivity flags as
+		// a suspicious post-construction Set mutation even though this Set
+		// never leaves this effect or touches the template).
+		const leafWardIds = new Set(
+			clusters.flatMap((feature) =>
+				'cluster' in feature.properties ? [] : [feature.properties.wardId]
+			)
+		);
+		const clusteredWardIds = new Set(fleet.wardIds.filter((wardId) => !leafWardIds.has(wardId)));
+		const activeClusterIds = new Set(
+			clusters.flatMap((feature) =>
+				'cluster' in feature.properties ? [feature.properties.cluster_id] : []
+			)
+		);
+
+		for (const feature of clusters) {
+			if (!('cluster' in feature.properties)) continue;
+			const clusterId = feature.properties.cluster_id;
+			const pointCount = feature.properties.point_count;
+			const [lon, lat] = feature.geometry.coordinates;
+			let clusterMarker = clusterMarkers[clusterId];
+			if (!clusterMarker) {
+				const index = clusterIndex;
+				const element = clusterMarkerElement(() => {
+					const activeMap = map;
+					if (!activeMap || !index) return;
+					let expansionZoom: number;
+					try {
+						expansionZoom = index.getClusterExpansionZoom(clusterId);
+					} catch {
+						// stale cluster_id (index rebuilt since this marker was
+						// created, a click racing a telemetry update) - harmless
+						// to just ignore rather than crash.
+						return;
+					}
+					activeMap.easeTo({ zoom: expansionZoom, center: [lon, lat] });
+				});
+				clusterMarker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(map);
+				clusterMarkers[clusterId] = clusterMarker;
+			}
+			clusterMarker.setLngLat([lon, lat]);
+			updateClusterMarkerElement(clusterMarker.getElement(), pointCount);
+		}
+		for (const [clusterIdKey, clusterMarker] of Object.entries(clusterMarkers)) {
+			const clusterId = Number(clusterIdKey);
+			if (!activeClusterIds.has(clusterId)) {
+				clusterMarker.remove();
+				delete clusterMarkers[clusterId];
+			}
+		}
+
 		for (const wardId of fleet.wardIds) {
 			const ward = fleet.wards[wardId];
 			const state = ward?.state;
 			if (!state?.position) continue;
 			// flown-path trail: skip appending when the ward hasn't actually
 			// moved (idle/disarmed on the ground), so the array doesn't grow
-			// for no visual benefit
+			// for no visual benefit. Kept regardless of clustering - a ward's
+			// flown path is independent of whether its marker is currently
+			// folded into a cluster bubble.
 			const point: [number, number] = [state.position.longitudeDeg, state.position.latitudeDeg];
 			const trail = (trails[wardId] ??= []);
 			const lastPoint = trail.at(-1);
 			if (!lastPoint || lastPoint[0] !== point[0] || lastPoint[1] !== point[1]) {
 				trail.push(point);
 				if (trail.length > TRAIL_MAX_POINTS) trail.shift();
+			}
+			if (clusteredWardIds.has(wardId)) {
+				// Folded into a cluster bubble this tick - drop any individual
+				// marker left over from before it was grouped.
+				markers[wardId]?.marker.remove();
+				delete markers[wardId];
+				continue;
 			}
 			let handle = markers[wardId];
 			if (!handle) {
