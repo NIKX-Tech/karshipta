@@ -35,8 +35,8 @@ std::optional<std::string> validate_mission(const karshipta::v1::Mission& missio
 // synthesized ids: nothing downstream validates the format.
 std::string synthesize_download_mission_id() {
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::system_clock::now().time_since_epoch())
-                             .count();
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
     return "downloaded-" + std::to_string(now_ms);
 }
 
@@ -86,7 +86,7 @@ bool WardMission::ensure_mission() const {
 }
 
 mavsdk::Mission::Result WardMission::log_result(const std::string& label,
-                                                    const mavsdk::Mission::Result result) {
+                                                const mavsdk::Mission::Result result) {
     if (result != mavsdk::Mission::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
@@ -144,12 +144,12 @@ void WardMission::enqueue_download() {
 }
 
 mavsdk::Mission::MissionPlan WardMission::translate(const karshipta::v1::Mission& mission,
-                                                        bool& ends_with_rtl) {
+                                                    bool& ends_with_rtl) {
     // Precondition: validate_mission() has already accepted `mission` (non-empty
     // ward_id, at least one item, RTL only ever at the last index). This
     // function does not re-check any of that.
-    ends_with_rtl = mission.items_size() > 0 &&
-                    mission.items(mission.items_size() - 1).action() == karshipta::v1::MISSION_ACTION_RTL;
+    ends_with_rtl = mission.items_size() > 0 && mission.items(mission.items_size() - 1).action() ==
+                                                    karshipta::v1::MISSION_ACTION_RTL;
 
     mavsdk::Mission::MissionPlan plan;
     const int item_count = ends_with_rtl ? mission.items_size() - 1 : mission.items_size();
@@ -206,7 +206,7 @@ karshipta::v1::Mission WardMission::translate_back(const mavsdk::Mission::Missio
                 // MISSION_ACTION_HOLD (NaN, MAVSDK's "unset", compares false
                 // here, so it falls through to WAYPOINT correctly).
                 item->set_action(raw.loiter_time_s > 0.0f ? karshipta::v1::MISSION_ACTION_HOLD
-                                                            : karshipta::v1::MISSION_ACTION_WAYPOINT);
+                                                          : karshipta::v1::MISSION_ACTION_WAYPOINT);
                 break;
             default:
                 // TransitionToFw/TransitionToMc: no MissionAction equivalent.
@@ -266,8 +266,8 @@ void WardMission::run_worker(const std::stop_token& stop_token) {
             auto downloaded = translate_back(plan);
             std::lock_guard state_lock(state_mutex_);
             downloaded.set_mission_id(!last_progress_.mission_id().empty()
-                                           ? last_progress_.mission_id()
-                                           : synthesize_download_mission_id());
+                                          ? last_progress_.mission_id()
+                                          : synthesize_download_mission_id());
             pending_download_result_ = DownloadResult{std::move(downloaded), ""};
             continue;
         }
@@ -285,7 +285,12 @@ void WardMission::run_worker(const std::stop_token& stop_token) {
             plan = translate(job.mission, ends_with_rtl);
             // Only takes effect on the *next* upload per MAVSDK's own doc, so
             // this must run before every upload_mission() call, not just once.
-            mission_->set_return_to_launch_after_mission(false);
+            // Routed through log_result() like every other MAVSDK call here
+            // (gateway rule 5: every failure must be observable) rather than
+            // discarded; a failure here doesn't abort the upload itself, so
+            // it's logged independently of `result`.
+            log_result("set return-to-launch-after-mission",
+                       mission_->set_return_to_launch_after_mission(false));
             result = log_result("mission upload", mission_->upload_mission(plan));
         }
 
@@ -298,7 +303,8 @@ void WardMission::run_worker(const std::stop_token& stop_token) {
                 last_progress_.set_ward_id(job.mission.ward_id());
                 last_progress_.set_mission_id(job.mission.mission_id());
                 last_progress_.set_current_seq(0);
-                last_progress_.set_total_items(static_cast<std::uint32_t>(plan.mission_items.size()));
+                last_progress_.set_total_items(
+                    static_cast<std::uint32_t>(plan.mission_items.size()));
                 last_progress_.set_finished(false);
             }
             pending_upload_result_ = UploadResult{job.mission.mission_id(), result};
@@ -318,7 +324,7 @@ void WardMission::handle_progress(const mavsdk::Mission::MissionProgress progres
     last_progress_.set_total_items(static_cast<std::uint32_t>(progress.total));
 
     if (progress.current != progress.total) return;  // pass not finished yet
-    if (interrupted_) return;                          // no re-trigger, no finished, no pending RTL
+    if (interrupted_) return;                        // no re-trigger, no finished, no pending RTL
 
     if (passes_remaining_ > 0) {
         --passes_remaining_;

@@ -15,6 +15,7 @@ import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
 import type { LatLon } from '$lib/geolocation';
 import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 import { zoneStore } from '$lib/zones/zone-store.svelte';
+import type { ViewportBounds } from '$lib/geozones/types';
 
 /** where a ward's data comes from: the local demo engine or a connected gateway */
 export type WardSource = 'demo' | 'gateway';
@@ -63,6 +64,10 @@ const MAX_EVENTS = 50;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
 const TRACKER_LINGER_MS = 6_000;
+// Matches geozone-store.svelte.ts's FETCH_DEBOUNCE_MS - same "settle after a
+// pan/zoom gesture before acting" reasoning, applied to reconnecting the
+// gateway instead of fetching zones.
+const VIEWPORT_RECONNECT_DEBOUNCE_MS = 600;
 const GATEWAY_URL_STORAGE_KEY = 'karshipta.gatewayUrl';
 const RELAY_URL_STORAGE_KEY = 'karshipta.relayUrl';
 const RELAY_DEVICE_ID_STORAGE_KEY = 'karshipta.relayDeviceId';
@@ -185,6 +190,8 @@ class FleetStore {
 	/** last uploaded mission per ward, so Start knows what it refers to */
 	uploadedMissions = $state<Record<string, Mission>>({});
 	missionProgress = $state<Record<string, MissionProgress>>({});
+	/** the map's current visible area, as last reported via setViewport() */
+	viewportBounds = $state<ViewportBounds | undefined>(undefined);
 
 	readonly wardIds = $derived(Object.keys(this.wards).sort());
 	readonly selectedWard = $derived(
@@ -197,6 +204,7 @@ class FleetStore {
 	private relayTransport: RelayTransport | undefined;
 	// timers are bookkeeping, not state
 	private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private viewportDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	// each live demo ward's home location, keyed by id - bookkeeping for
 	// persistDemoWardHomes(), not state components read directly
 	private demoWardHomes: Record<string, LatLon> = {};
@@ -232,6 +240,40 @@ class FleetStore {
 		});
 		this.gatewayTransport = transport;
 		transport.start();
+	}
+
+	/**
+	 * Reports the map's current visible area - safe to call on every
+	 * moveend, same as geozoneStore.requestViewport(). Debounced
+	 * (VIEWPORT_RECONNECT_DEBOUNCE_MS) and, once settled, reconnects the
+	 * gateway with the area encoded as query params so a consumer's own
+	 * backend (if it understands them; a self-hosted console's gateway just
+	 * ignores unknown params) can stream only what's actually in view.
+	 *
+	 * A no-op if there's no plain gateway connection to update: nothing
+	 * connected yet (gatewayUrl empty), or a relay connection is active
+	 * instead (relayTransport set) - relaying talks to one real gateway
+	 * with the operator's own wards, not a viewport-scale public feed, so
+	 * reconnecting it on every pan/zoom would be meaningless.
+	 */
+	setViewport(bounds: ViewportBounds): void {
+		this.viewportBounds = bounds;
+		if (this.viewportDebounceTimer) clearTimeout(this.viewportDebounceTimer);
+		this.viewportDebounceTimer = setTimeout(() => {
+			this.viewportDebounceTimer = undefined;
+			this.reconnectWithViewport();
+		}, VIEWPORT_RECONNECT_DEBOUNCE_MS);
+	}
+
+	private reconnectWithViewport(): void {
+		if (this.relayTransport || !this.gatewayUrl || !this.viewportBounds) return;
+		const [west, south, east, north] = this.viewportBounds;
+		const url = new URL(this.gatewayUrl);
+		url.searchParams.set('minLon', west.toFixed(4));
+		url.searchParams.set('minLat', south.toFixed(4));
+		url.searchParams.set('maxLon', east.toFixed(4));
+		url.searchParams.set('maxLat', north.toFixed(4));
+		this.connectGateway(url.toString());
 	}
 
 	/**
@@ -606,6 +648,9 @@ class FleetStore {
 		this.disconnectGateway();
 		for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
 		this.timeoutTimers.clear();
+		if (this.viewportDebounceTimer) clearTimeout(this.viewportDebounceTimer);
+		this.viewportDebounceTimer = undefined;
+		this.viewportBounds = undefined;
 		this.wards = {};
 		this.events = [];
 		this.commands = {};
