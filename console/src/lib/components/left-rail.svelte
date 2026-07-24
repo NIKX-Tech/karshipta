@@ -137,7 +137,7 @@
 						</svg>
 						{#if hasUnseenEvents}
 							<span
-								class="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+								class="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-panel"
 								aria-hidden="true"
 							></span>
 						{/if}
