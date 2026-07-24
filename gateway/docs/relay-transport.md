@@ -256,8 +256,23 @@ wrapping relayly's TypeScript SDK) is the other half of a full pairing
 flow and already exists; see `console/src/lib/components/connection-panel.svelte`
 for the UI.
 
-## Still open
+## Verified end to end
 
-- **End-to-end verification** (a console commanding a SITL ward through a
-  real relay, with the gateway's own WebSocket bound to `localhost` only) -
-  needs a real relayly server; not yet done.
+Done against a real, self-hosted relayly server (its own docker-compose), not
+just the unit suite above: registered real gateway and console devices via
+its CLI, built this gateway with `-DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON`
+against a real PX4 SITL container, paired a real gateway and a real running
+console through it (`gateway/tools/relay_pair` for the code, the console's
+connection panel Relay mode to accept it). Both directions confirmed: the
+SITL ward's telemetry rendered live in the console, and an Arm command sent
+from the console reached the gateway, executed against SITL, and settled
+`SUCCESS` back in the console, all with the gateway's own WebSocket transport
+never bound to anything but `localhost`.
+
+One real sequencing gotcha worth knowing if you reproduce this manually:
+`relay_pair` disconnects immediately after completing the pairing handshake
+(by design, see above), so if the console's Noise handshake races against
+`relay_pair` itself instead of the real `karshipta_gateway` process, it will
+see the peer go offline mid-handshake. Pair once with `relay_pair`, then make
+sure the real gateway process is the one running when the console actually
+connects.
