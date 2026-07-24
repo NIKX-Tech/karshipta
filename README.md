@@ -79,15 +79,61 @@ instead of the fake fleet, no extra setup.
 
 ## Architecture
 
-```
- PX4 / ArduPilot wards (real or SITL)
-        |  MAVLink
-   [ gateway ]        C++20 + MAVSDK edge service
-        |  protobuf Envelopes over WebSocket (E2E-encrypted relay optional)
-   [ console ]        SvelteKit web dashboard
+One shared wire contract, one gateway process, and two ways in for a ward.
+
+```mermaid
+flowchart TD
+    proto["<b>proto/karshipta/v1</b><br/><span style='font-size:11px'>the wire contract</span>"]:::contractNode
+    console["<b>Console</b><br/><span style='font-size:11px'>SvelteKit + MapLibre</span>"]:::consoleNode
+    gateway["<b>Gateway</b> <span style='font-size:11px'>C++20</span><br/><span style='font-size:11px'>WardManager &middot; HeraldWardManager &middot; FleetManager</span>"]:::gatewayNode
+
+    proto -. "protoc: C++" .-> gateway
+    proto -. "ts-proto: TS" .-> console
+
+    console == "WebSocket, LAN direct" ==> gateway
+    console -- "Relay (relayly), NAT traversal" --> gateway
+
+    subgraph flight ["<b>FLIGHT</b> &middot; MAVLink vehicles"]
+        mavsdk["<b>MAVSDK</b>"]:::flightNode -- "MAVLink, UDP 14540+" --> vehicle["<b>PX4 / ArduPilot</b><br/><span style='font-size:11px'>SITL or real autopilot</span>"]:::flightNode
+    end
+
+    subgraph herald ["<b>HERALD</b> &middot; anything without an autopilot"]
+        native["<b>Native</b><br/><span style='font-size:11px'>POST /herald</span>"]:::heraldNode --> tags["<b>Tags &amp; generic<br/>trackers</b>"]:::heraldNode
+        mapped["<b>Mapped</b><br/><span style='font-size:11px'>POST /herald/mapped/&lt;source&gt;</span>"]:::heraldNode --> tags
+        gt06["<b>GT06</b><br/><span style='font-size:11px'>TCP :5023</span>"]:::heraldNode --> tags
+    end
+
+    gateway --> flight
+    gateway --> herald
+
+    classDef contractNode fill:none,stroke:#f5a623,stroke-width:2px
+    classDef gatewayNode fill:none,stroke:#f5a623,stroke-width:2px
+    classDef consoleNode fill:none,stroke:#3b9eff,stroke-width:2px
+    classDef flightNode fill:none,stroke:#2ecc71,stroke-width:1.5px
+    classDef heraldNode fill:none,stroke:#a78bfa,stroke-width:1.5px
+
+    style flight fill:none,stroke:#2ecc71,stroke-width:1.5px
+    style herald fill:none,stroke:#a78bfa,stroke-width:1.5px
 ```
 
-The protobuf schema in [`proto/karshipta/v1/`](proto/karshipta/v1/) is the contract everything is generated from: C++ types at gateway build time, TypeScript types via ts-proto. One binary Envelope per WebSocket frame, in both directions. See [docs/architecture.md](docs/architecture.md).
+The protobuf schema in [`proto/karshipta/v1/`](proto/karshipta/v1/) is the contract everything is generated from: C++ types at gateway build time, TypeScript types via ts-proto. One binary `Envelope` per WebSocket frame, in both directions.
+
+| Path | Protocol | Carries |
+|---|---|---|
+| MAVLink | MAVSDK over UDP, port 14540+ | Flight vehicles: PX4, ArduPilot, SITL or real |
+| Herald, native | HTTP `POST /herald` | A payload that is already a Herald message |
+| Herald, mapped | HTTP `POST /herald/mapped/<source>` | A vendor's own JSON, translated by a declarative YAML field mapping |
+| Herald, GT06 | Raw TCP, port 5023 | Cheap GT06-family GPS trackers, hundreds of models |
+
+MAVLink and Herald are two independent domains, not stages of one pipeline: `karshipta-gateway` links both, `karshipta-herald` links MAVSDK to neither and never sees a "MAVLink mode" toggle. See [gateway/docs/herald-ingest.md](gateway/docs/herald-ingest.md) for the full ingestion writeup.
+
+> [!NOTE]
+> **On the roadmap, not built yet:** a DJI-to-MAVLink bridge, a Cursor-on-Target bridge ([#105](https://github.com/NIKX-Tech/karshipta/issues/105)), an OGC SensorThings bridge ([#106](https://github.com/NIKX-Tech/karshipta/issues/106)), and org scoping for Herald's `org_id` field ([#104](https://github.com/NIKX-Tech/karshipta/issues/104)).
+
+> [!TIP]
+> **Distribution beyond this repo:** `karshipta-desktop` wraps this exact gateway binary as a signed Tauri sidecar, for customers running MAVLink hardware who would rather not touch a terminal. `karshipta-cloud` (private) is the hosted console and backend: org and billing, a persistent relay peer per site, a viewport-bounded public guest feed. Neither forks the gateway; both reach it over the same relay transport shown above.
+
+See [docs/architecture.md](docs/architecture.md) for the full breakdown.
 
 ## Contributing
 
