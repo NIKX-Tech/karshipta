@@ -123,17 +123,28 @@ jobs:
 
       - name: Configure
         shell: bash
-        env:
-          # See the macOS dependency-install step's comment: Homebrew's LLVM
-          # clang + its own libc++ is what actually has std::jthread.
-          # CXXFLAGS/LDFLAGS instead of -stdlib=libc++ on the CXX line alone:
-          # CMake's own compiler-detection/try_compile checks need these
-          # too, not just the final build step.
-          CC: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/llvm/bin/clang' || '' }}
-          CXX: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/llvm/bin/clang++' || '' }}
-          CXXFLAGS: ${{ runner.os == 'macOS' && '-stdlib=libc++' || '' }}
-          LDFLAGS: ${{ runner.os == 'macOS' && '-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++' || '' }}
         run: |
+          cxxflags=""
+          ldflags=""
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            # See the macOS dependency-install step's comment: Homebrew's
+            # LLVM clang + its own libc++ is what actually has std::jthread.
+            # Homebrew's clang binary is a plain LLVM clang, not Apple's
+            # /usr/bin/clang wrapper - it does not auto-detect and inject
+            # -isysroot the way the wrapper does, so without it clang can
+            # silently pick up the C standard library headers in the wrong
+            # search-path order relative to libc++'s own wrapper headers
+            # (the exact "tried including X.h but didn't find libc++'s X.h
+            # header" error this surfaced as, found only by an actual CI
+            # run - this machine's own environment happens to resolve the
+            # SDK path some other way and never hit it).
+            export CC=/opt/homebrew/opt/llvm/bin/clang
+            export CXX=/opt/homebrew/opt/llvm/bin/clang++
+            cxxflags="-stdlib=libc++ -isysroot $(xcrun --sdk macosx --show-sdk-path)"
+            ldflags="-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++"
+          fi
+          export CXXFLAGS="$cxxflags"
+          export LDFLAGS="$ldflags"
           mavlink_flag="ON"
           [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
           relay_flag="ON"
