@@ -9,9 +9,9 @@
 # by hand the same way for local testing.
 #
 # Usage: package-release.sh <path-to-built-binary> <output-name-without-extension>
-# Produces <output-name>.tar.gz (+.sha256) on macOS/Linux, <output-name>.zip
-# (+.sha256) on Windows (run from Git Bash, which ships on GitHub's
-# windows-latest runner), in the current directory.
+# Produces <output-name>.tar.gz (+.sha256) on all three platforms, including
+# Windows (run from Git Bash, which ships on GitHub's windows-latest runner -
+# its tar handles gzip identically to macOS/Linux), in the current directory.
 set -euo pipefail
 
 # Copies every non-system dylib $1 (transitively) depends on into $2, and
@@ -194,16 +194,14 @@ case "$uname_s" in
         ;;
 esac
 
-case "$uname_s" in
-    Darwin | Linux)
-        archive="$(pwd)/$out_name.tar.gz"
-        tar -czf "$archive" -C "$work_dir" "$out_name"
-        ;;
-    MINGW* | MSYS* | CYGWIN*)
-        archive="$(pwd)/$out_name.zip"
-        (cd "$work_dir" && zip -qr "$archive" "$out_name")
-        ;;
-esac
+# .tar.gz uniformly, including Windows: `zip` is not guaranteed on PATH in
+# Git Bash (confirmed missing on GitHub's windows-latest runner - the
+# original reason this was platform-branched at all), whereas Windows 10
+# 1803+ ships a real tar.exe (bsdtar, in System32) with full gzip support,
+# and Git Bash's own tar handles it identically either way. One code path
+# for all three platforms beats one more platform-specific branch to break.
+archive="$(pwd)/$out_name.tar.gz"
+tar -czf "$archive" -C "$work_dir" "$out_name"
 
 if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$archive" >"$archive.sha256"

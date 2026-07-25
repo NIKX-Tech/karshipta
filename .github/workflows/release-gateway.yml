@@ -43,9 +43,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # llvm: GitHub's macos-14/macos-13 runners ship Xcode 15.4, whose
+      # bundled libc++ has no std::jthread/std::stop_token - this codebase
+      # uses both throughout (WardManager, CommandExecutor, WardMission).
+      # ci.yml never caught this because it only builds the gateway on
+      # ubuntu-22.04; this is the first workflow to ever build it on macOS
+      # CI. Verified directly (this machine has a newer Xcode where the
+      # system compiler already supports it, so this needed a real,
+      # dedicated check): Homebrew's LLVM clang + its own bundled libc++
+      # compiles, links, and *runs* correctly against Homebrew's MAVSDK/
+      # spdlog (themselves built with Apple's system libc++) - libc++'s ABI
+      # stability across the two is what makes this safe, not assumed.
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install mavsdk spdlog
+        run: brew install mavsdk spdlog llvm
 
       # libssl-dev: only needed once a build actually turns relay on
       # (KARSHIPTA_GATEWAY_ENABLE_RELAY=ON forces ixwebsocket's USE_TLS=ON,
@@ -112,6 +123,16 @@ jobs:
 
       - name: Configure
         shell: bash
+        env:
+          # See the macOS dependency-install step's comment: Homebrew's LLVM
+          # clang + its own libc++ is what actually has std::jthread.
+          # CXXFLAGS/LDFLAGS instead of -stdlib=libc++ on the CXX line alone:
+          # CMake's own compiler-detection/try_compile checks need these
+          # too, not just the final build step.
+          CC: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/llvm/bin/clang' || '' }}
+          CXX: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/llvm/bin/clang++' || '' }}
+          CXXFLAGS: ${{ runner.os == 'macOS' && '-stdlib=libc++' || '' }}
+          LDFLAGS: ${{ runner.os == 'macOS' && '-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++' || '' }}
         run: |
           mavlink_flag="ON"
           [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
@@ -160,11 +181,7 @@ jobs:
           set -e
           artifact="${{ steps.name.outputs.artifact }}"
           extract_dir="$(mktemp -d)"
-          if [[ -f "$artifact.tar.gz" ]]; then
-            tar -xzf "$artifact.tar.gz" -C "$extract_dir"
-          else
-            unzip -q "$artifact.zip" -d "$extract_dir"
-          fi
+          tar -xzf "$artifact.tar.gz" -C "$extract_dir"
           cd "$extract_dir/$artifact"
           binfile="karshipta_gateway"
           [[ -f karshipta_gateway.exe ]] && binfile="karshipta_gateway.exe"
@@ -193,9 +210,7 @@ jobs:
           path: |
             ${{ steps.name.outputs.artifact }}.tar.gz
             ${{ steps.name.outputs.artifact }}.tar.gz.sha256
-            ${{ steps.name.outputs.artifact }}.zip
-            ${{ steps.name.outputs.artifact }}.zip.sha256
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   publish:
     needs: build
