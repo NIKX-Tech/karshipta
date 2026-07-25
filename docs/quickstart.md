@@ -40,6 +40,28 @@ curl -fsSL -o /tmp/mavsdk.deb \
 sudo apt-get update && sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev
 ```
 
+**macOS with Xcode 15.4 or older**: this codebase uses `std::jthread`/
+`std::stop_token` throughout, which Xcode 15.4's bundled libc++ does not
+implement (confirmed directly: GitHub's own `macos-14`/`macos-13` runners
+ship Xcode 15.4 and fail with `no member named 'jthread' in namespace
+'std'` until worked around). `clang --version` tells you which Xcode you
+have. If you hit this, install a newer compiler instead of upgrading Xcode:
+
+```sh
+brew install llvm
+export CC=/opt/homebrew/opt/llvm/bin/clang
+export CXX=/opt/homebrew/opt/llvm/bin/clang++
+export CXXFLAGS="-stdlib=libc++ -isysroot $(xcrun --sdk macosx --show-sdk-path)"
+export LDFLAGS="-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++"
+```
+before the `cmake -S gateway -B gateway/build` step below. The `-isysroot`
+flag matters: Homebrew's `clang` binary is a plain LLVM clang, not Apple's
+`/usr/bin/clang` wrapper, so it does not auto-detect the active SDK the way
+the wrapper does - without it, clang can pick up the platform's C headers in
+the wrong search-path order relative to libc++'s own wrapper headers and
+fail with a confusing `tried including <X.h> but didn't find libc++'s <X.h>
+header` error instead.
+
 Build (protobuf is fetched or resolved automatically; see
 [`gateway/CMakeLists.txt`](../gateway/CMakeLists.txt)):
 
