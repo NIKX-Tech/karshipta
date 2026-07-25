@@ -21,40 +21,67 @@ set -euo pipefail
 # verified directly that dylibbundler hangs indefinitely (8+ minutes, zero
 # files copied) against this binary's ~90-dylib transitive dependency tree
 # (MAVSDK + protobuf/abseil + relayly's own deps, the last one referenced
-# via @rpath rather than an absolute path, resolved here against the
-# binary's own LC_RPATH entries). This does one BFS pass over `otool -L`
-# output, copies and relinks every dependency exactly once, then a single
-# codesign pass at the end - ~15-20s for the same tree. No associative
-# arrays (declare -A): this repo's contributors may only have macOS's
-# system bash (3.2, no bash-4+ features) on PATH, and this must run
+# via @rpath rather than an absolute path). This does one BFS pass over
+# `otool -L` output, copies and relinks every dependency exactly once, then
+# a single codesign pass at the end - ~15-20s for the same tree. No
+# associative arrays (declare -A): this repo's contributors may only have
+# macOS's system bash (3.2, no bash-4+ features) on PATH, and this must run
 # identically there.
 bundle_macos_dylibs() {
     local binary="$1"
     local lib_dir="$2"
     mkdir -p "$lib_dir"
 
-    local rpaths=()
-    while IFS= read -r rp; do
-        rpaths+=("$rp")
-    done < <(otool -l "$binary" | awk '/LC_RPATH/{getline; getline; print $2}')
+    # @rpath must resolve against the LC_RPATH entries of whichever file is
+    # currently being scanned, not the main binary's - found only by an
+    # actual CI run: Homebrew LLVM's own libc++.1.dylib depends on
+    # @rpath/libunwind.1.dylib via its own rpath (@loader_path/../unwind,
+    # relative to libc++.1.dylib's own directory), completely unrelated to
+    # the main binary's rpath list. Resolving every @rpath against only the
+    # binary's own rpaths silently dropped libunwind, which only failed at
+    # runtime ("Library not loaded"), not at bundle time - this machine's
+    # own already-installed Homebrew LLVM never exercised the gap locally
+    # since the dylib was already sitting right where dyld expected it.
+    rpaths_for() {
+        local file="$1"
+        local file_dir
+        file_dir="$(cd "$(dirname "$file")" && pwd)"
+        otool -l "$file" | awk '/LC_RPATH/{getline; getline; print $2}' | while IFS= read -r rp; do
+            rp="${rp/@loader_path/$file_dir}"
+            rp="${rp/@executable_path/$file_dir}"
+            printf '%s\n' "$rp"
+        done
+    }
 
     resolve_dep() {
         local ref="$1"
+        local current_file="$2"
         if [[ "$ref" == @rpath/* ]]; then
             local name="${ref#@rpath/}"
             local rp
-            for rp in "${rpaths[@]}"; do
+            while IFS= read -r rp; do
+                [[ -z "$rp" ]] && continue
                 if [[ -f "$rp/$name" ]]; then
                     printf '%s\n' "$rp/$name"
                     return 0
                 fi
-            done
+            done < <(rpaths_for "$current_file")
             return 1
+        elif [[ "$ref" == @loader_path/* ]]; then
+            local file_dir
+            file_dir="$(cd "$(dirname "$current_file")" && pwd)"
+            printf '%s\n' "$file_dir/${ref#@loader_path/}"
         else
             printf '%s\n' "$ref"
         fi
     }
 
+    # BFS queue holds SOURCE paths (original Homebrew/build-tree locations),
+    # never the copies in $lib_dir: rpath resolution must always happen
+    # against a file's real, original location (see rpaths_for above) - a
+    # copy's rpath entries, interpreted relative to its new location inside
+    # $lib_dir, resolve to nonsense. `copied` tracks the actual copies
+    # separately, only for the relink/codesign passes below.
     local seen_file
     seen_file="$(mktemp)"
     local copied=()
@@ -71,7 +98,7 @@ bundle_macos_dylibs() {
                 /usr/lib/* | /System/*) continue ;;
             esac
             local resolved
-            resolved="$(resolve_dep "$dep")" || continue
+            resolved="$(resolve_dep "$dep" "$current")" || continue
             local name
             name="$(basename "$resolved")"
             grep -qxF "$name" "$seen_file" 2>/dev/null && continue
@@ -80,13 +107,19 @@ bundle_macos_dylibs() {
             cp "$resolved" "$dest"
             chmod u+w "$dest"
             copied+=("$dest")
-            queue+=("$dest")
+            queue+=("$resolved")
         done < <(otool -L "$current" | tail -n +2 | awk '{print $1}')
     done
     rm -f "$seen_file"
 
     echo "bundle_macos_dylibs: copied ${#copied[@]} dylibs" >&2
 
+    # Rewriting references only ever needs the dependency's basename (the
+    # BFS pass above already guarantees a same-named copy exists in
+    # $lib_dir for every non-system dependency) - no path resolution needed
+    # here, deliberately not reusing resolve_dep: it would face the exact
+    # copy-location bug the comment above warns about, since $target here is
+    # the copy in $lib_dir, not the dependency's original location.
     local target
     for target in "$binary" "${copied[@]}"; do
         while IFS= read -r dep; do
@@ -94,10 +127,8 @@ bundle_macos_dylibs() {
             case "$dep" in
                 /usr/lib/* | /System/*) continue ;;
             esac
-            local resolved
-            resolved="$(resolve_dep "$dep")" || continue
             local name
-            name="$(basename "$resolved")"
+            name="$(basename "$dep")"
             install_name_tool -change "$dep" "@executable_path/lib/$name" "$target" 2>/dev/null || true
         done < <(otool -L "$target" | tail -n +2 | awk '{print $1}')
     done

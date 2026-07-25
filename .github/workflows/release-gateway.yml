@@ -181,11 +181,14 @@ jobs:
       # missing relinked dependency shows up here instead of only on a real
       # customer machine. karshipta_gateway takes no CLI arguments and never
       # exits on its own - this checks it gets far enough to log its normal
-      # startup line, not that it runs a full mission. 25s wait on macOS:
-      # verified locally that a freshly re-signed binary plus ~90 freshly
-      # re-signed dylibs take ~15-20s before the OS's one-time Gatekeeper/
-      # AMFI verification clears and the process's first log line appears -
-      # not a bug, but a real, measured delay this check must not race.
+      # startup line, not that it runs a full mission. 40s wait on macOS:
+      # verified locally that a freshly re-signed binary plus its ~100
+      # freshly re-signed dylibs (Homebrew LLVM's own libc++/libc++abi/
+      # libunwind now included) take a real, variable amount of time before
+      # the OS's one-time Gatekeeper/AMFI verification clears and the
+      # process's first log line appears - measured 13-35s across repeated
+      # local runs, not a fixed number, so this leaves real margin rather
+      # than matching the fastest observed run.
       - name: Verify it starts standalone
         shell: bash
         run: |
@@ -199,7 +202,7 @@ jobs:
           ./"$binfile" >start.log 2>&1 &
           pid=$!
           wait_s=5
-          [[ "${{ runner.os }}" == "macOS" ]] && wait_s=25
+          [[ "${{ runner.os }}" == "macOS" ]] && wait_s=40
           sleep "$wait_s"
           if ! kill -0 "$pid" 2>/dev/null; then
             echo "binary exited early, log:"
