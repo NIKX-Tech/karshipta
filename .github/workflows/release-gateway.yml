@@ -30,10 +30,16 @@ jobs:
       fail-fast: false
       matrix:
         platform:
+          # x86_64-apple-darwin (Intel Mac) is not built here: GitHub retired
+          # macos-13 (confirmed: gone from actions/runner-images' current
+          # image list, deprecated Feb 2026) and no longer offers any free
+          # x64 macOS hosted runner at all - the only x64 Mac labels left
+          # (macos-15-large, macos-14-large) are paid "large runners", a
+          # billing change, not a workflow fix. arm64 covers every Mac sold
+          # since late 2020; revisit Intel support later if real demand
+          # shows up (paid large runner or a self-hosted Intel Mac).
           - os: macos-14
             triple: aarch64-apple-darwin
-          - os: macos-13
-            triple: x86_64-apple-darwin
           - os: ubuntu-22.04
             triple: x86_64-unknown-linux-gnu
           - os: windows-latest
@@ -43,9 +49,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # llvm: GitHub's macos-14/macos-13 runners ship Xcode 15.4, whose
+      # bundled libc++ has no std::jthread/std::stop_token - this codebase
+      # uses both throughout (WardManager, CommandExecutor, WardMission).
+      # ci.yml never caught this because it only builds the gateway on
+      # ubuntu-22.04; this is the first workflow to ever build it on macOS
+      # CI. Verified directly (this machine has a newer Xcode where the
+      # system compiler already supports it, so this needed a real,
+      # dedicated check): Homebrew's LLVM clang + its own bundled libc++
+      # compiles, links, and *runs* correctly against Homebrew's MAVSDK/
+      # spdlog (themselves built with Apple's system libc++) - libc++'s ABI
+      # stability across the two is what makes this safe, not assumed.
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install mavsdk spdlog
+        run: brew install mavsdk spdlog llvm
 
       # libssl-dev: only needed once a build actually turns relay on
       # (KARSHIPTA_GATEWAY_ENABLE_RELAY=ON forces ixwebsocket's USE_TLS=ON,
@@ -113,6 +130,27 @@ jobs:
       - name: Configure
         shell: bash
         run: |
+          cxxflags=""
+          ldflags=""
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            # See the macOS dependency-install step's comment: Homebrew's
+            # LLVM clang + its own libc++ is what actually has std::jthread.
+            # Homebrew's clang binary is a plain LLVM clang, not Apple's
+            # /usr/bin/clang wrapper - it does not auto-detect and inject
+            # -isysroot the way the wrapper does, so without it clang can
+            # silently pick up the C standard library headers in the wrong
+            # search-path order relative to libc++'s own wrapper headers
+            # (the exact "tried including X.h but didn't find libc++'s X.h
+            # header" error this surfaced as, found only by an actual CI
+            # run - this machine's own environment happens to resolve the
+            # SDK path some other way and never hit it).
+            export CC=/opt/homebrew/opt/llvm/bin/clang
+            export CXX=/opt/homebrew/opt/llvm/bin/clang++
+            cxxflags="-stdlib=libc++ -isysroot $(xcrun --sdk macosx --show-sdk-path)"
+            ldflags="-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++"
+          fi
+          export CXXFLAGS="$cxxflags"
+          export LDFLAGS="$ldflags"
           mavlink_flag="ON"
           [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
           relay_flag="ON"
@@ -149,29 +187,28 @@ jobs:
       # missing relinked dependency shows up here instead of only on a real
       # customer machine. karshipta_gateway takes no CLI arguments and never
       # exits on its own - this checks it gets far enough to log its normal
-      # startup line, not that it runs a full mission. 25s wait on macOS:
-      # verified locally that a freshly re-signed binary plus ~90 freshly
-      # re-signed dylibs take ~15-20s before the OS's one-time Gatekeeper/
-      # AMFI verification clears and the process's first log line appears -
-      # not a bug, but a real, measured delay this check must not race.
+      # startup line, not that it runs a full mission. 40s wait on macOS:
+      # verified locally that a freshly re-signed binary plus its ~100
+      # freshly re-signed dylibs (Homebrew LLVM's own libc++/libc++abi/
+      # libunwind now included) take a real, variable amount of time before
+      # the OS's one-time Gatekeeper/AMFI verification clears and the
+      # process's first log line appears - measured 13-35s across repeated
+      # local runs, not a fixed number, so this leaves real margin rather
+      # than matching the fastest observed run.
       - name: Verify it starts standalone
         shell: bash
         run: |
           set -e
           artifact="${{ steps.name.outputs.artifact }}"
           extract_dir="$(mktemp -d)"
-          if [[ -f "$artifact.tar.gz" ]]; then
-            tar -xzf "$artifact.tar.gz" -C "$extract_dir"
-          else
-            unzip -q "$artifact.zip" -d "$extract_dir"
-          fi
+          tar -xzf "$artifact.tar.gz" -C "$extract_dir"
           cd "$extract_dir/$artifact"
           binfile="karshipta_gateway"
           [[ -f karshipta_gateway.exe ]] && binfile="karshipta_gateway.exe"
           ./"$binfile" >start.log 2>&1 &
           pid=$!
           wait_s=5
-          [[ "${{ runner.os }}" == "macOS" ]] && wait_s=25
+          [[ "${{ runner.os }}" == "macOS" ]] && wait_s=40
           sleep "$wait_s"
           if ! kill -0 "$pid" 2>/dev/null; then
             echo "binary exited early, log:"
@@ -193,9 +230,7 @@ jobs:
           path: |
             ${{ steps.name.outputs.artifact }}.tar.gz
             ${{ steps.name.outputs.artifact }}.tar.gz.sha256
-            ${{ steps.name.outputs.artifact }}.zip
-            ${{ steps.name.outputs.artifact }}.zip.sha256
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   publish:
     needs: build
@@ -211,6 +246,14 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh release create infers the target repo from a local git
+          # checkout; this job has none (only actions/download-artifact
+          # above, no actions/checkout - it never needs repo files), so it
+          # fails with "not a git repository" without this. Found only by
+          # a real CI run reaching this job, since every earlier local test
+          # only ever exercised the build/package/verify steps, never
+          # publish. GH_REPO makes the target explicit instead.
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${{ github.ref_name }}" \
             --title "karshipta ${{ github.ref_name }}" \
