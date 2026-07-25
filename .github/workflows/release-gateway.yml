@@ -246,6 +246,14 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh release create infers the target repo from a local git
+          # checkout; this job has none (only actions/download-artifact
+          # above, no actions/checkout - it never needs repo files), so it
+          # fails with "not a git repository" without this. Found only by
+          # a real CI run reaching this job, since every earlier local test
+          # only ever exercised the build/package/verify steps, never
+          # publish. GH_REPO makes the target explicit instead.
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${{ github.ref_name }}" \
             --title "karshipta ${{ github.ref_name }}" \
