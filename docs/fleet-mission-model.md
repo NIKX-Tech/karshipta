@@ -1,11 +1,14 @@
 # Fleet, Zone, and Console Layout: v0 Design
 
-This document is the missing piece between the schema and the console UI.
-It captures decisions already made so implementation work builds toward
-the same design instead of improvising. It describes Phase 2 of the Ward
-rename plan: none of this exists yet, none of it is part of the Ward
-rename itself. Fleet, Zone, and Organization are new entities, not a
-rename of something that already exists.
+This document is the design record for Fleet, Zone, and fleet-level
+mission assignment: Phase 2 of the Ward rename plan, and now shipped (proto
+messages, gateway SQLite persistence, wire CRUD, and the console UI
+described under "Console layout" below). It stays as the record of the
+decisions that shaped the implementation, not a forward-looking spec;
+"What shipped differently" documents the one place the console diverged
+from the original draft. Fleet, Zone, and Organization were new entities,
+not a rename of something that already existed - Organization is the one
+piece that stayed Enterprise-only (see below), never built in OSS.
 
 ## Fleet
 
@@ -40,8 +43,8 @@ receive a MAVLink geofence, a non-flight ward cannot).
 
 ## Fleet-level missions
 
-FleetMissionAssignment (proto/karshipta/v1/command.proto, not yet added)
-assigns one mission template to a chosen subset of a Fleet's Wards. v0
+`FleetMissionAssignment` (`proto/karshipta/v1/fleet.proto`) assigns one
+mission template to a chosen subset of a Fleet's Wards. v0
 semantics, confirmed and kept deliberately simple: the gateway uploads an
 independent copy of the same mission to each selected Ward and starts them
 together. There is no automatic area splitting, role assignment, or

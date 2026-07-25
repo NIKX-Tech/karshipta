@@ -44,8 +44,8 @@ owning a `System` itself, and lazily constructs the underlying
   `Command` envelopes; this class only exposes both operations and documents
   which schema field each one implements (see `kill()` below).
 - **Building `CommandAck`.** Translating a `mavsdk::Action::Result` into
-  `CommandStatus`/`CommandAck.message` is M3 work, once `Command` envelopes
-  actually arrive over the `Transport`.
+  `CommandStatus`/`CommandAck.message` is `CommandExecutor`'s job, not this
+  class's; see `command_executor.cpp`.
 
 ## Public API
 
@@ -129,19 +129,20 @@ created lazily and never rebuilt across a reconnect.
   `{Result::Failed, 0.0f}` for the pair-returning getter) rather than throw.
 - **Not thread-safe**, consistent with `WardConnection` and
   `TelemetryInfo`.
-- **Not wired to the `Transport` yet.** Nothing in `main.cpp` constructs a
-  `WardActions` or calls it; it becomes reachable only once the M3
-  executor parses incoming `Command` envelopes and calls into this class.
-  This is also why this PR is rebased on top of the websocket transport PR
-  rather than the other way around.
+- **Reached only through `CommandExecutor`.** Each `ManagedWard` owns one
+  `WardActions` (see `ward-manager.md`'s object-graph description); `main.cpp`
+  never constructs one directly or calls into it itself, `WardManager` does,
+  by handing this class to the ward's `CommandExecutor` (see
+  `command-executor.md`).
 
 ## Automated tests
 
-None yet. Coverage worth adding against the same fake-autopilot pattern used
-by `gateway/tests/ward/ward_connection_test.cpp`: `arm()`/`takeoff()`/
-`land()` return `Result::Success` against a healthy fake autopilot, and every
-method returns `Result::Failed` (not a thrown exception) when called before
-`connect()` succeeds.
+No dedicated `ward_actions_test.cpp`; covered indirectly through
+`gateway/tests/ward/command_executor_test.cpp`, which constructs a real
+`WardActions` against a fake-autopilot `WardConnection`
+(`CommandExecutorTest.EveryActionKindAnswersAcceptedThenTerminal` drives
+every action kind through it) - the same fake-autopilot pattern
+`gateway/tests/ward/ward_connection_test.cpp` uses.
 
 ## Manual verification
 
@@ -151,11 +152,15 @@ With one PX4 SITL container running:
 docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
 ```
 
-This class is not yet reachable from `main.cpp` (see Constraints above), so
-it was exercised with a small standalone harness linked against the
-`ward` library: connect, `TelemetryInfo::check_drone_health()`, then
-`arm()` / `takeoff()` / (wait for `check_current_takeoff_process(2.5f)`) /
-`land()` / `landing_state()`. Observed output against real SITL:
+This class is exercised today through the normal `CommandExecutor`/
+`WardManager` path (see `docs/quickstart.md`); the transcript below predates
+that wiring and was captured with a small standalone harness linked against
+the `ward` library instead: connect, `TelemetryInfo::check_drone_health()`,
+then `arm()` / `takeoff()` / (wait for `check_current_takeoff_process(2.5f)`)
+/ `land()` / `landing_state()`, called directly with no `CommandExecutor` in
+between. Kept as-is since it still proves this class's own MAVSDK calls work
+against real SITL, independent of anything built on top of it. Observed
+output against real SITL:
 
 ```
 [info] connected to udp://:14540 (system_id=1)

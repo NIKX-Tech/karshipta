@@ -55,6 +55,18 @@ Multi-stage Dockerfile, gateway joins the root docker-compose. Reconnect behavio
 **M7: Herald ingestion (github issue #101, milestone #15).**
 Accept a [Herald](https://github.com/NIKX-Tech/herald) message over `POST /herald` and report it as a ward, alongside MAVLink wards, with no console changes needed. Non-MAVLink, push-only telemetry: no command surface, no persistence, no MAVSDK dependency. See `gateway/docs/herald-ingest.md`. Explicitly out of scope here: vendor mapping config, CoT/SensorThings bridges, and org scoping for `Herald.org_id` (github issues #102/#104/#105/#106).
 
+**M7.1: Herald vendor mapping and GT06 (github issues #102, #123).**
+`POST /herald/mapped/<source_name>` translates a vendor's own JSON payload into a Herald message via a declarative YAML mapping (`HeraldFieldMapper`, `gateway/config/herald_mappings/*.yaml`), for sources that can't speak native Herald. `Gt06TcpServer` adds a second, non-HTTP ingestion path: a raw TCP listener for the GT06 tracker protocol (0x78 0x78 frame header) hundreds of low-cost GPS tracker models speak natively, sharing the same `HeraldWardManager::ingest()` entry point as the HTTP paths. See `gateway/docs/herald-ingest.md`.
+
+**M8: Relay transport, verified end to end (github issue #34).**
+The second `Transport` implementation `M4` scoped (self-hosted, E2E-encrypted device pairing and relay via [relayly](https://github.com/NIKX-Tech/relayly)) is built and verified against a real relayly server, a real gateway, and a real console: pairing, the Noise XX handshake, telemetry, and command round trips all confirmed over the relay, not just unit-tested. See `gateway/docs/relay-transport.md`.
+
+**M9: Fleet, Zone, and fleet-level mission assignment (github issues #84-89).**
+Named, persistent Wards groupings (Fleet) and operator-drawn keep-in/keep-out polygons (Zone), each with gateway-owned SQLite persistence (`FleetZoneStore`) and wire-level CRUD (`FleetManager`), plus `FleetMissionAssignment` to fan one mission out to a chosen subset of a Fleet's Wards as independent per-ward uploads. Design record: `docs/fleet-mission-model.md`. Reference docs: `gateway/docs/fleet-manager.md`.
+
+**M10: Concurrency and crash-safety hardening (audit-driven, github issues #49, #67, #69, #71, #73-76).**
+A ward-manager concurrency audit and a follow-up Fleet/Zone audit each produced a batch of fixes: two-level locking replacing a single fleet-wide mutex (closing a slow-teardown-blocks-everything gap), `steady_clock`-scheduled telemetry publishing, per-tick `protobuf::Arena` allocation, atomic config writes, WebSocket outbound-backlog capping, and, for Fleet/Zone, a store-wide mutex plus a SQL transaction around `create_zone`'s multi-statement insert, and exception-to-ack conversion so a store failure rejects one request instead of crashing the gateway process.
+
 ## Definition of done, always
 
 - Builds warning-clean in CI (gcc + clang, -Wall -Wextra).
