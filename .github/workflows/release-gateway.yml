@@ -30,10 +30,16 @@ jobs:
       fail-fast: false
       matrix:
         platform:
+          # x86_64-apple-darwin (Intel Mac) is not built here: GitHub retired
+          # macos-13 (confirmed: gone from actions/runner-images' current
+          # image list, deprecated Feb 2026) and no longer offers any free
+          # x64 macOS hosted runner at all - the only x64 Mac labels left
+          # (macos-15-large, macos-14-large) are paid "large runners", a
+          # billing change, not a workflow fix. arm64 covers every Mac sold
+          # since late 2020; revisit Intel support later if real demand
+          # shows up (paid large runner or a self-hosted Intel Mac).
           - os: macos-14
             triple: aarch64-apple-darwin
-          - os: macos-13
-            triple: x86_64-apple-darwin
           - os: ubuntu-22.04
             triple: x86_64-unknown-linux-gnu
           - os: windows-latest
