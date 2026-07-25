@@ -18,6 +18,25 @@
 	let dialogMode = $state<'simulated' | 'real' | undefined>(undefined);
 	let simConfirmOpen = $state(false);
 	let compactMenuOpen = $state(false);
+	let compactMenuEl: HTMLDivElement | undefined = $state();
+
+	// close the menu on an outside click or Escape, same convention as
+	// fleet-map.svelte's layers menu
+	$effect(() => {
+		if (!compactMenuOpen) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (compactMenuEl && !compactMenuEl.contains(event.target as Node)) compactMenuOpen = false;
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') compactMenuOpen = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
+	});
 
 	function openSimulated() {
 		compactMenuOpen = false;
@@ -81,7 +100,7 @@
 		{/if}
 	</div>
 {:else}
-	<div class="relative">
+	<div class="relative" bind:this={compactMenuEl}>
 		<button
 			class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
 			aria-label="Add Ward"
