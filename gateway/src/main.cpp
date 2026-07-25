@@ -34,7 +34,11 @@
 namespace {
 // Both relative to the repo root, matching how the binary is documented to
 // be run (docs/quickstart-windows.md, gateway/CLAUDE.local.md).
-// gateway/config/ is a tracked directory (see .gitkeep).
+// gateway/config/ is a tracked directory inside a checkout (see .gitkeep),
+// but a released binary run standalone (a Tauri sidecar, a downloaded
+// release artifact, anything outside a git checkout of this repo) has no
+// .gitkeep to rely on - see ensure_config_dir_exists() below.
+constexpr auto kConfigDir = "gateway/config";
 constexpr auto kNetworkConfigPath = "gateway/config/gateway.yaml";
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 // Generated state, not operator-managed; gitignored (gateway/.gitignore).
@@ -139,9 +143,28 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
     }
     return bytes;
 }
+
+// Every path above assumes kConfigDir exists - inside a checkout of this
+// repo it always does (tracked via .gitkeep), but nothing enforced that for
+// a binary run outside one: found by actually running a release build in an
+// empty directory, where FleetManager's FleetZoneStore constructor throws
+// std::runtime_error opening kFleetZoneDbPath (SQLite cannot create a file
+// in a directory that does not exist), uncaught here, aborting the whole
+// process before it ever logs a usable reason. create_directories() is a
+// no-op if the directory (or its .gitkeep-created equivalent) already
+// exists, so this is safe to call unconditionally on every startup.
+void ensure_config_dir_exists() {
+    std::error_code error;
+    std::filesystem::create_directories(kConfigDir, error);
+    if (error) {
+        spdlog::error("failed to create '{}': {}; startup will likely fail shortly", kConfigDir,
+                      error.message());
+    }
+}
 }  // namespace
 
 int main() {
+    ensure_config_dir_exists();
     std::unique_ptr<Transport> transport = build_transport(kNetworkConfigPath);
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     auto ward_manager = WardManager::create(*transport, kPersistencePath);

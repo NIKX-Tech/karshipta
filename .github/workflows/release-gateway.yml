@@ -1,0 +1,218 @@
+# Publishes real karshipta_gateway/karshipta_herald release binaries. Nothing
+# in this repo did this before: ci.yml only builds and tests, it never
+# publishes an artifact anywhere. karshipta-desktop's own binaries/README.md
+# documents the exact swap-in contract this workflow's output satisfies:
+# `karshipta_gateway-<target-triple>[.exe]`, built with
+# -DKARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON -DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON.
+#
+# Two flavors (matching gateway/CMakeLists.txt's KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+# product split): "full" (karshipta_gateway, MAVLink+relay where supported) and
+# "herald-only" (karshipta_herald, no MAVLink, for self-hosters who only want
+# Herald ingestion). Windows builds both without relay:
+# KARSHIPTA_GATEWAY_ENABLE_RELAY=ON is a hard CMake FATAL_ERROR there today -
+# relayly's C++ SDK has no Windows TLS backend yet (its own sdk/cpp/README.md
+# Requirements section), a real upstream gap, not something fixable here.
+#
+# Unsigned. Code signing (macOS notarization, Windows Authenticode) needs real
+# Apple Developer / Azure Trusted Signing credentials that do not exist yet -
+# not something to fake or skip past silently, see RELEASE-PLAN.md.
+
+name: release-gateway
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: macos-14
+            triple: aarch64-apple-darwin
+          - os: macos-13
+            triple: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+        flavor: [full, herald-only]
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install mavsdk spdlog
+
+      # libssl-dev: only needed once a build actually turns relay on
+      # (KARSHIPTA_GATEWAY_ENABLE_RELAY=ON forces ixwebsocket's USE_TLS=ON,
+      # which needs OpenSSL to configure at all) - ci.yml's own gateway job
+      # never sets that flag, so this is a real, previously-unexercised
+      # dependency, found by actually building this configuration locally in
+      # a matching Ubuntu 22.04 container rather than assumed.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o /tmp/mavsdk.deb https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb
+          sudo apt-get update
+          sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev protobuf-compiler libprotobuf-dev patchelf libssl-dev
+
+      # Windows has no package manager equivalent for these (see
+      # docs/quickstart-windows.md, which this mirrors step for step) - MAVSDK
+      # is a prebuilt zip, spdlog/protobuf are built from source and cached by
+      # their pinned tags so only the first run on a given cache generation
+      # pays the full build cost. GTest (that doc's step 5) is skipped: a
+      # release build has no need for it.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Cache Windows vendored dependencies
+        if: runner.os == 'Windows'
+        id: win-cache
+        uses: actions/cache@v4
+        with:
+          path: gateway/third_party
+          key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12
+
+      - name: Vendor MAVSDK (Windows)
+        if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fsSL -o mavsdk.zip https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/mavsdk-windows-x64.zip
+          mkdir -p gateway/third_party/mavsdk
+          unzip -q mavsdk.zip -d gateway/third_party/mavsdk
+
+      - name: Vendor spdlog (Windows)
+        if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --branch v1.14.1 --depth 1 https://github.com/gabime/spdlog.git spdlog-src
+          cmake -S spdlog-src -B spdlog-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/gateway/third_party/spdlog"
+          cmake --build spdlog-src/build
+          cmake --install spdlog-src/build
+
+      - name: Vendor protobuf (Windows)
+        if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --branch v21.12 --recurse-submodules --depth 1 https://github.com/protocolbuffers/protobuf.git protobuf-src
+          cmake -S protobuf-src -B protobuf-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -Dprotobuf_BUILD_SHARED_LIBS=ON \
+            -Dprotobuf_MSVC_STATIC_RUNTIME=OFF \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/gateway/third_party/protobuf"
+          cmake --build protobuf-src/build
+          cmake --install protobuf-src/build
+
+      - name: Configure
+        shell: bash
+        run: |
+          mavlink_flag="ON"
+          [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
+          relay_flag="ON"
+          [[ "${{ runner.os }}" == "Windows" ]] && relay_flag="OFF"
+          generator=()
+          [[ "${{ runner.os }}" == "Windows" ]] && generator=(-G Ninja)
+          cmake -S gateway -B gateway/build "${generator[@]}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKARSHIPTA_GATEWAY_ENABLE_MAVLINK="$mavlink_flag" \
+            -DKARSHIPTA_GATEWAY_ENABLE_RELAY="$relay_flag"
+
+      - name: Build
+        shell: bash
+        run: cmake --build gateway/build -j
+
+      - name: Determine artifact name
+        id: name
+        shell: bash
+        run: |
+          product="karshipta_gateway"
+          [[ "${{ matrix.flavor }}" == "herald-only" ]] && product="karshipta_herald"
+          echo "artifact=${product}-${{ matrix.platform.triple }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: bash
+        run: |
+          binary="gateway/build/src/karshipta_gateway"
+          [[ "${{ runner.os }}" == "Windows" ]] && binary="gateway/build/src/karshipta_gateway.exe"
+          ./gateway/scripts/package-release.sh "$binary" "${{ steps.name.outputs.artifact }}"
+
+      # Proves the archive is genuinely self-contained: extracted somewhere
+      # that is not the build tree (which still has every Homebrew/apt/
+      # third_party path the binary was linked against available), so a
+      # missing relinked dependency shows up here instead of only on a real
+      # customer machine. karshipta_gateway takes no CLI arguments and never
+      # exits on its own - this checks it gets far enough to log its normal
+      # startup line, not that it runs a full mission. 25s wait on macOS:
+      # verified locally that a freshly re-signed binary plus ~90 freshly
+      # re-signed dylibs take ~15-20s before the OS's one-time Gatekeeper/
+      # AMFI verification clears and the process's first log line appears -
+      # not a bug, but a real, measured delay this check must not race.
+      - name: Verify it starts standalone
+        shell: bash
+        run: |
+          set -e
+          artifact="${{ steps.name.outputs.artifact }}"
+          extract_dir="$(mktemp -d)"
+          if [[ -f "$artifact.tar.gz" ]]; then
+            tar -xzf "$artifact.tar.gz" -C "$extract_dir"
+          else
+            unzip -q "$artifact.zip" -d "$extract_dir"
+          fi
+          cd "$extract_dir/$artifact"
+          binfile="karshipta_gateway"
+          [[ -f karshipta_gateway.exe ]] && binfile="karshipta_gateway.exe"
+          ./"$binfile" >start.log 2>&1 &
+          pid=$!
+          wait_s=5
+          [[ "${{ runner.os }}" == "macOS" ]] && wait_s=25
+          sleep "$wait_s"
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "binary exited early, log:"
+            cat start.log
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          echo "started ok, log:"
+          cat start.log
+          grep -q "listening" start.log || {
+            echo "no 'listening' line found in startup log"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: |
+            ${{ steps.name.outputs.artifact }}.tar.gz
+            ${{ steps.name.outputs.artifact }}.tar.gz.sha256
+            ${{ steps.name.outputs.artifact }}.zip
+            ${{ steps.name.outputs.artifact }}.zip.sha256
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "karshipta ${{ github.ref_name }}" \
+            --notes "Unsigned gateway binaries. karshipta_gateway is the full build (MAVLink + relay on macOS/Linux; Windows ships without relay, relayly's C++ SDK has no Windows TLS backend yet - see gateway/docs/relay-transport.md). karshipta_herald is the MAVLink-disabled build for Herald-only ingestion (see gateway/docs/herald-ingest.md). Each archive includes a .sha256 checksum." \
+            dist/*
