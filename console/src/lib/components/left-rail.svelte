@@ -8,6 +8,7 @@
 	import EventsFeed from '$lib/components/events-feed.svelte';
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import Tabs, { type TabItem } from '$lib/components/ui/tabs.svelte';
+	import Disclosure from '$lib/components/ui/disclosure.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -65,6 +66,7 @@
 	const unassignedWardIds = $derived(fleetGroups.unassignedWardIds(fleet.wardIds));
 
 	let createFleetOpen = $state(false);
+	let createFleetEl: HTMLDivElement | undefined = $state();
 	let newFleetName = $state('');
 	let newFleetDescription = $state('');
 
@@ -77,6 +79,24 @@
 		newFleetDescription = '';
 		createFleetOpen = false;
 	}
+
+	// close the create-fleet form on an outside click or Escape, same
+	// convention as fleet-map.svelte's layers menu
+	$effect(() => {
+		if (!createFleetOpen) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (createFleetEl && !createFleetEl.contains(event.target as Node)) createFleetOpen = false;
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') createFleetOpen = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
+	});
 </script>
 
 <div class="flex h-full border-r border-edge bg-panel">
@@ -213,7 +233,7 @@
 						{onstartdemoplacement}
 					/>
 
-					<div class="relative">
+					<div class="relative" bind:this={createFleetEl}>
 						<button
 							type="button"
 							class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
@@ -267,46 +287,20 @@
 				{/each}
 
 				{#if unassignedWardIds.length > 0}
-					<div class="rounded border border-edge">
-						<div class="flex items-center gap-1 px-1.5 py-1">
-							<button
-								type="button"
-								class="flex h-4 w-4 shrink-0 items-center justify-center text-fg-muted hover:text-fg"
-								aria-expanded={isGroupExpanded(UNASSIGNED_GROUP_ID)}
-								aria-controls="unassigned-members"
-								aria-label={isGroupExpanded(UNASSIGNED_GROUP_ID) ? 'Collapse' : 'Expand'}
-								onclick={() =>
-									(groupExpanded[UNASSIGNED_GROUP_ID] = !isGroupExpanded(UNASSIGNED_GROUP_ID))}
-							>
-								<svg
-									class="transition-transform {isGroupExpanded(UNASSIGNED_GROUP_ID)
-										? 'rotate-90'
-										: ''}"
-									width="10"
-									height="10"
-									viewBox="0 0 24 24"
-									fill="currentColor"
-									aria-hidden="true"
-								>
-									<path d="M8 5v14l11-7z" />
-								</svg>
-							</button>
-							<span
-								class="min-w-0 flex-1 truncate text-[10px] font-medium tracking-widest text-fg-muted"
-							>
-								UNASSIGNED
-								<span class="font-mono text-fg-muted">({unassignedWardIds.length})</span>
-							</span>
-						</div>
-						<div
-							id="unassigned-members"
-							hidden={!isGroupExpanded(UNASSIGNED_GROUP_ID)}
-							class="flex flex-col gap-1.5 px-1.5 pb-1.5"
+					<div class="rounded border border-edge px-1.5 py-1">
+						<Disclosure
+							id={UNASSIGNED_GROUP_ID}
+							label="UNASSIGNED"
+							expanded={isGroupExpanded(UNASSIGNED_GROUP_ID)}
+							onchange={(value) => (groupExpanded[UNASSIGNED_GROUP_ID] = value)}
 						>
+							{#snippet trailing()}
+								<span class="font-mono text-fg-muted">({unassignedWardIds.length})</span>
+							{/snippet}
 							{#each unassignedWardIds as wardId (wardId)}
 								<WardCard {wardId} ward={fleet.wards[wardId]} />
 							{/each}
-						</div>
+						</Disclosure>
 					</div>
 				{/if}
 			</div>
