@@ -236,9 +236,11 @@
 					<div class="relative" bind:this={createFleetEl}>
 						<button
 							type="button"
-							class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
+							class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-edge disabled:hover:text-fg-muted"
 							aria-label="Create {fleetLabel}"
 							aria-expanded={createFleetOpen}
+							disabled={fleet.wardIds.length === 0}
+							title={fleet.wardIds.length === 0 ? 'Add a ward first' : undefined}
 							onclick={() => (createFleetOpen = !createFleetOpen)}
 						>
 							+ New {fleetLabel}

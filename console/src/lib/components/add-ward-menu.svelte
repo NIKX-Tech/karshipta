@@ -102,7 +102,7 @@
 {:else}
 	<div class="relative" bind:this={compactMenuEl}>
 		<button
-			class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
+			class="rounded border border-accent/60 bg-accent/15 px-2 py-1 font-mono text-xs font-medium text-accent hover:bg-accent/25"
 			aria-label="Add Ward"
 			aria-expanded={compactMenuOpen}
 			onclick={() => (compactMenuOpen = !compactMenuOpen)}
