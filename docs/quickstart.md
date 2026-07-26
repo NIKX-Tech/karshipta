@@ -42,9 +42,9 @@ sudo apt-get update && sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev
 
 **macOS with Xcode 15.4 or older**: this codebase uses `std::jthread`/
 `std::stop_token` throughout, which Xcode 15.4's bundled libc++ does not
-implement (confirmed directly: GitHub's own `macos-14`/`macos-13` runners
-ship Xcode 15.4 and fail with `no member named 'jthread' in namespace
-'std'` until worked around). `clang --version` tells you which Xcode you
+implement (confirmed directly: GitHub's own `macos-14` runner ships Xcode
+15.4 and fails with `no member named 'jthread' in namespace 'std'` until
+worked around). `clang --version` tells you which Xcode you
 have. If you hit this, install a newer compiler instead of upgrading Xcode:
 
 ```sh
