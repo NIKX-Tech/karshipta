@@ -38,7 +38,9 @@
 		"directory": "console"
 	},
 	"scripts": {
+		"predev": "node scripts/copy-maplibre-worker.mjs",
 		"dev": "vite dev",
+		"prebuild": "node scripts/copy-maplibre-worker.mjs",
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
