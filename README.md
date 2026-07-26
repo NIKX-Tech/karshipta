@@ -42,9 +42,10 @@ Early development, pre-release. The roadmap to v0.1 is in [ROADMAP.md](ROADMAP.m
 | Component | State |
 |---|---|
 | `proto/` protobuf contract | ✅ v1 schema defined |
-| `console/` web dashboard | 🚧 live map, commands, missions, simulated fleet |
-| `gateway/` MAVLink edge service | 🚧 connect, telemetry, commands done (M1 to M3); multi-ward and missions next (M4 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
+| `console/` web dashboard | ✅ map, commands, missions, simulated fleet; demo GIF and a fresh-eyes quickstart pass still open (C6, [#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)) |
+| `gateway/` MAVLink edge service | ✅ connect, telemetry, commands, multi-ward, relay transport, missions, Docker demo (M1 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
 | `deploy/` one-command demo | ✅ SITL + gateway + console all wired up (M6, C6) |
+| Prebuilt gateway binaries | ✅ macOS (arm64), Linux, Windows, published to [GitHub Releases](https://github.com/NIKX-Tech/karshipta/releases) on each tagged release |
 
 ## Try the console
 
