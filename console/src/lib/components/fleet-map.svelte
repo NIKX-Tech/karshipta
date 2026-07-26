@@ -2,6 +2,25 @@
 	import { untrack } from 'svelte';
 	import * as maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	// maplibre-gl builds its worker URL from a dynamic template string
+	// (`./${t}gl-worker.mjs`, not a static import.meta.url literal), which
+	// Vite's asset analysis can't follow - the worker chunk silently never
+	// gets served (dev, 404 from node_modules/.vite/deps/) or copied (prod
+	// build, 404 from _app/immutable/), in both cases with zero console
+	// error from maplibre itself: every GeoJSON source (trails, zones,
+	// geozones, mission route) just tiles nothing forever, while markers
+	// (DOM, not GL) and the base map (loaded independently) keep working,
+	// making this look like a data or paint bug instead of a missing
+	// worker. A `?url` import fixes serving the worker file itself, but the
+	// worker's own code then imports a second chunk
+	// ("./maplibre-gl-shared.mjs") via a plain relative specifier resolved
+	// against wherever the worker was served from - Vite never sees that
+	// import (it's inside an opaque `?url` asset, not a parsed module), so
+	// that 404s too. scripts/copy-maplibre-worker.mjs (predev/prebuild)
+	// copies both files as-is into static/maplibre-gl, keeping them
+	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
+	// so the worker's own relative import resolves correctly.
+	maplibregl.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
@@ -1122,8 +1141,12 @@
 		const trailSource = map.getSource<maplibregl.GeoJSONSource>(TRAIL_SOURCE);
 		trailSource?.setData({
 			type: 'FeatureCollection',
+			// Accumulation above runs for every ward regardless of selection,
+			// so a trail is already there the moment a ward gets selected
+			// instead of starting empty - only the render is gated, so an
+			// unselected fleet's worth of trails doesn't clutter the map.
 			features: Object.entries(trails)
-				.filter(([, points]) => points.length > 1)
+				.filter(([wardId, points]) => wardId === fleet.selectedWardId && points.length > 1)
 				.map(([wardId, points]) => ({
 					type: 'Feature',
 					properties: {

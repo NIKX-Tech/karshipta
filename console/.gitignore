@@ -11,6 +11,10 @@ node_modules
 /dist
 *.tgz
 
+# copied from node_modules/maplibre-gl/dist by scripts/copy-maplibre-worker.mjs
+# (predev/prebuild); regenerate, never commit
+/static/maplibre-gl
+
 # OS
 .DS_Store
 Thumbs.db
