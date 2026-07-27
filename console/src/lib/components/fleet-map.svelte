@@ -1349,7 +1349,7 @@
 
 	{#if zoneStore.zoneIds.length > 0 && showZones}
 		<ul
-			class="absolute left-4 flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1 {geozoneStore.active &&
+			class="absolute left-[10px] flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1 {geozoneStore.active &&
 			showGeozones
 				? 'bottom-16'
 				: 'bottom-8'}"
@@ -1368,7 +1368,7 @@
 
 	{#if geozoneStore.active && showGeozones}
 		<ul
-			class="absolute bottom-8 left-4 flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1"
+			class="absolute bottom-8 left-[10px] flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1"
 			aria-label="Airspace zone legend"
 		>
 			<li class="flex items-center gap-1 text-[10px]">
