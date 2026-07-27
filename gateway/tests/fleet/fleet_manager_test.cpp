@@ -1,6 +1,8 @@
 #include "fleet_manager.h"
 
+#include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -88,8 +90,33 @@ class FleetManagerTest : public ::testing::Test {
     // manager_ takes transport_ by reference, so transport_ must come first.
     FakeTransport transport_;
     // ":memory:" mirrors FleetZoneStoreTest: a fresh, private, in-process
-    // database per test, never touching disk.
-    FleetManager manager_{transport_, std::filesystem::path(":memory:")};
+    // database per test, never touching disk. Fleet/Zone and FleetMission
+    // each get their own in-memory database, matching production's two
+    // distinct db_path/fleet_mission_db_path arguments.
+    FleetManager manager_{transport_, std::filesystem::path(":memory:"),
+                          std::filesystem::path(":memory:")};
+
+    // Builds a bare WardManager (no wards registered) wired the same way
+    // main.cpp wires one to manager_: its command-outcome/mission-upload-
+    // outcome observers call straight into manager_'s own handlers. Every
+    // FleetMission test that needs to dispatch through WardManager uses
+    // this instead of a standalone WardManager, so a synchronous rejection
+    // (dispatch_command()/dispatch_mission_upload_and_start() against an
+    // unregistered ward_id, which every test ward_id here is) is actually
+    // correlated back into manager_'s ward_states, exactly as it would be
+    // in production.
+    std::shared_ptr<mavsdk::Mavsdk> core_ = WardConnection::create_shared_core();
+    WardManager ward_manager_{core_, transport_};
+
+    void SetUp() override {
+        ward_manager_.set_command_outcome_observer(
+            [this](const karshipta::v1::CommandAck& ack) { manager_.handle_command_outcome(ack); });
+        ward_manager_.set_mission_upload_outcome_observer(
+            [this](const std::string& ward_id, const std::string& mission_id, bool success,
+                   const std::string& message) {
+                manager_.handle_mission_upload_outcome(ward_id, mission_id, success, message);
+            });
+    }
 };
 
 }  // namespace
@@ -249,98 +276,193 @@ TEST_F(FleetManagerTest, DeleteZoneAcceptedAckCarriesZoneId) {
     EXPECT_EQ(ack.zone_id(), zone_id);
 }
 
-// ---------- Fleet-wide mission assignment ----------
+// ---------- Fleet mission ----------
 
-TEST_F(FleetManagerTest, FleetMissionAssignmentRejectsUnknownFleetWithGatewayEvent) {
-    karshipta::v1::FleetMissionAssignment request;
+namespace {
+// One waypoint is enough to exercise routing; these tests care about
+// per-ward state transitions, not route content.
+karshipta::v1::WardMissionPlan make_plan(const std::string& ward_id) {
+    karshipta::v1::WardMissionPlan plan;
+    plan.set_ward_id(ward_id);
+    auto* item = plan.add_items();
+    item->set_seq(0);
+    item->set_action(karshipta::v1::MISSION_ACTION_WAYPOINT);
+    item->mutable_position()->set_latitude_deg(1.0);
+    item->mutable_position()->set_longitude_deg(1.0);
+    return plan;
+}
+}  // namespace
+
+TEST_F(FleetManagerTest, CreateFleetMissionRejectsUnknownFleetId) {
+    karshipta::v1::CreateFleetMission request;
     request.set_request_id("req-1");
     request.set_fleet_id("ghost");
-    request.add_ward_ids("alpha-1");
+    *request.add_ward_plans() = make_plan("alpha-1");
 
-    auto core = WardConnection::create_shared_core();
-    WardManager ward_manager(core, transport_);
-    manager_.handle_fleet_mission_assignment(request, ward_manager);
-
-    const auto envelopes = transport_.broadcast_envelopes();
-    ASSERT_EQ(envelopes.size(), 1u);
-    ASSERT_TRUE(envelopes.front().has_event());
-    const auto& event = envelopes.front().event();
-    EXPECT_TRUE(event.ward_id().empty());  // gateway-level, not ward-scoped
-    EXPECT_EQ(event.code(), "FLEET_MISSION_ASSIGNMENT_REJECTED");
-    EXPECT_NE(event.message().find("ghost"), std::string::npos) << event.message();
+    const auto ack = manager_.handle_create_fleet_mission(request, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("ghost"), std::string::npos) << ack.message();
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
 }
 
-TEST_F(FleetManagerTest, FleetMissionAssignmentRejectsEmptyWardSelection) {
-    karshipta::v1::CreateFleet create;
-    create.set_request_id("req-1");
-    create.set_name("Team A");
-    const auto fleet_id = manager_.handle_create_fleet(create).fleet_id();
-
-    karshipta::v1::FleetMissionAssignment request;
-    request.set_request_id("req-2");
-    request.set_fleet_id(fleet_id);
-
-    auto core = WardConnection::create_shared_core();
-    WardManager ward_manager(core, transport_);
-    manager_.handle_fleet_mission_assignment(request, ward_manager);
-
-    const auto envelopes = transport_.broadcast_envelopes();
-    // create_fleet's own broadcast, then the rejection event.
-    ASSERT_EQ(envelopes.size(), 2u);
-    ASSERT_TRUE(envelopes.back().has_event());
-    EXPECT_EQ(envelopes.back().event().code(), "FLEET_MISSION_ASSIGNMENT_REJECTED");
-}
-
-TEST_F(FleetManagerTest, FleetMissionAssignmentFansOutRejectingEachUnknownWard) {
-    karshipta::v1::CreateFleet create;
-    create.set_request_id("req-1");
-    create.set_name("Team A");
-    const auto fleet_id = manager_.handle_create_fleet(create).fleet_id();
-
-    karshipta::v1::FleetMissionAssignment request;
-    request.set_request_id("req-2");
-    request.set_fleet_id(fleet_id);
-    request.add_ward_ids("alpha-1");
-    request.add_ward_ids("alpha-2");
-    request.set_mission_name("Sweep");
-
-    auto core = WardConnection::create_shared_core();
-    WardManager ward_manager(core, transport_);
-    manager_.handle_fleet_mission_assignment(request, ward_manager);
-
-    const auto envelopes = transport_.broadcast_envelopes();
-    // create_fleet's own broadcast, then one MISSION_UPLOAD_REJECTED event
-    // per selected ward (neither alpha-1 nor alpha-2 is a registered ward).
-    ASSERT_EQ(envelopes.size(), 3u);
-    EXPECT_TRUE(envelopes[1].has_event());
-    EXPECT_EQ(envelopes[1].event().code(), "MISSION_UPLOAD_REJECTED");
-    EXPECT_TRUE(envelopes[2].has_event());
-    EXPECT_EQ(envelopes[2].event().code(), "MISSION_UPLOAD_REJECTED");
-}
-
-TEST_F(FleetManagerTest, FleetMissionAssignmentAcceptsAdHocWardSelectionWithEmptyFleetId) {
-    karshipta::v1::FleetMissionAssignment request;
+TEST_F(FleetManagerTest, CreateFleetMissionRejectsEmptyWardPlans) {
+    karshipta::v1::CreateFleetMission request;
     request.set_request_id("req-1");
-    // fleet_id left empty on purpose: an ad-hoc selection of individual
-    // wards, not tied to any saved Fleet.
-    request.add_ward_ids("alpha-1");
-    request.add_ward_ids("alpha-2");
-    request.set_mission_name("Sweep");
 
-    auto core = WardConnection::create_shared_core();
-    WardManager ward_manager(core, transport_);
-    manager_.handle_fleet_mission_assignment(request, ward_manager);
+    const auto ack = manager_.handle_create_fleet_mission(request, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("no ward plans"), std::string::npos) << ack.message();
+}
+
+TEST_F(FleetManagerTest, CreateFleetMissionAcceptsAdHocSelectionAndMarksUnknownWardsRejected) {
+    karshipta::v1::CreateFleetMission request;
+    request.set_request_id("req-1");
+    // fleet_id left empty: an ad-hoc selection of individual wards, not tied
+    // to any saved Fleet - mirrors the console wizard's "ad hoc wards" path.
+    request.set_mission_name("Sweep");
+    request.set_repeat_count(2);
+    *request.add_ward_plans() = make_plan("alpha-1");
+    *request.add_ward_plans() = make_plan("alpha-2");
+
+    const auto ack = manager_.handle_create_fleet_mission(request, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+    ASSERT_FALSE(ack.fleet_mission_id().empty());
+
+    // Neither alpha-1 nor alpha-2 is a registered ward, so
+    // dispatch_mission_upload_and_start() rejects both synchronously; each
+    // ward's own route is genuinely independent (the actual fix over the
+    // old flat-broadcast design), which is why this asserts two distinct
+    // ward_ids rather than one shared route.
+    const auto envelopes = transport_.broadcast_envelopes();
+    const auto fleet_mission_envelope =
+        std::find_if(envelopes.begin(), envelopes.end(),
+                     [](const auto& envelope) { return envelope.has_fleet_mission(); });
+    ASSERT_NE(fleet_mission_envelope, envelopes.end());
+    const auto& mission = fleet_mission_envelope->fleet_mission();
+    ASSERT_EQ(mission.ward_states_size(), 2);
+    for (const auto& state : mission.ward_states()) {
+        EXPECT_EQ(state.status(), karshipta::v1::WARD_MISSION_STATUS_REJECTED);
+        EXPECT_NE(state.message().find("unknown ward_id"), std::string::npos) << state.message();
+    }
+}
+
+TEST_F(FleetManagerTest, StopFleetMissionRejectsUnknownFleetMissionId) {
+    karshipta::v1::StopFleetMission request;
+    request.set_request_id("req-1");
+    request.set_fleet_mission_id("ghost");
+
+    const auto ack = manager_.handle_stop_fleet_mission(request, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("ghost"), std::string::npos) << ack.message();
+}
+
+TEST_F(FleetManagerTest, StopFleetMissionSkipsWardsAlreadyRejectedAndReportsNothingToStop) {
+    // alpha-1 is unregistered, so create's own dispatch_mission_upload_and_start()
+    // rejects it synchronously - it is already REJECTED (never started)
+    // before Stop ever runs, so Stop's "skip already-settled wards" guard
+    // must leave it alone rather than re-dispatching a stop command to a
+    // ward that was never actually flying.
+    karshipta::v1::CreateFleetMission create;
+    create.set_request_id("req-1");
+    *create.add_ward_plans() = make_plan("alpha-1");
+    const auto fleet_mission_id = manager_.handle_create_fleet_mission(create, ward_manager_).fleet_mission_id();
+
+    karshipta::v1::StopFleetMission stop;
+    stop.set_request_id("req-2");
+    stop.set_fleet_mission_id(fleet_mission_id);
+    // action left unspecified: defaults to RTL.
+    const auto ack = manager_.handle_stop_fleet_mission(stop, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+    EXPECT_NE(ack.message().find("no active wards to stop"), std::string::npos) << ack.message();
 
     const auto envelopes = transport_.broadcast_envelopes();
-    // No whole-request rejection (empty fleet_id is not itself a rejection
-    // reason); each ward is still individually unknown to ward_manager, so
-    // one MISSION_UPLOAD_REJECTED event per ward, not FLEET_MISSION_
-    // ASSIGNMENT_REJECTED.
-    ASSERT_EQ(envelopes.size(), 2u);
-    EXPECT_TRUE(envelopes[0].has_event());
-    EXPECT_EQ(envelopes[0].event().code(), "MISSION_UPLOAD_REJECTED");
-    EXPECT_TRUE(envelopes[1].has_event());
-    EXPECT_EQ(envelopes[1].event().code(), "MISSION_UPLOAD_REJECTED");
+    const karshipta::v1::FleetMission* last_fleet_mission = nullptr;
+    for (auto it = envelopes.rbegin(); it != envelopes.rend(); ++it) {
+        if (it->has_fleet_mission()) {
+            last_fleet_mission = &it->fleet_mission();
+            break;
+        }
+    }
+    ASSERT_NE(last_fleet_mission, nullptr);
+    ASSERT_EQ(last_fleet_mission->ward_states_size(), 1);
+    // Still REJECTED, not bumped to STOPPING: nothing was actually dispatched.
+    EXPECT_EQ(last_fleet_mission->ward_states(0).status(), karshipta::v1::WARD_MISSION_STATUS_REJECTED);
+    EXPECT_EQ(last_fleet_mission->status(), karshipta::v1::FLEET_MISSION_STATUS_ACTIVE);
+}
+
+TEST_F(FleetManagerTest, RemoveFleetMissionAcceptsWhenEveryWardIsRejectedNeverStarted) {
+    // The unregistered ward is immediately REJECTED by create (never
+    // started, nothing flying) - REJECTED counts as settled for Remove's
+    // gate, same as STOPPED would.
+    karshipta::v1::CreateFleetMission create;
+    create.set_request_id("req-1");
+    *create.add_ward_plans() = make_plan("alpha-1");
+    const auto create_ack = manager_.handle_create_fleet_mission(create, ward_manager_);
+    ASSERT_EQ(create_ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+
+    karshipta::v1::RemoveFleetMission remove;
+    remove.set_request_id("req-2");
+    remove.set_fleet_mission_id(create_ack.fleet_mission_id());
+    const auto ack = manager_.handle_remove_fleet_mission(remove);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+}
+
+TEST_F(FleetManagerTest, RemoveFleetMissionRejectsWhileAWardIsStillActive) {
+    // Same registered-but-unconnected-ward technique as the Update test
+    // above: dispatch_mission_upload_and_start() accepts synchronously, so
+    // the ward stays UPLOADING - genuinely unsettled.
+    WardConfig cfg;
+    cfg.ward_id = "alpha-1";
+    cfg.connection_url = "udpin://127.0.0.1:24997";
+    ASSERT_TRUE(ward_manager_.add_ward(cfg));
+
+    karshipta::v1::CreateFleetMission create;
+    create.set_request_id("req-1");
+    *create.add_ward_plans() = make_plan("alpha-1");
+    const auto create_ack = manager_.handle_create_fleet_mission(create, ward_manager_);
+    ASSERT_EQ(create_ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+
+    karshipta::v1::RemoveFleetMission remove;
+    remove.set_request_id("req-2");
+    remove.set_fleet_mission_id(create_ack.fleet_mission_id());
+    const auto ack = manager_.handle_remove_fleet_mission(remove);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("still active"), std::string::npos) << ack.message();
+}
+
+TEST_F(FleetManagerTest, RemoveFleetMissionRejectsUnknownFleetMissionId) {
+    karshipta::v1::RemoveFleetMission request;
+    request.set_request_id("req-1");
+    request.set_fleet_mission_id("ghost");
+
+    const auto ack = manager_.handle_remove_fleet_mission(request);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+}
+
+TEST_F(FleetManagerTest, UpdateFleetMissionRoutesRejectsWhileAWardIsStillActive) {
+    // A registered-but-unconnected ward (add_ward() only builds the object
+    // graph, see its own doc comment - no SITL needed) makes
+    // dispatch_mission_upload_and_start() accept synchronously, so the ward
+    // stays UPLOADING (not REJECTED) - genuinely unsettled, the same as a
+    // real in-flight ACTIVE mission would be for this gate's purposes.
+    WardConfig cfg;
+    cfg.ward_id = "alpha-1";
+    cfg.connection_url = "udpin://127.0.0.1:24996";
+    ASSERT_TRUE(ward_manager_.add_ward(cfg));
+
+    karshipta::v1::CreateFleetMission create;
+    create.set_request_id("req-1");
+    *create.add_ward_plans() = make_plan("alpha-1");
+    const auto create_ack = manager_.handle_create_fleet_mission(create, ward_manager_);
+    ASSERT_EQ(create_ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+
+    karshipta::v1::UpdateFleetMissionRoutes update;
+    update.set_request_id("req-2");
+    update.set_fleet_mission_id(create_ack.fleet_mission_id());
+    *update.add_ward_plans() = make_plan("alpha-1");
+    const auto ack = manager_.handle_update_fleet_mission_routes(update, ward_manager_);
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("still active"), std::string::npos) << ack.message();
 }
 
 // ---------- Viewer rejection ----------
@@ -362,19 +484,36 @@ TEST_F(FleetManagerTest, RejectViewerEnvelopeAnswersCreateFleetWithRejectedAck) 
     EXPECT_EQ(ack.message(), "read-only session");
 }
 
-TEST_F(FleetManagerTest, RejectViewerEnvelopeAnswersFleetMissionAssignmentWithGatewayEvent) {
+TEST_F(FleetManagerTest, RejectViewerEnvelopeAnswersCreateFleetMissionWithRejectedAck) {
     karshipta::v1::Envelope envelope;
-    auto* request = envelope.mutable_fleet_mission_assignment();
+    auto* request = envelope.mutable_create_fleet_mission();
     request->set_request_id("req-1");
-    request->set_fleet_id("team-a");
 
     manager_.reject_viewer_envelope(/*client=*/1, envelope);
 
     const auto envelopes = transport_.broadcast_envelopes();
     ASSERT_EQ(envelopes.size(), 1u);
-    ASSERT_TRUE(envelopes.front().has_event());
-    EXPECT_EQ(envelopes.front().event().code(), "FLEET_MISSION_ASSIGNMENT_REJECTED");
-    EXPECT_EQ(envelopes.front().event().message(), "read-only session");
+    ASSERT_TRUE(envelopes.front().has_fleet_mission_ack());
+    const auto& ack = envelopes.front().fleet_mission_ack();
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+    EXPECT_EQ(ack.message(), "read-only session");
+}
+
+TEST_F(FleetManagerTest, RejectViewerEnvelopeAnswersStopFleetMissionWithRejectedAck) {
+    karshipta::v1::Envelope envelope;
+    auto* request = envelope.mutable_stop_fleet_mission();
+    request->set_request_id("req-1");
+    request->set_fleet_mission_id("team-a-mission");
+
+    manager_.reject_viewer_envelope(/*client=*/1, envelope);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 1u);
+    ASSERT_TRUE(envelopes.front().has_fleet_mission_ack());
+    const auto& ack = envelopes.front().fleet_mission_ack();
+    EXPECT_EQ(ack.fleet_mission_id(), "team-a-mission");
+    EXPECT_EQ(ack.status(), karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
 }
 
 // ---------- Snapshot ----------
@@ -422,8 +561,11 @@ TEST(FleetManagerCrashSafetyTest, StoreFailureBecomesRejectedAckInsteadOfAnUncau
     std::filesystem::remove_all(dir);
     std::filesystem::create_directory(dir);
     const auto path = dir / "store.db";
+    const auto fleet_mission_path = dir / "fleet_missions.db";
     FakeTransport transport;
-    FleetManager manager(transport, path);  // opened while the directory is still writable
+    // Both opened while the directory is still writable; this test only
+    // exercises Fleet, fleet_mission_path just needs to open successfully.
+    FleetManager manager(transport, path, fleet_mission_path);
 
     std::filesystem::permissions(dir, std::filesystem::perms::owner_write,
                                   std::filesystem::perm_options::remove);

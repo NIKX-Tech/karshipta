@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -212,6 +213,33 @@ public:
     // every other ward's manager calls behind one slow client).
     void dispatch_command(const karshipta::v1::Command& command);
 
+    // Every CommandAck this WardManager ever produces (rejection or real
+    // executor outcome) is also handed to this observer, if set - lets
+    // FleetManager correlate a fleet mission's Stop dispatch (a synthesized
+    // Command per ward, see FleetManager::handle_stop_fleet_mission) back to
+    // that ward's WardMissionState without WardManager needing to know
+    // FleetMission exists. Set-once convention: call before start_publishing()/
+    // any dispatch_command(), never change afterward - same contract as
+    // persistence_path_, since this is read from the CommandExecutor worker
+    // thread (see make_executor()) with no lock of its own. The observer's
+    // bound target must outlive this WardManager (or be cleared first);
+    // make_executor() copies the std::function by value specifically so its
+    // callback never has to dereference `this` to reach it.
+    using CommandOutcomeObserver = std::function<void(const karshipta::v1::CommandAck&)>;
+    void set_command_outcome_observer(CommandOutcomeObserver observer);
+
+    // Fired once per ward from run_publish_loop's own thread when a mission
+    // upload's result is drained (take_upload_result()), success or failure -
+    // the piece dispatch_mission_upload_and_start()'s synchronous return
+    // can't cover, since that only reports the immediate accept/reject, not
+    // whether the upload actually landed on the ward. Lets FleetManager flip
+    // a WardMissionState from UPLOADING to ACTIVE/REJECTED. Same set-once
+    // contract as set_command_outcome_observer above.
+    using MissionUploadOutcomeObserver =
+        std::function<void(const std::string& ward_id, const std::string& mission_id, bool success,
+                            const std::string& message)>;
+    void set_mission_upload_outcome_observer(MissionUploadOutcomeObserver observer);
+
     // Routes mission to the WardMission of the ward named
     // mission.ward_id() (Envelope.mission_upload, console-editor-authored,
     // not a Command). Broadcasts a WARNING Event (gateway rule 5) if that
@@ -370,6 +398,11 @@ private:
     // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
     std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
+    // Set-once, see the setters' own doc comments. Never reassigned after
+    // start_publishing()/the first dispatch_command(), so reading these from
+    // the publish thread or a CommandExecutor worker thread needs no lock.
+    CommandOutcomeObserver command_outcome_observer_;
+    MissionUploadOutcomeObserver mission_upload_outcome_observer_;
     // Shared across the whole fleet, unlike reconnect_worker (one per
     // ward): the publish tick is cheap in-memory work for every ward
     // back to back, not I/O-bound work that benefits from its own thread per

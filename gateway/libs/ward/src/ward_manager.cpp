@@ -280,16 +280,21 @@ std::unique_ptr<CommandExecutor> WardManager::make_executor(ManagedWard& ward) {
     // method): keeps this callback safe to invoke even if a CommandExecutor
     // outlives WardManager itself. Calls the free functions above (not the
     // WardManager member functions of the same name) precisely because it
-    // must not touch `this`.
+    // must not touch `this`. command_outcome_observer_ is copied by value for
+    // the same reason: the copy's own bound target (FleetManager) is this
+    // observer's problem to keep alive, not something this lambda re-reads
+    // off a possibly-gone WardManager.
     Transport* transport = &transport_;
+    CommandOutcomeObserver observer = command_outcome_observer_;
     return std::make_unique<CommandExecutor>(
         *ward.actions, *ward.telemetry, *ward.mission,
-        [transport](const karshipta::v1::CommandAck& ack) {
+        [transport, observer](const karshipta::v1::CommandAck& ack) {
             emit_command_ack(*transport, ack);
             // rejected commands are events a human should see (gateway rule 5)
             if (ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED) {
                 emit_rejection_event(*transport, ack);
             }
+            if (observer) observer(ack);
         });
 }
 
@@ -427,6 +432,14 @@ void WardManager::dispatch_command(const karshipta::v1::Command& command) {
     }
     executor->enqueue(command);
     clear_busy(ward);
+}
+
+void WardManager::set_command_outcome_observer(CommandOutcomeObserver observer) {
+    command_outcome_observer_ = std::move(observer);
+}
+
+void WardManager::set_mission_upload_outcome_observer(MissionUploadOutcomeObserver observer) {
+    mission_upload_outcome_observer_ = std::move(observer);
 }
 
 void WardManager::handle_mission_upload(const karshipta::v1::Mission& mission) {
@@ -628,6 +641,7 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
 
 void WardManager::broadcast_command_ack(const karshipta::v1::CommandAck& ack) const {
     emit_command_ack(transport_, ack);
+    if (command_outcome_observer_) command_outcome_observer_(ack);
 }
 
 void WardManager::broadcast_rejection_event(const karshipta::v1::CommandAck& ack) const {
@@ -968,6 +982,17 @@ void WardManager::run_publish_loop(std::chrono::milliseconds interval, std::stop
                     deferred_mission_broadcasts.push_back(
                         {id, std::nullopt, "MISSION_UPLOAD_REJECTED",
                          WardMission::result_name(upload_result->result)});
+                }
+                // Every upload result, not just fleet-mission-armed ones -
+                // mission_upload_outcome_observer_ is keyed by mission_id, so
+                // an observer with no interest in this one simply ignores it.
+                // Safe to call from this thread: see the setter's own doc
+                // comment (set-once before start_publishing()).
+                if (mission_upload_outcome_observer_) {
+                    const bool success = upload_result->result == mavsdk::Mission::Result::Success;
+                    mission_upload_outcome_observer_(
+                        id, upload_result->mission_id, success,
+                        success ? std::string() : WardMission::result_name(upload_result->result));
                 }
             }
 

@@ -518,16 +518,17 @@ class FleetStore {
 				const tracker = this.commands[ack.commandId];
 				if (!tracker) {
 					// Not necessarily a bug: the gateway itself synthesizes and
-					// enqueues a StartMissionCommand once a FleetMissionAssignment's
-					// per-ward upload lands (ward_manager.cpp's pending_start), a
-					// command this client never sent and so never tracked. A
-					// rejection of that auto-start would otherwise vanish with
-					// nothing but this console.warn - surfaced as an Event instead,
-					// the same channel a fleet mission's upload-phase rejection
-					// already uses (MISSION_UPLOAD_REJECTED), so a failure on one
-					// ward in a multi-ward assignment is never silently invisible.
-					// A success needs no separate surfacing: missionProgress ticks
-					// already show the ward flying.
+					// enqueues a StartMissionCommand once a fleet mission's per-ward
+					// upload lands (ward_manager.cpp's pending_start), and also
+					// synthesizes a Stop dispatch's rtl/pause_mission/land command -
+					// both commands this client never sent and so never tracked. A
+					// rejection would otherwise vanish with nothing but this
+					// console.warn - surfaced as an Event instead, the same channel
+					// a fleet mission's upload-phase rejection already uses
+					// (MISSION_UPLOAD_REJECTED), so a failure on one ward is never
+					// silently invisible. A success needs no separate surfacing:
+					// missionProgress ticks (start) or the FleetMission's own
+					// ward_states (stop) already show the outcome.
 					if (
 						ack.status === CommandStatus.COMMAND_STATUS_REJECTED ||
 						ack.status === CommandStatus.COMMAND_STATUS_TIMEOUT
@@ -590,7 +591,10 @@ class FleetStore {
 			case 'createZone':
 			case 'updateZone':
 			case 'deleteZone':
-			case 'fleetMissionAssignment':
+			case 'createFleetMission':
+			case 'stopFleetMission':
+			case 'removeFleetMission':
+			case 'updateFleetMissionRoutes':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			case 'fleet':
@@ -598,6 +602,12 @@ class FleetStore {
 				break;
 			case 'fleetAck':
 				fleetGroups.applyFleetAck(payload.fleetAck);
+				break;
+			case 'fleetMission':
+				fleetGroups.applyFleetMission(payload.fleetMission);
+				break;
+			case 'fleetMissionAck':
+				fleetGroups.applyFleetMissionAck(payload.fleetMissionAck);
 				break;
 			case 'zone':
 				zoneStore.applyZone(payload.zone);

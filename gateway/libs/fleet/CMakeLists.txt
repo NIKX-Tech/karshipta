@@ -1,5 +1,6 @@
 add_library(fleet
         src/fleet_zone_store.cpp
+        src/fleet_mission_store.cpp
         src/fleet_manager.cpp
 )
 

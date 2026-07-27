@@ -13,17 +13,27 @@ import {
 } from '$lib/gen/karshipta/v1/command';
 import {
 	FleetAckStatus,
+	FleetMissionAckStatus,
+	FleetMissionStatus,
+	FleetMissionStopAction,
+	WardMissionStatus,
 	ZoneAckStatus,
 	type AddWardToFleet,
 	type CreateFleet,
+	type CreateFleetMission,
 	type CreateZone,
 	type DeleteFleet,
 	type DeleteZone,
 	type Fleet,
-	type FleetMissionAssignment,
+	type FleetMission,
+	type RemoveFleetMission,
 	type RemoveWardFromFleet,
 	type RenameFleet,
+	type StopFleetMission,
+	type UpdateFleetMissionRoutes,
 	type UpdateZone,
+	type WardMissionPlan,
+	type WardMissionState,
 	type Zone
 } from '$lib/gen/karshipta/v1/fleet';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
@@ -81,6 +91,31 @@ function readStoredDemoFleets(): Fleet[] {
 				typeof (value as Fleet).fleetId === 'string' &&
 				typeof (value as Fleet).name === 'string' &&
 				Array.isArray((value as Fleet).wardIds)
+		);
+	} catch {
+		// stale/corrupt data - start empty, not crash
+		return [];
+	}
+}
+
+/** Demo-mode fleet missions, same persistence precedent as demo Fleets - a
+ * ward_id like "demo-1" stays valid across a reload for the same reason. */
+const DEMO_FLEET_MISSIONS_STORAGE_KEY = 'karshipta.demoFleetMissions';
+
+function readStoredDemoFleetMissions(): FleetMission[] {
+	if (typeof localStorage === 'undefined') return [];
+	const raw = localStorage.getItem(DEMO_FLEET_MISSIONS_STORAGE_KEY);
+	if (!raw) return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter(
+			(value): value is FleetMission =>
+				typeof value === 'object' &&
+				value !== null &&
+				typeof (value as FleetMission).fleetMissionId === 'string' &&
+				Array.isArray((value as FleetMission).wardPlans) &&
+				Array.isArray((value as FleetMission).wardStates)
 		);
 	} catch {
 		// stale/corrupt data - start empty, not crash
@@ -236,10 +271,26 @@ export class FakeGateway implements DemoEngine {
 	private fleetSpawnCount = 0;
 	private zones = new Map<string, Zone>();
 	private zoneSpawnCount = 0;
+	private fleetMissions = new Map<string, FleetMission>();
+	private fleetMissionSpawnCount = 0;
+	/** Correlates a synthesized startMission/stop Command's command_id back to
+	 * the (fleetMissionId, wardId) it was issued for, resolved from ack()'s
+	 * one choke point - mirrors the real gateway's pending_stops_ (see
+	 * FleetManager::handle_command_outcome's own comment for why this needs
+	 * to exist at all: WardMissionState tracks a dispatch's real outcome,
+	 * which for rtl/land only lands asynchronously once the ward actually
+	 * arrives, not when the command is merely accepted). */
+	private pendingCommands = new Map<
+		string,
+		{ fleetMissionId: string; wardId: string; kind: 'start' | 'stop' }
+	>();
 
 	constructor(private readonly onEnvelope: (envelope: Envelope) => void) {
 		for (const fleet of readStoredDemoFleets()) this.fleets.set(fleet.fleetId, fleet);
 		for (const zone of readStoredDemoZones()) this.zones.set(zone.zoneId, zone);
+		for (const mission of readStoredDemoFleetMissions()) {
+			this.fleetMissions.set(mission.fleetMissionId, mission);
+		}
 	}
 
 	start(): void {
@@ -251,6 +302,9 @@ export class FakeGateway implements DemoEngine {
 		}
 		for (const zone of this.zones.values()) {
 			this.onEnvelope({ payload: { $case: 'zone', zone } });
+		}
+		for (const mission of this.fleetMissions.values()) {
+			this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
 		}
 		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
 	}
@@ -314,8 +368,17 @@ export class FakeGateway implements DemoEngine {
 			case 'removeWardFromFleet':
 				this.handleRemoveWardFromFleet(envelope.payload.removeWardFromFleet);
 				break;
-			case 'fleetMissionAssignment':
-				this.handleFleetMissionAssignment(envelope.payload.fleetMissionAssignment);
+			case 'createFleetMission':
+				this.handleCreateFleetMission(envelope.payload.createFleetMission);
+				break;
+			case 'stopFleetMission':
+				this.handleStopFleetMission(envelope.payload.stopFleetMission);
+				break;
+			case 'removeFleetMission':
+				this.handleRemoveFleetMission(envelope.payload.removeFleetMission);
+				break;
+			case 'updateFleetMissionRoutes':
+				this.handleUpdateFleetMissionRoutes(envelope.payload.updateFleetMissionRoutes);
 				break;
 			case 'createZone':
 				this.handleCreateZone(envelope.payload.createZone);
@@ -461,35 +524,320 @@ export class FakeGateway implements DemoEngine {
 		}
 	}
 
-	/** Fans the mission out to each selected ward as an independent upload
-	 * plus start, mirroring the real gateway's FleetManager::
-	 * handle_fleet_mission_assignment. Unlike the real gateway, this engine
-	 * has no async upload delay, so upload-then-start can run back to back
-	 * with no race to guard against. */
-	private handleFleetMissionAssignment(request: FleetMissionAssignment): void {
-		if (request.wardIds.length === 0) {
-			console.warn('fake gateway: fleet_mission_assignment with no wards selected');
-			return;
-		}
-		for (const wardId of request.wardIds) {
-			if (!this.wards.has(wardId)) {
-				console.warn(`fake gateway: fleet_mission_assignment for unknown ward ${wardId}`);
+	/** Persists a fleet mission's own plans/state, then for each ward_plan
+	 * uploads that ward's independent route and issues startMission -
+	 * mirrors the real gateway's FleetManager::handle_create_fleet_mission /
+	 * handle_update_fleet_mission_routes, both of which share this same
+	 * dispatch loop. Registers a 'start' pendingCommands entry per ward so
+	 * ack()'s resolvePendingFleetMissionCommand() can flip UPLOADING (well,
+	 * UNSPECIFIED here - this engine has no real async upload delay to model
+	 * a distinct UPLOADING phase for) to ACTIVE/REJECTED once startMission's
+	 * own ack lands, exactly as the real gateway's upload-result observer
+	 * does for the real async upload. */
+	private dispatchWardPlans(
+		mission: FleetMission,
+		plans: WardMissionPlan[],
+		repeatCount: number,
+		missionName: string
+	): void {
+		for (const plan of plans) {
+			const state = mission.wardStates.find((candidate) => candidate.wardId === plan.wardId);
+			if (!state) continue;
+			if (!this.wards.has(plan.wardId)) {
+				state.status = WardMissionStatus.WARD_MISSION_STATUS_REJECTED;
+				state.message = `unknown ward_id: ${plan.wardId}`;
 				continue;
 			}
-			const mission: Mission = {
-				missionId: `fleet-${request.fleetId || 'adhoc'}-${wardId}-${Date.now()}`,
-				wardId,
-				name: request.missionName,
-				repeatCount: request.repeatCount,
-				items: request.items
-			};
-			this.handleMissionUpload(mission);
+			const missionId = `${mission.fleetMissionId}-${plan.wardId}-${Date.now()}`;
+			state.missionId = missionId;
+			this.handleMissionUpload({
+				missionId,
+				wardId: plan.wardId,
+				name: missionName,
+				repeatCount,
+				items: plan.items
+			});
+			const commandId = `fleet-mission-start-${plan.wardId}-${Date.now()}`;
+			this.pendingCommands.set(commandId, {
+				fleetMissionId: mission.fleetMissionId,
+				wardId: plan.wardId,
+				kind: 'start'
+			});
 			this.handleCommand({
-				commandId: `fleet-start-${wardId}-${Date.now()}`,
-				wardId,
+				commandId,
+				wardId: plan.wardId,
 				timestampMs: Date.now(),
 				action: { $case: 'startMission', startMission: {} }
 			});
+		}
+	}
+
+	private handleCreateFleetMission(request: CreateFleetMission): void {
+		if (request.fleetId && !this.fleets.has(request.fleetId)) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				`unknown fleet_id: ${request.fleetId}`,
+				''
+			);
+			return;
+		}
+		if (request.wardPlans.length === 0) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				'no ward plans in request',
+				''
+			);
+			return;
+		}
+		const fleetMissionId = `demo-fleet-mission-${this.fleetMissionSpawnCount + 1}`;
+		this.fleetMissionSpawnCount += 1;
+		const wardStates: WardMissionState[] = request.wardPlans.map((plan) => ({
+			wardId: plan.wardId,
+			status: WardMissionStatus.WARD_MISSION_STATUS_UNSPECIFIED,
+			message: '',
+			missionId: ''
+		}));
+		const mission: FleetMission = {
+			fleetMissionId,
+			fleetId: request.fleetId,
+			missionName: request.missionName,
+			repeatCount: request.repeatCount,
+			wardPlans: request.wardPlans,
+			wardStates,
+			status: FleetMissionStatus.FLEET_MISSION_STATUS_ACTIVE,
+			createdAtMs: Date.now()
+		};
+		this.fleetMissions.set(fleetMissionId, mission);
+		this.dispatchWardPlans(mission, request.wardPlans, request.repeatCount, request.missionName);
+		this.persistDemoFleetMissions();
+		this.fleetMissionAck(
+			request.requestId,
+			FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_ACCEPTED,
+			'fleet mission created',
+			fleetMissionId
+		);
+		this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
+	}
+
+	private handleStopFleetMission(request: StopFleetMission): void {
+		const mission = this.fleetMissions.get(request.fleetMissionId);
+		if (!mission) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				`unknown fleet_mission_id: ${request.fleetMissionId}`,
+				request.fleetMissionId
+			);
+			return;
+		}
+		const action =
+			request.action === FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_UNSPECIFIED
+				? FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_RTL
+				: request.action;
+		let dispatched = 0;
+		for (const state of mission.wardStates) {
+			if (
+				state.status === WardMissionStatus.WARD_MISSION_STATUS_STOPPED ||
+				state.status === WardMissionStatus.WARD_MISSION_STATUS_REJECTED ||
+				state.status === WardMissionStatus.WARD_MISSION_STATUS_STOPPING
+			) {
+				continue;
+			}
+			const commandId = `fleet-mission-stop-${mission.fleetMissionId}-${state.wardId}-${Date.now()}`;
+			// Set STOPPING and register the correlation entry before dispatching
+			// the command: handleCommand() can resolve synchronously (a ward
+			// already landed rejects rtl/land immediately), and that must
+			// overwrite this STOPPING write, not race and lose to it - same
+			// ordering fix as FleetManager::handle_stop_fleet_mission.
+			state.status = WardMissionStatus.WARD_MISSION_STATUS_STOPPING;
+			this.pendingCommands.set(commandId, {
+				fleetMissionId: mission.fleetMissionId,
+				wardId: state.wardId,
+				kind: 'stop'
+			});
+			this.handleCommand({
+				commandId,
+				wardId: state.wardId,
+				timestampMs: Date.now(),
+				action:
+					action === FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_HOLD
+						? { $case: 'pauseMission', pauseMission: {} }
+						: action === FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_LAND
+							? { $case: 'land', land: {} }
+							: { $case: 'rtl', rtl: {} }
+			});
+			dispatched += 1;
+		}
+		if (dispatched > 0) {
+			mission.status = FleetMissionStatus.FLEET_MISSION_STATUS_STOPPING;
+			// Catches a ward whose handleCommand() above resolved synchronously
+			// (before mission.status was actually STOPPING yet).
+			this.maybeFinalizeStop(mission.fleetMissionId);
+		}
+		this.persistDemoFleetMissions();
+		this.fleetMissionAck(
+			request.requestId,
+			FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_ACCEPTED,
+			dispatched > 0 ? `stop dispatched to ${dispatched} ward(s)` : 'no active wards to stop',
+			mission.fleetMissionId
+		);
+		this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
+	}
+
+	private handleRemoveFleetMission(request: RemoveFleetMission): void {
+		const mission = this.fleetMissions.get(request.fleetMissionId);
+		if (!mission) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				`unknown fleet_mission_id: ${request.fleetMissionId}`,
+				request.fleetMissionId
+			);
+			return;
+		}
+		if (!mission.wardStates.every(isWardMissionSettled)) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				'cannot remove while any ward is still active; stop it first',
+				mission.fleetMissionId
+			);
+			return;
+		}
+		this.fleetMissions.delete(request.fleetMissionId);
+		this.persistDemoFleetMissions();
+		this.fleetMissionAck(
+			request.requestId,
+			FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_ACCEPTED,
+			'fleet mission removed',
+			request.fleetMissionId
+		);
+	}
+
+	private handleUpdateFleetMissionRoutes(request: UpdateFleetMissionRoutes): void {
+		const mission = this.fleetMissions.get(request.fleetMissionId);
+		if (!mission) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				`unknown fleet_mission_id: ${request.fleetMissionId}`,
+				request.fleetMissionId
+			);
+			return;
+		}
+		if (!mission.wardStates.every(isWardMissionSettled)) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				'cannot edit while any ward is still active; stop it first',
+				mission.fleetMissionId
+			);
+			return;
+		}
+		if (request.wardPlans.length === 0) {
+			this.fleetMissionAck(
+				request.requestId,
+				FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_REJECTED,
+				'no ward plans in request',
+				mission.fleetMissionId
+			);
+			return;
+		}
+		mission.wardPlans = request.wardPlans;
+		mission.missionName = request.missionName;
+		mission.repeatCount = request.repeatCount;
+		mission.status = FleetMissionStatus.FLEET_MISSION_STATUS_ACTIVE;
+		mission.wardStates = request.wardPlans.map((plan) => ({
+			wardId: plan.wardId,
+			status: WardMissionStatus.WARD_MISSION_STATUS_UNSPECIFIED,
+			message: '',
+			missionId: ''
+		}));
+		this.dispatchWardPlans(mission, request.wardPlans, request.repeatCount, request.missionName);
+		this.persistDemoFleetMissions();
+		this.fleetMissionAck(
+			request.requestId,
+			FleetMissionAckStatus.FLEET_MISSION_ACK_STATUS_ACCEPTED,
+			'fleet mission updated',
+			mission.fleetMissionId
+		);
+		this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
+	}
+
+	/** Resolved from ack()'s one choke point (every CommandAck this engine
+	 * emits passes through it). 'start' resolves on the FIRST ack for its
+	 * commandId, including EXECUTING - "the upload landed and startMission
+	 * was accepted" is what ACTIVE means, not "the whole mission finished
+	 * flying" (WardMissionStatus has no such state; matches the real
+	 * gateway's dispatch_mission_upload_and_start, which flips UPLOADING to
+	 * ACTIVE at upload-plus-auto-start time, not at mission completion).
+	 * 'stop' deliberately waits for a terminal ack (skips EXECUTING): rtl/
+	 * land only really stop the ward once arrive() lands it, asynchronously,
+	 * possibly seconds later. */
+	private resolvePendingFleetMissionCommand(
+		commandId: string,
+		status: CommandStatus,
+		message: string
+	): void {
+		const pending = this.pendingCommands.get(commandId);
+		if (!pending) return;
+		if (pending.kind === 'stop' && status === CommandStatus.COMMAND_STATUS_EXECUTING) return;
+		this.pendingCommands.delete(commandId);
+		const mission = this.fleetMissions.get(pending.fleetMissionId);
+		if (!mission) return;
+		const state = mission.wardStates.find((candidate) => candidate.wardId === pending.wardId);
+		if (!state) return;
+		const succeeded =
+			status === CommandStatus.COMMAND_STATUS_SUCCESS ||
+			status === CommandStatus.COMMAND_STATUS_EXECUTING;
+		if (pending.kind === 'start') {
+			state.status = succeeded
+				? WardMissionStatus.WARD_MISSION_STATUS_ACTIVE
+				: WardMissionStatus.WARD_MISSION_STATUS_REJECTED;
+			state.message = succeeded ? '' : message;
+		} else {
+			const stopped = status === CommandStatus.COMMAND_STATUS_SUCCESS;
+			state.status = stopped
+				? WardMissionStatus.WARD_MISSION_STATUS_STOPPED
+				: WardMissionStatus.WARD_MISSION_STATUS_ACTIVE;
+			state.message = stopped ? '' : message;
+			this.maybeFinalizeStop(pending.fleetMissionId);
+		}
+		this.persistDemoFleetMissions();
+		this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
+	}
+
+	private maybeFinalizeStop(fleetMissionId: string): void {
+		const mission = this.fleetMissions.get(fleetMissionId);
+		if (!mission || mission.status !== FleetMissionStatus.FLEET_MISSION_STATUS_STOPPING) return;
+		if (mission.wardStates.every(isWardMissionSettled)) {
+			mission.status = FleetMissionStatus.FLEET_MISSION_STATUS_STOPPED;
+		}
+	}
+
+	private fleetMissionAck(
+		requestId: string,
+		status: FleetMissionAckStatus,
+		message: string,
+		fleetMissionId: string
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'fleetMissionAck',
+				fleetMissionAck: { requestId, fleetMissionId, status, message }
+			}
+		});
+	}
+
+	private persistDemoFleetMissions(): void {
+		if (typeof localStorage === 'undefined') return;
+		const missions = [...this.fleetMissions.values()];
+		if (missions.length > 0) {
+			localStorage.setItem(DEMO_FLEET_MISSIONS_STORAGE_KEY, JSON.stringify(missions));
+		} else {
+			localStorage.removeItem(DEMO_FLEET_MISSIONS_STORAGE_KEY);
 		}
 	}
 
@@ -1032,6 +1380,7 @@ export class FakeGateway implements DemoEngine {
 				}
 			}
 		});
+		this.resolvePendingFleetMissionCommand(command.commandId, status, message);
 	}
 
 	private event(ward: SimWard, severity: Severity, code: string, message: string): void {
@@ -1048,6 +1397,15 @@ export class FakeGateway implements DemoEngine {
 			}
 		});
 	}
+}
+
+/** STOPPED or REJECTED: never started, or already stopped - the same gate
+ * Remove and Edit both apply, mirrors FleetManager's identical helper. */
+function isWardMissionSettled(state: WardMissionState): boolean {
+	return (
+		state.status === WardMissionStatus.WARD_MISSION_STATUS_STOPPED ||
+		state.status === WardMissionStatus.WARD_MISSION_STATUS_REJECTED
+	);
 }
 
 function metersPerDegLon(homeLatDeg: number): number {

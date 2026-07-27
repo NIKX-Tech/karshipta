@@ -32,13 +32,14 @@ endif()
 # build-time switch used only when producing the two artifacts. Verified
 # directly before adding this: FleetManager (Fleet/Zone CRUD) and
 # HeraldWardManager/HeraldHttpServer link zero MAVSDK; only the `ward`
-# library (and its one touchpoint into `fleet`,
-# FleetManager::handle_fleet_mission_assignment) does. When OFF, MAVSDK is
-# not linked and `ward` is not built at all - a livestock-tag-only user
-# should never have to build/run a MAVSDK-linked binary. Default ON: the
-# flagship drone demo is still the primary, default artifact.
+# library (and its touchpoints into `fleet`, FleetManager's
+# handle_create_fleet_mission/handle_stop_fleet_mission/
+# handle_update_fleet_mission_routes) does. When OFF, MAVSDK is not linked
+# and `ward` is not built at all - a livestock-tag-only user should never
+# have to build/run a MAVSDK-linked binary. Default ON: the flagship drone
+# demo is still the primary, default artifact.
 option(KARSHIPTA_GATEWAY_ENABLE_MAVLINK
-  "Build the MAVSDK-backed ward/fleet-mission-assignment path (karshipta-gateway). OFF builds the Herald-only artifact (karshipta-herald)."
+  "Build the MAVSDK-backed ward/fleet-mission path (karshipta-gateway). OFF builds the Herald-only artifact (karshipta-herald)."
   ON)
 
 # On Linux, MAVSDK comes from the prebuilt release .deb and spdlog from apt
@@ -322,8 +323,8 @@ option(KARSHIPTA_GATEWAY_BUILD_TESTS "Build gateway unit tests" OFF)
 
 if(KARSHIPTA_GATEWAY_BUILD_TESTS AND NOT KARSHIPTA_GATEWAY_ENABLE_MAVLINK)
   # herald_ward_manager_test.cpp and fleet_manager_test.cpp both construct
-  # real WardManager instances to exercise the collision-check/mission-
-  # assignment paths, so the existing suite only builds against the
+  # real WardManager instances to exercise the collision-check/fleet-mission
+  # dispatch paths, so the existing suite only builds against the
   # MAVLink-enabled configuration today. A hard error here is more honest
   # than silently building a trimmed, under-covered suite for the Herald-only
   # artifact - expanding coverage for that build is a followup, not done yet.
@@ -346,8 +347,8 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
 
   # Stacked milestone branches append their own test sources to this list.
   # KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON is guaranteed above this point (the
-  # FATAL_ERROR check), so every ward/fleet-mission-assignment test source
-  # here is always safe to build.
+  # FATAL_ERROR check), so every ward/fleet-mission test source here is
+  # always safe to build.
   set(KARSHIPTA_TEST_SOURCES
     tests/ward/ward_connection_test.cpp
     tests/ward/telemetry_test.cpp
@@ -357,6 +358,7 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
     tests/ward/ward_manager_test.cpp
     tests/transport/websocket_transport_test.cpp
     tests/fleet/fleet_zone_store_test.cpp
+    tests/fleet/fleet_mission_store_test.cpp
     tests/fleet/fleet_manager_test.cpp
     tests/herald/herald_ward_manager_test.cpp
     tests/herald/gt06_parser_test.cpp

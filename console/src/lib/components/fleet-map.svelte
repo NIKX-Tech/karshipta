@@ -24,7 +24,7 @@
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
-	import { fleet } from '$lib/fleet-store.svelte';
+	import { fleet, type DraftWaypoint } from '$lib/fleet-store.svelte';
 	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
@@ -161,6 +161,17 @@
 	const ZONE_DRAFT_SOURCE = 'zone-draft';
 	const ZONE_KEEP_IN_COLOR = '#22c55e';
 	const ZONE_KEEP_OUT_COLOR = '#ef4444';
+	// One color per ward route, cycled by index - a fleet mission plans a
+	// SEPARATE route per ward (the actual fix over the old shared-route
+	// design), so the map must make that visually obvious: no two routes in
+	// one draft/FleetMission ever render the same color. First entry matches
+	// the historical solo-route blue, so a single ward's own mission draft
+	// looks unchanged. Distinct from --color-accent/--color-critical/etc.:
+	// this palette carries no status meaning, only "which ward".
+	const ROUTE_COLORS = ['#3b9eff', '#22c55e', '#f97316', '#a78bfa', '#ec4899', '#14b8a6'];
+	function routeColorFor(index: number): string {
+		return ROUTE_COLORS[index % ROUTE_COLORS.length];
+	}
 	const TRAIL_SOURCE = 'ward-trails';
 	/**
 	 * Older points age out so a long-idle tab doesn't grow this forever, but
@@ -217,6 +228,11 @@
 	// points) that rebuilding on every telemetry tick for a self-hosted
 	// deployment's ward count is not a real cost.
 	let clusterIndex: Supercluster<{ wardId: string }> | undefined;
+	// Numbered pins only for the ward currently being planned (the fleet
+	// wizard's activeWardId, or the solo ward draft); other wards' routes
+	// still draw as a colored line (see ROUTE_SOURCE below) but without
+	// per-waypoint markers, so N routes stay readable instead of cluttering
+	// the map with every ward's every waypoint number at once.
 	let waypointMarkers: maplibregl.Marker[] = [];
 	let zoneVertexMarkers: maplibregl.Marker[] = [];
 	let placementMarker: maplibregl.Marker | undefined;
@@ -474,13 +490,21 @@
 			});
 			created.addSource(ROUTE_SOURCE, {
 				type: 'geojson',
-				data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }
+				data: { type: 'FeatureCollection', features: [] }
 			});
 			created.addLayer({
 				id: ROUTE_SOURCE,
 				type: 'line',
 				source: ROUTE_SOURCE,
-				paint: { 'line-color': '#3b9eff', 'line-width': 2, 'line-dasharray': [2, 1.5] }
+				// color/opacity are per-feature properties (see the drawing effect
+				// below), not a single static paint value: one FeatureCollection
+				// now carries every selected ward's own route at once.
+				paint: {
+					'line-color': ['get', 'color'],
+					'line-width': 2,
+					'line-opacity': ['get', 'opacity'],
+					'line-dasharray': [2, 1.5]
+				}
 			});
 			// geozones sit under the route/markers: added first, so later layers paint on top
 			created.addSource(GEOZONE_SOURCE, {
@@ -851,10 +875,14 @@
 		});
 	});
 
-	// draw the mission draft of the selected ward, or a fleet-wide mission
-	// assignment draft, as a dashed blue route + numbered points - mutually
-	// exclusive (planRoute() cancels the ward-scoped draft before starting
-	// the fleet-scoped one), so at most one ever has waypoints at a time.
+	// Draw the mission draft of the selected ward, or every ward's own route
+	// from a fleet mission draft, as one colored dashed line per ward - the
+	// actual visual fix over the old design: N distinct lines prove N
+	// distinct routes, not one shared line duplicated onto every marker.
+	// Mutually exclusive (planRoute() cancels the ward-scoped draft before
+	// starting the fleet-scoped one), so at most one ever has routes at a
+	// time. Numbered pins only render for the route currently being edited
+	// (activeWardId, or the solo ward draft) - see waypointMarkers' comment.
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
@@ -862,15 +890,51 @@
 			fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId
 				? fleet.missionDraft
 				: undefined;
-		const waypoints = wardDraft?.waypoints ?? fleetGroups.missionAssignmentDraft?.waypoints ?? [];
-		const coordinates = waypoints.map((waypoint) => [waypoint.longitudeDeg, waypoint.latitudeDeg]);
-		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ROUTE_SOURCE);
-		source?.setData({
-			type: 'Feature',
-			properties: {},
-			geometry: { type: 'LineString', coordinates }
-		});
+		const fleetDraft = fleetGroups.missionAssignmentDraft;
 
+		const features: GeoJSON.Feature<
+			GeoJSON.LineString,
+			{ wardId: string; color: string; opacity: number }
+		>[] = [];
+		let activeWaypoints: DraftWaypoint[] = [];
+		if (wardDraft) {
+			activeWaypoints = wardDraft.waypoints;
+			features.push({
+				type: 'Feature',
+				properties: { wardId: wardDraft.wardId, color: routeColorFor(0), opacity: 1 },
+				geometry: {
+					type: 'LineString',
+					coordinates: wardDraft.waypoints.map((wp) => [wp.longitudeDeg, wp.latitudeDeg])
+				}
+			});
+		} else if (fleetDraft) {
+			activeWaypoints = fleetDraft.routes[fleetDraft.activeWardId] ?? [];
+			fleetDraft.wardIds.forEach((wardId, index) => {
+				features.push({
+					type: 'Feature',
+					properties: {
+						wardId,
+						color: routeColorFor(index),
+						opacity: wardId === fleetDraft.activeWardId ? 1 : 0.55
+					},
+					geometry: {
+						type: 'LineString',
+						coordinates: (fleetDraft.routes[wardId] ?? []).map((wp) => [
+							wp.longitudeDeg,
+							wp.latitudeDeg
+						])
+					}
+				});
+			});
+		}
+
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(ROUTE_SOURCE);
+		source?.setData({ type: 'FeatureCollection', features });
+
+		const coordinates = activeWaypoints.map((waypoint) => [
+			waypoint.longitudeDeg,
+			waypoint.latitudeDeg
+		]);
 		while (waypointMarkers.length > coordinates.length) {
 			waypointMarkers.pop()?.remove();
 		}
