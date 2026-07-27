@@ -299,6 +299,17 @@ class FleetStore {
 		// without pairRelay() ever being called) - the pairing prompt should
 		// not linger once telemetry is actually flowing
 		if (status === 'open') this.relayAwaitingPair = false;
+		// A dropped or reconnecting link must not leave already-known wards
+		// looking fully live forever: fleet-map's fade-on-disconnect keys
+		// off each ward's own state.connected, which telemetry only ever
+		// sets true - nothing else clears it when the whole link goes down.
+		if (status !== 'open') {
+			for (const ward of Object.values(this.wards)) {
+				if (ward.source === 'gateway' && ward.state) {
+					ward.state.connected = false;
+				}
+			}
+		}
 	}
 
 	select(wardId: string | undefined): void {

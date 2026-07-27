@@ -1,55 +1,126 @@
 # Karshipta demo environment.
 # SITL wards, the gateway, and the console are all wired up: `docker compose
-# up` alone gets a browser-usable console at http://localhost:5173.
+# up` alone gets a browser-usable console at http://localhost:5173, with all
+# three SITL wards auto-seeded and flyable (main.cpp's seed list).
 #
-# Note for M4: multi-instance PX4 SITL port layout is finalized in that
-# milestone; the px4io/px4-sitl image maps MAVLink SDK ports per instance.
-#
-# Note for whoever wires sitl-2/sitl-3 into the gateway's fleet: each
-# instance defaults to MAVLink system_id=1 (px4_instance isn't set per
-# service here), so as of M6 the gateway's single auto-seeded ward
-# (sitl-1) is the only one it actually tracks. Getting a real 3-ward
-# fleet out of this file needs each SITL instance given a distinct
-# PX4_INSTANCE (or equivalent system_id override) plus a matching
-# per-ward connection_url on the gateway side; out of scope for M6.
+# Each SITL instance gets a distinct PX4_INSTANCE (the `-i` flag, driven by
+# PX4_INSTANCE_NUM below) so it reports a distinct MAV_SYS_ID and sends its
+# offboard/SDK stream to a distinct target port - both must match main.cpp's
+# seed list (mavlink_system_id, connection_url ports) exactly, or the
+# gateway's shared-Mavsdk-core discovery resolves a second/third ward to
+# whichever system connected first instead of its own instance.
+
+# px4io/px4-sitl's PX4 core refuses to send MAVLink to a non-localhost
+# target unless told otherwise ("MAVLink only on localhost"), a regression
+# its own entrypoint does not account for (same root cause as
+# github.com/PX4/PX4-Autopilot/issues/25118). Fixed below by restarting the
+# GCS and offboard/SDK mavlink instances a few seconds after boot, once
+# each instance's broadcast param is a real registered handle rather than a
+# pre-registration placeholder. PX4's client tools (px4-param, px4-mavlink)
+# default to instance 0's IPC socket, so any instance above 0 needs
+# --instance explicitly or the command just fails silently.
+x-log-limits: &log-limits
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '3'
+
+# -d: daemon mode, no interactive pxh shell (PX4 otherwise redraws its own
+# prompt forever with no tty attached, which json-file's default unrotated
+# logging will happily grow without bound).
+x-px4-broadcast-fix: &px4-broadcast-fix
+  environment:
+    PX4_INSTANCE_NUM: '0'
+    # px4io/px4-sitl's own px4-rc.sihsim reads these directly if set, in
+    # preference to its compiled-in default (Zurich Irchel). Vondelpark,
+    # Amsterdam - matching console/src/routes/+page.svelte's
+    # DEFAULT_MAP_CENTER and fleet-sim.ts's FAKE_FLEET_CENTER. A real open
+    # public park, not just "somewhere in Amsterdam": an earlier coordinate
+    # near Centraal turned out to sit on top of a road.
+    PX4_HOME_LAT: '52.3579'
+    PX4_HOME_LON: '4.8686'
+    PX4_HOME_ALT: '2'
+  entrypoint:
+    - sh
+    - -c
+    - |
+      instance="$$PX4_INSTANCE_NUM"
+      /opt/px4/bin/px4-entrypoint.sh -i "$$instance" -d &
+      px4_pid=$$!
+      (
+        sleep 8
+        gcs_port=$$((18570 + instance))
+        offboard_port=$$((14580 + instance))
+        offboard_remote=$$((24540 + instance))
+        for n in 0 1 2; do
+          /opt/px4/bin/px4-param --instance "$$instance" set "MAV_$${n}_BROADCAST" 1 >/dev/null 2>&1
+        done
+        /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$gcs_port" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$offboard_port" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
+      ) &
+      wait "$$px4_pid"
+    - sh
+  <<: *log-limits
 
 services:
   sitl-1:
     image: px4io/px4-sitl:latest
+    <<: *px4-broadcast-fix
     ports:
-      # 14540/udp is not published here: the gateway service claims that
-      # host port for itself below, since sitl-1's own MAVLink stream is
-      # always an outbound sender toward it (see the gateway service's
-      # ports comment), never something connected to directly.
       - "14550:14550/udp"
 
   sitl-2:
     image: px4io/px4-sitl:latest
+    <<: *px4-broadcast-fix
+    # A service's own `environment:` key replaces the anchor's merged-in
+    # one entirely in YAML (no deep merge), so this must repeat every var
+    # from x-px4-broadcast-fix's environment block, not just the one being
+    # overridden - confirmed directly: sitl-2/sitl-3 silently lost
+    # PX4_HOME_LAT/LON/ALT this way and kept spawning at PX4's compiled-in
+    # default (Zurich) while sitl-1, which has no override, did not.
+    # Offset ~20m south-west of sitl-1's home so all three don't spawn
+    # stacked on the exact same point (0.00015 deg lat / 0.00025 deg lon
+    # at this latitude is roughly 15-20m).
+    environment:
+      PX4_INSTANCE_NUM: '1'
+      PX4_HOME_LAT: '52.35775'
+      PX4_HOME_LON: '4.86835'
+      PX4_HOME_ALT: '2'
     ports:
-      - "14541:14540/udp"
       - "14551:14550/udp"
 
   sitl-3:
     image: px4io/px4-sitl:latest
+    <<: *px4-broadcast-fix
+    # Offset ~20m south-east of sitl-1's home, mirroring sitl-2, so the
+    # three form a small triangle.
+    environment:
+      PX4_INSTANCE_NUM: '2'
+      PX4_HOME_LAT: '52.35775'
+      PX4_HOME_LON: '4.86885'
+      PX4_HOME_ALT: '2'
     ports:
-      - "14542:14540/udp"
       - "14552:14550/udp"
 
   gateway:
     build:
       context: ..
       dockerfile: gateway/Dockerfile
+    <<: *log-limits
     volumes:
       - ./gateway-config.yaml:/app/gateway/config/gateway.yaml:ro
     ports:
       - "8765:8765"
-      # PX4 SITL's own startup script (px4-rc.mavlink) sends its MAVLink
-      # streams to Docker Desktop's fixed host-gateway address
-      # (192.168.65.254), not to a sibling container's address on this
-      # compose network; that is why this is a host port publish, matching
-      # the gateway's default connection URL (udp://:14540), rather than
-      # something resolved through the compose network's own DNS/bridge.
-      - "14540:14540/udp"
+      # PX4 SITL sends its MAVLink stream to Docker Desktop's fixed
+      # host-gateway address (192.168.65.254), so these are host port
+      # publishes matching each seeded ward's connection_url, not something
+      # resolved through the compose network's own DNS/bridge.
+      - "24540:24540/udp"
+      - "24541:24541/udp"
+      - "24542:24542/udp"
       # Herald HTTP ingestion (github issue #101): lets a Herald source
       # running on the host (or reachable from it) POST to the gateway
       # inside this compose network. See gateway-config.yaml's herald block.
@@ -68,6 +139,7 @@ services:
         # value is read by the operator's browser on the host, never by
         # anything inside the container network.
         PUBLIC_GATEWAY_WS_URL: ws://localhost:8765
+    <<: *log-limits
     ports:
       - "5173:80"
     depends_on: [gateway]

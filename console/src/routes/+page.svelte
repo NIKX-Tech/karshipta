@@ -21,13 +21,14 @@
 	// might prefer "Herd"); purely cosmetic, does not rename any schema field.
 	let fleetLabel = $state(DEFAULT_FLEET_LABEL);
 
-	// Amsterdam: this app's own fallback wherever geolocation is denied or
-	// unavailable (the initial map view, a new demo ward's default spot),
-	// distinct from FAKE_FLEET_CENTER (Zurich Irchel, PX4 SITL's actual
-	// default home) - that constant stays as-is so the fake fleet's own
-	// internal simulation still matches the real docker-compose demo; see
-	// fleet-sim.ts.
-	const DEFAULT_MAP_CENTER = { lat: 52.3676, lon: 4.9041 };
+	// Vondelpark, Amsterdam: this app's own fallback wherever geolocation is
+	// denied or unavailable (the initial map view, a new demo ward's default
+	// spot). A real, open public park, not just "somewhere in Amsterdam" -
+	// an earlier coordinate near Centraal turned out to sit on top of a
+	// road. Matches FAKE_FLEET_CENTER (fleet-sim.ts) and docker-compose.yml's
+	// PX4_HOME_LAT/LON, so the fake fleet, the real docker-compose demo, and
+	// this fallback all place wards in the same spot.
+	const DEFAULT_MAP_CENTER = { lat: 52.3579, lon: 4.8686 };
 
 	// The map's initial camera position: centered on the operator's own
 	// location by default, falling back to DEFAULT_MAP_CENTER on denial or

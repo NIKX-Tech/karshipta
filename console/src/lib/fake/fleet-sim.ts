@@ -48,10 +48,11 @@ import type { LatLon } from '$lib/geolocation';
  * on patrol around the PX4 SITL default home.
  */
 
-// PX4 SITL default home (Zurich Irchel), so the fake fleet and the real
+// Vondelpark, Amsterdam - matches docker-compose.yml's PX4_HOME_LAT/LON and
+// +page.svelte's DEFAULT_MAP_CENTER, so the fake fleet and the real
 // docker-compose demo appear in the same place on the map.
-const HOME_LAT_DEG = 47.397742;
-const HOME_LON_DEG = 8.545594;
+const HOME_LAT_DEG = 52.3579;
+const HOME_LON_DEG = 4.8686;
 const HOME_ALT_MSL_M = 488;
 
 const TICK_HZ = 5;

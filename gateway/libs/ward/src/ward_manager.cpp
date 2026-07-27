@@ -1078,19 +1078,19 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
         }
     }
     for (const auto& snapshot : snapshots) {
-        if (!snapshot.system) {
-            spdlog::warn(
-                "client {} connected but ward '{}' has no discovered system yet, skipping "
-                "WardInfo",
-                client, snapshot.ward_id);
-            continue;
-        }
+        // A ward with no discovered system yet (still reconnecting) still
+        // belongs to the fleet, so it gets a WardInfo too, with
+        // mavlink_system_id left at 0 - already documented in
+        // telemetry.proto as "not connected via MAVLink" - rather than
+        // being omitted entirely.
         karshipta::v1::WardInfo info;
         info.set_ward_id(snapshot.ward_id);
         info.set_ward_class(snapshot.ward_class);
-        info.set_autopilot(kAutopilotName);
-        info.set_mavlink_system_id(snapshot.system->get_system_id());
-        info.set_firmware_version(query_firmware_version(snapshot.system));
+        if (snapshot.system) {
+            info.set_autopilot(kAutopilotName);
+            info.set_mavlink_system_id(snapshot.system->get_system_id());
+            info.set_firmware_version(query_firmware_version(snapshot.system));
+        }
 
         karshipta::v1::Envelope envelope;
         *envelope.mutable_ward_info() = info;
