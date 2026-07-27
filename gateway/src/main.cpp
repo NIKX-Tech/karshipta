@@ -354,26 +354,23 @@ int main() {
         // bare `cmake --build && run` against a manually started SITL trio
         // both work out of the box with no console/test-client needed.
         //
-        // mavlink_system_id must be set explicitly here, not left at the
-        // 0 ("bind to the first autopilot") default: all three connection
-        // URLs share one Mavsdk core (see WardConnection's own comment), so
-        // a second and third ward left at 0 would each just resolve to
-        // whichever system connected first, not their own SITL instance -
-        // confirmed directly by reproducing exactly that with a manually
-        // added second ward before this fix. The system ids here
-        // (1, 2, 3) must match deploy/docker-compose.yml's PX4_INSTANCE
-        // values (0, 1, 2: PX4 sets MAV_SYS_ID to px4_instance+1), and the
-        // ports (14540, 14541, 14542) must match where each instance's
-        // offboard link actually sends (14540+px4_instance).
+        // mavlink_system_id must be set explicitly (not left at the 0
+        // "bind to the first autopilot" default): all three connection
+        // URLs share one Mavsdk core, so a second/third ward left at 0
+        // would resolve to whichever system connected first instead of its
+        // own instance. These ids (1, 2, 3) must match docker-compose.yml's
+        // PX4_INSTANCE values, and the ports (24540-24542) must match where
+        // each instance's offboard link sends per that file's broadcast-fix
+        // wrapper - not MAVLink's conventional 14540, see that file for why.
         struct SeedWard {
             std::string ward_id;
             std::string connection_url;
             uint32_t system_id;
         };
         const SeedWard seeds[] = {
-            {"sitl-1", "udp://:14540", 1},
-            {"sitl-2", "udp://:14541", 2},
-            {"sitl-3", "udp://:14542", 3},
+            {"sitl-1", "udp://:24540", 1},
+            {"sitl-2", "udp://:24541", 2},
+            {"sitl-3", "udp://:24542", 3},
         };
         for (const auto& seed_ward : seeds) {
             karshipta::v1::AddWard seed;

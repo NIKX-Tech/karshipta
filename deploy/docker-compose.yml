@@ -3,62 +3,22 @@
 # up` alone gets a browser-usable console at http://localhost:5173, with all
 # three SITL wards auto-seeded and flyable (main.cpp's seed list).
 #
-# Note for M4: multi-instance PX4 SITL port layout is finalized in that
-# milestone; the px4io/px4-sitl image maps MAVLink SDK ports per instance.
-#
-# Each SITL instance is given a distinct PX4_INSTANCE (via the `-i` CLI flag,
-# passed as `command:` below) so it reports a distinct MAV_SYS_ID
-# (px4_instance+1) and sends its offboard/SDK MAVLink stream to a distinct
-# target port (14540+px4_instance) - both must match main.cpp's seed list
-# (mavlink_system_id 1/2/3, connection_url ports 14540/14541/14542) exactly,
-# or the gateway's shared-Mavsdk-core discovery resolves a second/third ward
-# to whichever system connected first instead of its own instance
-# (confirmed directly by reproducing exactly that before this was set).
+# Each SITL instance gets a distinct PX4_INSTANCE (the `-i` flag, driven by
+# PX4_INSTANCE_NUM below) so it reports a distinct MAV_SYS_ID and sends its
+# offboard/SDK stream to a distinct target port - both must match main.cpp's
+# seed list (mavlink_system_id, connection_url ports) exactly, or the
+# gateway's shared-Mavsdk-core discovery resolves a second/third ward to
+# whichever system connected first instead of its own instance.
 
-# px4io/px4-sitl's own entrypoint.sh correctly points every mavlink instance
-# at the Docker Desktop host-gateway IP (see the gateway service's ports
-# comment below), but a newer PX4 core bundled in that image's :latest tag
-# now also refuses to actually send to a non-localhost target at all unless
-# told otherwise - logged plainly as "MAVLink only on localhost (set param
-# MAV_{i}_BROADCAST = 1 to enable network)", a real regression this image's
-# own entrypoint does not account for (confirmed directly: a fresh container
-# never got past "no matching autopilot discovered" on the gateway side
-# without this). Same root cause as github.com/PX4/PX4-Autopilot/issues/25118.
-#
-# An earlier version of this fix tried sed-injecting `param set
-# MAV_{i}_BROADCAST 1` at the top of px4-rc.mavlink, before any `mavlink
-# start` call. Confirmed unreliable by direct testing: it worked on some
-# fresh boots and silently failed on others with no code change in between,
-# consistent with a genuine registration-order race (each mavlink instance's
-# broadcast param is only wired up when that instance's own module task
-# starts, so a param set beforehand can land on a not-yet-real handle).
-#
-# PX4_NET_INTERFACE (passing `-n eth0 -p` to every `mavlink start`) was
-# tried next: it does reliably clear the "only on localhost" warning, but
-# confirmed directly (three separate test runs) that it never actually
-# fixes delivery - the gateway's rx_queue for every port stayed at 0 for
-# minutes on end despite the SITL side's TX counters climbing the whole
-# time. The reason is in -p's own effect: PX4 logs "and broadcast IP:
-# 172.18.255.255" once it's set, meaning -p switches the socket into real
-# L2/L3 broadcast on the container's own bridge subnet instead of unicast
-# to -t's target - and Docker's default bridge network does not forward
-# broadcast/multicast between sibling containers, a known Docker networking
-# limitation, not something fixable from this compose file.
-#
-# The fix that actually works end to end (confirmed: real gateway command
-# execution, not just an absent warning) restarts the two mavlink
-# instances that matter (GCS, offboard/SDK) a few seconds after PX4's own
-# boot, once each instance's broadcast param is a real, registered handle
-# instead of the pre-registration placeholder the top-of-script sed
-# approach silently set. Plain -t unicast throughout, no -p: this is what
-# was proven to work, unlike the broadcast-flag path above.
-# json-file (Docker's default log driver) never rotates on its own: an
-# unbounded log is a real, confirmed way to fill a host disk, not a
-# theoretical one - a single px4-sitl container's log hit 233MB within
-# minutes, because PX4's interactive shell keeps redrawing its own prompt in
-# a tight loop when nothing is actually attached to read it (see the -d fix
-# below, which addresses the cause; this caps the consequence regardless of
-# cause, for every service here, not just the ones known to be noisy today).
+# px4io/px4-sitl's PX4 core refuses to send MAVLink to a non-localhost
+# target unless told otherwise ("MAVLink only on localhost"), a regression
+# its own entrypoint does not account for (same root cause as
+# github.com/PX4/PX4-Autopilot/issues/25118). Fixed below by restarting the
+# GCS and offboard/SDK mavlink instances a few seconds after boot, once
+# each instance's broadcast param is a real registered handle rather than a
+# pre-registration placeholder. PX4's client tools (px4-param, px4-mavlink)
+# default to instance 0's IPC socket, so any instance above 0 needs
+# --instance explicitly or the command just fails silently.
 x-log-limits: &log-limits
   logging:
     driver: json-file
@@ -66,23 +26,9 @@ x-log-limits: &log-limits
       max-size: '10m'
       max-file: '3'
 
-# -d (daemon mode, no interactive pxh shell): without it, PX4 redraws its
-# own shell prompt in an endless loop since nothing is attached to actually
-# read it (this container has no tty), which `docker logs` faithfully
-# captures every line of - the real, confirmed source of 233MB-in-minutes
-# log growth, not build cache or image size. Does not affect the
-# simulation or MAVLink streams at all, only whether that unused
-# interactive shell starts.
-#
-# The broadcast-param restart runs as a background subshell inside the
-# entrypoint itself (not a separate `docker exec`, which will not exist
-# yet on a fresh `docker compose up`): waits for PX4's own boot to finish
-# registering its mavlink module parameters, sets each instance's
-# MAV_{n}_BROADCAST, then stops and restarts just the GCS and offboard/SDK
-# mavlink instances so they pick up the now-real value. PX4_INSTANCE_NUM
-# (not a real PX4 env var, just this wrapper's own input) drives both the
-# `-i` flag and the port math, so it only needs setting in one place per
-# service.
+# -d: daemon mode, no interactive pxh shell (PX4 otherwise redraws its own
+# prompt forever with no tty attached, which json-file's default unrotated
+# logging will happily grow without bound).
 x-px4-broadcast-fix: &px4-broadcast-fix
   environment:
     PX4_INSTANCE_NUM: '0'
@@ -95,17 +41,16 @@ x-px4-broadcast-fix: &px4-broadcast-fix
       px4_pid=$$!
       (
         sleep 8
-        cd /root/.local/share/px4/rootfs 2>/dev/null || exit 0
         gcs_port=$$((18570 + instance))
         offboard_port=$$((14580 + instance))
-        offboard_remote=$$((14540 + instance))
+        offboard_remote=$$((24540 + instance))
         for n in 0 1 2; do
-          /opt/px4/bin/px4-param set "MAV_$${n}_BROADCAST" 1 >/dev/null 2>&1
+          /opt/px4/bin/px4-param --instance "$$instance" set "MAV_$${n}_BROADCAST" 1 >/dev/null 2>&1
         done
-        /opt/px4/bin/px4-mavlink stop -u "$$gcs_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink start -x -t 192.168.65.254 -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink stop -u "$$offboard_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink start -x -t 192.168.65.254 -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$gcs_port" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$offboard_port" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
       ) &
       wait "$$px4_pid"
     - sh
@@ -116,10 +61,6 @@ services:
     image: px4io/px4-sitl:latest
     <<: *px4-broadcast-fix
     ports:
-      # 14540/udp is not published here: the gateway service claims that
-      # host port for itself below, since sitl-1's own MAVLink stream is
-      # always an outbound sender toward it (see the gateway service's
-      # ports comment), never something connected to directly.
       - "14550:14550/udp"
 
   sitl-2:
@@ -128,10 +69,6 @@ services:
     environment:
       PX4_INSTANCE_NUM: '1'
     ports:
-      # 14540/udp is not published here, same reason as sitl-1: the gateway
-      # service claims host port 14541 for itself (this instance's offboard
-      # stream target, see the gateway service's ports comment) - publishing
-      # it here too would just collide with that on `docker compose up`.
       - "14551:14550/udp"
 
   sitl-3:
@@ -151,19 +88,13 @@ services:
       - ./gateway-config.yaml:/app/gateway/config/gateway.yaml:ro
     ports:
       - "8765:8765"
-      # PX4 SITL's own startup script (px4-rc.mavlink) sends its MAVLink
-      # streams to Docker Desktop's fixed host-gateway address
-      # (192.168.65.254), not to a sibling container's address on this
-      # compose network; that is why these are host port publishes, matching
-      # each seeded ward's connection_url (udp://:14540/14541/14542, one per
-      # SITL instance's offboard/SDK port, see the sitl-* services' own
-      # comment), rather than something resolved through the compose
-      # network's own DNS/bridge. All three must stay published: a ward
-      # whose port is not published here never receives its instance's
-      # stream at all, regardless of the gateway's own connection_url config.
-      - "14540:14540/udp"
-      - "14541:14541/udp"
-      - "14542:14542/udp"
+      # PX4 SITL sends its MAVLink stream to Docker Desktop's fixed
+      # host-gateway address (192.168.65.254), so these are host port
+      # publishes matching each seeded ward's connection_url, not something
+      # resolved through the compose network's own DNS/bridge.
+      - "24540:24540/udp"
+      - "24541:24541/udp"
+      - "24542:24542/udp"
       # Herald HTTP ingestion (github issue #101): lets a Herald source
       # running on the host (or reachable from it) POST to the gateway
       # inside this compose network. See gateway-config.yaml's herald block.

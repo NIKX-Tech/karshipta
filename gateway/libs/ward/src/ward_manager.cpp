@@ -1053,15 +1053,11 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
         }
     }
     for (const auto& snapshot : snapshots) {
-        // A ward with no discovered system yet (still reconnecting, or the
-        // very first attempt hasn't landed) still belongs to the fleet: its
-        // WardInfo used to be skipped entirely here, so any client that
-        // connected or refreshed during that window saw the ward vanish
-        // completely instead of showing as pending - confirmed directly
-        // against a real gateway with wards stuck reconnecting. proto3's own
-        // mavlink_system_id=0 is already documented as "not connected via
-        // MAVLink" (telemetry.proto), so this uses that defined meaning
-        // instead of silently dropping the message.
+        // A ward with no discovered system yet (still reconnecting) still
+        // belongs to the fleet, so it gets a WardInfo too, with
+        // mavlink_system_id left at 0 - already documented in
+        // telemetry.proto as "not connected via MAVLink" - rather than
+        // being omitted entirely.
         karshipta::v1::WardInfo info;
         info.set_ward_id(snapshot.ward_id);
         info.set_ward_class(snapshot.ward_class);
