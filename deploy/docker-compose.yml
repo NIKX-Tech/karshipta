@@ -33,11 +33,13 @@ x-px4-broadcast-fix: &px4-broadcast-fix
   environment:
     PX4_INSTANCE_NUM: '0'
     # px4io/px4-sitl's own px4-rc.sihsim reads these directly if set, in
-    # preference to its compiled-in default (Zurich Irchel). Amsterdam,
-    # matching console/src/routes/+page.svelte's DEFAULT_MAP_CENTER, since
-    # that is where this project is based.
-    PX4_HOME_LAT: '52.3676'
-    PX4_HOME_LON: '4.9041'
+    # preference to its compiled-in default (Zurich Irchel). Vondelpark,
+    # Amsterdam - matching console/src/routes/+page.svelte's
+    # DEFAULT_MAP_CENTER and fleet-sim.ts's FAKE_FLEET_CENTER. A real open
+    # public park, not just "somewhere in Amsterdam": an earlier coordinate
+    # near Centraal turned out to sit on top of a road.
+    PX4_HOME_LAT: '52.3579'
+    PX4_HOME_LON: '4.8686'
     PX4_HOME_ALT: '2'
   entrypoint:
     - sh
@@ -84,8 +86,8 @@ services:
     # at this latitude is roughly 15-20m).
     environment:
       PX4_INSTANCE_NUM: '1'
-      PX4_HOME_LAT: '52.36745'
-      PX4_HOME_LON: '4.90385'
+      PX4_HOME_LAT: '52.35775'
+      PX4_HOME_LON: '4.86835'
       PX4_HOME_ALT: '2'
     ports:
       - "14551:14550/udp"
@@ -97,8 +99,8 @@ services:
     # three form a small triangle.
     environment:
       PX4_INSTANCE_NUM: '2'
-      PX4_HOME_LAT: '52.36745'
-      PX4_HOME_LON: '4.90435'
+      PX4_HOME_LAT: '52.35775'
+      PX4_HOME_LON: '4.86885'
       PX4_HOME_ALT: '2'
     ports:
       - "14552:14550/udp"
