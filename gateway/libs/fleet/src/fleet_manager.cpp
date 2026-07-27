@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -35,23 +36,49 @@ std::vector<uint8_t> serialize_envelope(const karshipta::v1::Envelope& envelope)
     return bytes;
 }
 
+// Finds ward_id's own WardMissionState within mission, or nullopt if this
+// mission has no plan for that ward. Shared by handle_command_outcome() and
+// handle_mission_upload_outcome(): both need to read-modify-write one ward's
+// state without disturbing the others, and update_ward_state() overwrites
+// status/message/mission_id together (FleetMissionStore has no per-field
+// update), so the caller must start from the current row, not a fresh one.
+std::optional<karshipta::v1::WardMissionState> find_ward_state(const karshipta::v1::FleetMission& mission,
+                                                                 const std::string& ward_id) {
+    auto it = std::find_if(mission.ward_states().begin(), mission.ward_states().end(),
+                            [&](const auto& state) { return state.ward_id() == ward_id; });
+    if (it == mission.ward_states().end()) return std::nullopt;
+    return *it;
+}
+
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 // Not a real UUID, same rationale as mission_importer.cpp's
 // synthesize_mission_id: only needs to be unique enough for one gateway
-// process to tell fanned-out missions apart. Only handle_fleet_mission_assignment
-// (below, also guarded) calls this - unused otherwise.
-std::string synthesize_fleet_mission_id(const std::string& fleet_id, const std::string& ward_id) {
+// process to tell wards' independent missions apart.
+std::string synthesize_ward_mission_id(const std::string& fleet_mission_id, const std::string& ward_id) {
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
-    return "fleet-" + fleet_id + "-" + ward_id + "-" + std::to_string(now_ns);
+    return fleet_mission_id + "-" + ward_id + "-" + std::to_string(now_ns);
+}
+
+// Same rationale, for a Stop dispatch's synthesized Command.command_id -
+// the "fleet-mission-stop-" prefix has no special meaning to WardManager,
+// it only needs to be unique enough for pending_stops_ to key on.
+std::string synthesize_stop_command_id(const std::string& fleet_mission_id, const std::string& ward_id) {
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    return "fleet-mission-stop-" + fleet_mission_id + "-" + ward_id + "-" + std::to_string(now_ns);
 }
 #endif
 
 }  // namespace
 
-FleetManager::FleetManager(Transport& transport, std::filesystem::path db_path)
-    : transport_(transport), store_(std::move(db_path)) {}
+FleetManager::FleetManager(Transport& transport, std::filesystem::path db_path,
+                            std::filesystem::path fleet_mission_db_path)
+    : transport_(transport),
+      store_(std::move(db_path)),
+      fleet_mission_store_(std::move(fleet_mission_db_path)) {}
 
 std::optional<karshipta::v1::Fleet> FleetManager::find_fleet(const std::string& fleet_id) const {
     auto fleets = store_.list_fleets();
@@ -78,6 +105,12 @@ void FleetManager::broadcast_fleet(const karshipta::v1::Fleet& fleet) const {
 void FleetManager::broadcast_zone(const karshipta::v1::Zone& zone) const {
     karshipta::v1::Envelope envelope;
     *envelope.mutable_zone() = zone;
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
+void FleetManager::broadcast_fleet_mission(const karshipta::v1::FleetMission& mission) const {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_fleet_mission() = mission;
     transport_.broadcast(serialize_envelope(envelope));
 }
 
@@ -307,65 +340,382 @@ karshipta::v1::ZoneAck FleetManager::handle_delete_zone(const karshipta::v1::Del
     return ack;
 }
 
-// ---------- Fleet-wide mission assignment ----------
+// ---------- Fleet mission ----------
 
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
-void FleetManager::handle_fleet_mission_assignment(
-    const karshipta::v1::FleetMissionAssignment& request, WardManager& ward_manager) {
+karshipta::v1::FleetMissionAck FleetManager::handle_create_fleet_mission(
+    const karshipta::v1::CreateFleetMission& request, WardManager& ward_manager) {
+    karshipta::v1::FleetMissionAck ack;
+    ack.set_request_id(request.request_id());
     // Empty fleet_id means an ad-hoc ward selection, not tied to a saved
-    // Fleet (the console's Mission tab lets an operator pick either a
-    // Fleet or a handful of individual wards); only a non-empty fleet_id
-    // is validated against the store, same as everywhere else fleet_id is
-    // looked up.
-    if (!request.fleet_id().empty()) {
-        // See handle_create_fleet()'s comment: find_fleet() can throw if the
-        // store itself fails, and that must become a rejection here too, not
-        // an uncaught exception on this connection's worker thread.
-        bool fleet_exists = false;
-        try {
-            fleet_exists = find_fleet(request.fleet_id()).has_value();
-        } catch (const std::exception& error) {
-            spdlog::error("fleet_mission_assignment request '{}' failed: {}", request.request_id(),
-                          error.what());
-            broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
-                                       std::string("internal error: ") + error.what());
-            return;
-        }
-        if (!fleet_exists) {
-            spdlog::warn("fleet_mission_assignment request '{}' rejected: unknown fleet_id '{}'",
+    // Fleet (the console's Mission wizard lets an operator pick either a
+    // Fleet or a handful of individual wards); only a non-empty fleet_id is
+    // validated against the store, same as everywhere else fleet_id is
+    // looked up. Whole body in one try: find_fleet() below can throw, same
+    // reasoning as handle_create_fleet()'s comment.
+    try {
+        if (!request.fleet_id().empty() && !find_fleet(request.fleet_id())) {
+            spdlog::warn("create_fleet_mission request '{}' rejected: unknown fleet_id '{}'",
                          request.request_id(), request.fleet_id());
-            broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
-                                       "unknown fleet_id: " + request.fleet_id());
-            return;
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("unknown fleet_id: " + request.fleet_id());
+            return ack;
         }
-    }
-    if (request.ward_ids_size() == 0) {
-        spdlog::warn("fleet_mission_assignment request '{}' rejected: no wards selected",
-                     request.request_id());
-        broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED",
-                                   "no wards selected for fleet_id: " + request.fleet_id());
-        return;
-    }
+        if (request.ward_plans_size() == 0) {
+            spdlog::warn("create_fleet_mission request '{}' rejected: no ward plans",
+                         request.request_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("no ward plans in request");
+            return ack;
+        }
 
-    // Each selected ward gets its own independent copy: fresh mission_id,
-    // that ward's ward_id, otherwise identical items/repeat_count (proto
-    // comment on FleetMissionAssignment). A per-ward rejection (unknown/
-    // stopped/busy ward) surfaces as a WARNING Event via WardManager itself,
-    // the same channel a solo mission upload rejection already uses -
-    // deliberately not aggregated into one ack here, since there is no
-    // FleetMissionAssignment ack type (mirrors solo Envelope.mission_upload,
-    // which has none either).
-    for (const auto& ward_id : request.ward_ids()) {
-        karshipta::v1::Mission mission;
-        mission.set_mission_id(synthesize_fleet_mission_id(request.fleet_id(), ward_id));
-        mission.set_ward_id(ward_id);
-        mission.set_name(request.mission_name());
-        *mission.mutable_items() = request.items();
-        mission.set_repeat_count(request.repeat_count());
-        (void)ward_manager.dispatch_mission_upload_and_start(mission);
+        const std::vector<karshipta::v1::WardMissionPlan> ward_plans(request.ward_plans().begin(),
+                                                                       request.ward_plans().end());
+        const std::string fleet_mission_id = fleet_mission_store_.create_fleet_mission(
+            request.fleet_id(), request.mission_name(), request.repeat_count(), ward_plans);
+
+        // Each ward gets its own independent Mission: fresh mission_id, that
+        // ward's own items, shared repeat_count - the actual fix over the
+        // old flat-broadcast design (no two wards ever share a route).
+        // dispatch_mission_upload_and_start()'s return is the immediate
+        // accept/reject; the real upload outcome lands later via
+        // handle_mission_upload_outcome().
+        for (const auto& plan : ward_plans) {
+            karshipta::v1::Mission mission;
+            mission.set_mission_id(synthesize_ward_mission_id(fleet_mission_id, plan.ward_id()));
+            mission.set_ward_id(plan.ward_id());
+            mission.set_name(request.mission_name());
+            *mission.mutable_items() = plan.items();
+            mission.set_repeat_count(request.repeat_count());
+
+            const auto rejection = ward_manager.dispatch_mission_upload_and_start(mission);
+            karshipta::v1::WardMissionState state;
+            state.set_ward_id(plan.ward_id());
+            state.set_mission_id(mission.mission_id());
+            if (rejection) {
+                state.set_status(karshipta::v1::WARD_MISSION_STATUS_REJECTED);
+                state.set_message(*rejection);
+            } else {
+                state.set_status(karshipta::v1::WARD_MISSION_STATUS_UPLOADING);
+            }
+            fleet_mission_store_.update_ward_state(fleet_mission_id, state);
+        }
+
+        ack.set_fleet_mission_id(fleet_mission_id);
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+        ack.set_message("fleet mission created");
+        if (const auto mission = fleet_mission_store_.get_fleet_mission(fleet_mission_id)) {
+            broadcast_fleet_mission(*mission);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("create_fleet_mission request '{}' failed: {}", request.request_id(),
+                      error.what());
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
     }
+    return ack;
+}
+
+karshipta::v1::FleetMissionAck FleetManager::handle_stop_fleet_mission(
+    const karshipta::v1::StopFleetMission& request, WardManager& ward_manager) {
+    karshipta::v1::FleetMissionAck ack;
+    ack.set_request_id(request.request_id());
+    ack.set_fleet_mission_id(request.fleet_mission_id());
+    try {
+        const auto mission = fleet_mission_store_.get_fleet_mission(request.fleet_mission_id());
+        if (!mission) {
+            spdlog::warn("stop_fleet_mission request '{}' rejected: unknown fleet_mission_id '{}'",
+                         request.request_id(), request.fleet_mission_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("unknown fleet_mission_id: " + request.fleet_mission_id());
+            return ack;
+        }
+
+        const auto action = request.action() == karshipta::v1::FLEET_MISSION_STOP_ACTION_UNSPECIFIED
+                                 ? karshipta::v1::FLEET_MISSION_STOP_ACTION_RTL
+                                 : request.action();
+        int dispatched = 0;
+        for (const auto& state : mission->ward_states()) {
+            if (state.status() == karshipta::v1::WARD_MISSION_STATUS_STOPPED ||
+                state.status() == karshipta::v1::WARD_MISSION_STATUS_REJECTED ||
+                state.status() == karshipta::v1::WARD_MISSION_STATUS_STOPPING) {
+                continue;
+            }
+            karshipta::v1::Command command;
+            const auto command_id = synthesize_stop_command_id(request.fleet_mission_id(), state.ward_id());
+            command.set_command_id(command_id);
+            command.set_ward_id(state.ward_id());
+            command.set_timestamp_ms(unix_epoch_ms());
+            switch (action) {
+                case karshipta::v1::FLEET_MISSION_STOP_ACTION_HOLD:
+                    command.mutable_pause_mission();
+                    break;
+                case karshipta::v1::FLEET_MISSION_STOP_ACTION_LAND:
+                    command.mutable_land();
+                    break;
+                default:
+                    command.mutable_rtl();
+                    break;
+            }
+            // Write STOPPING and register the correlation entry before
+            // dispatching: dispatch_command() can synchronously reject
+            // (unknown/stopped/busy ward) and, via the command-outcome
+            // observer, call back into handle_command_outcome() before this
+            // call even returns. Doing it in this order means that callback
+            // always sees (and correctly overwrites) the STOPPING state this
+            // loop just wrote, instead of racing it and being clobbered by
+            // it - the reverse order silently loses a synchronous rejection.
+            karshipta::v1::WardMissionState stopping_state;
+            stopping_state.set_ward_id(state.ward_id());
+            stopping_state.set_status(karshipta::v1::WARD_MISSION_STATUS_STOPPING);
+            stopping_state.set_mission_id(state.mission_id());
+            fleet_mission_store_.update_ward_state(request.fleet_mission_id(), stopping_state);
+            {
+                std::lock_guard lock(pending_stops_mutex_);
+                pending_stops_[command_id] = PendingStop{request.fleet_mission_id(), state.ward_id()};
+            }
+            ward_manager.dispatch_command(command);
+            ++dispatched;
+        }
+
+        if (dispatched > 0) {
+            fleet_mission_store_.set_status(request.fleet_mission_id(),
+                                             karshipta::v1::FLEET_MISSION_STATUS_STOPPING);
+            // Catches any ward whose dispatch_command() above rejected
+            // synchronously (and so already settled via
+            // handle_command_outcome() mid-loop, before the aggregate
+            // status above was actually STOPPING yet - maybe_finalize_stop()
+            // no-ops unless it is, so that mid-loop call could not have
+            // finalized anything).
+            maybe_finalize_stop(request.fleet_mission_id());
+        }
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+        ack.set_message(dispatched > 0 ? "stop dispatched to " + std::to_string(dispatched) + " ward(s)"
+                                        : "no active wards to stop");
+        if (const auto updated = fleet_mission_store_.get_fleet_mission(request.fleet_mission_id())) {
+            broadcast_fleet_mission(*updated);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("stop_fleet_mission request '{}' failed: {}", request.request_id(), error.what());
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
+    }
+    return ack;
+}
+
+karshipta::v1::FleetMissionAck FleetManager::handle_update_fleet_mission_routes(
+    const karshipta::v1::UpdateFleetMissionRoutes& request, WardManager& ward_manager) {
+    karshipta::v1::FleetMissionAck ack;
+    ack.set_request_id(request.request_id());
+    ack.set_fleet_mission_id(request.fleet_mission_id());
+    try {
+        const auto mission = fleet_mission_store_.get_fleet_mission(request.fleet_mission_id());
+        if (!mission) {
+            spdlog::warn("update_fleet_mission_routes request '{}' rejected: unknown fleet_mission_id '{}'",
+                         request.request_id(), request.fleet_mission_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("unknown fleet_mission_id: " + request.fleet_mission_id());
+            return ack;
+        }
+        const bool every_ward_settled = std::all_of(
+            mission->ward_states().begin(), mission->ward_states().end(), [](const auto& state) {
+                return state.status() == karshipta::v1::WARD_MISSION_STATUS_STOPPED ||
+                       state.status() == karshipta::v1::WARD_MISSION_STATUS_REJECTED;
+            });
+        if (!every_ward_settled) {
+            spdlog::warn(
+                "update_fleet_mission_routes request '{}' rejected: fleet_mission_id '{}' still has "
+                "an active ward",
+                request.request_id(), request.fleet_mission_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("cannot edit while any ward is still active; stop it first");
+            return ack;
+        }
+        if (request.ward_plans_size() == 0) {
+            spdlog::warn("update_fleet_mission_routes request '{}' rejected: no ward plans",
+                         request.request_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("no ward plans in request");
+            return ack;
+        }
+
+        const std::vector<karshipta::v1::WardMissionPlan> ward_plans(request.ward_plans().begin(),
+                                                                       request.ward_plans().end());
+        const auto update_error = fleet_mission_store_.update_ward_plans(
+            request.fleet_mission_id(), request.mission_name(), request.repeat_count(), ward_plans);
+        if (update_error) {
+            spdlog::warn("update_fleet_mission_routes request '{}' rejected: {}", request.request_id(),
+                         *update_error);
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message(*update_error);
+            return ack;
+        }
+
+        for (const auto& plan : ward_plans) {
+            karshipta::v1::Mission ward_mission;
+            ward_mission.set_mission_id(
+                synthesize_ward_mission_id(request.fleet_mission_id(), plan.ward_id()));
+            ward_mission.set_ward_id(plan.ward_id());
+            ward_mission.set_name(request.mission_name());
+            *ward_mission.mutable_items() = plan.items();
+            ward_mission.set_repeat_count(request.repeat_count());
+
+            const auto rejection = ward_manager.dispatch_mission_upload_and_start(ward_mission);
+            karshipta::v1::WardMissionState state;
+            state.set_ward_id(plan.ward_id());
+            state.set_mission_id(ward_mission.mission_id());
+            if (rejection) {
+                state.set_status(karshipta::v1::WARD_MISSION_STATUS_REJECTED);
+                state.set_message(*rejection);
+            } else {
+                state.set_status(karshipta::v1::WARD_MISSION_STATUS_UPLOADING);
+            }
+            fleet_mission_store_.update_ward_state(request.fleet_mission_id(), state);
+        }
+
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+        ack.set_message("fleet mission updated");
+        if (const auto updated = fleet_mission_store_.get_fleet_mission(request.fleet_mission_id())) {
+            broadcast_fleet_mission(*updated);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("update_fleet_mission_routes request '{}' failed: {}", request.request_id(),
+                      error.what());
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
+    }
+    return ack;
 }
 #endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+
+karshipta::v1::FleetMissionAck FleetManager::handle_remove_fleet_mission(
+    const karshipta::v1::RemoveFleetMission& request) {
+    karshipta::v1::FleetMissionAck ack;
+    ack.set_request_id(request.request_id());
+    ack.set_fleet_mission_id(request.fleet_mission_id());
+    try {
+        const auto mission = fleet_mission_store_.get_fleet_mission(request.fleet_mission_id());
+        if (!mission) {
+            spdlog::warn("remove_fleet_mission request '{}' rejected: unknown fleet_mission_id '{}'",
+                         request.request_id(), request.fleet_mission_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("unknown fleet_mission_id: " + request.fleet_mission_id());
+            return ack;
+        }
+        const bool every_ward_settled = std::all_of(
+            mission->ward_states().begin(), mission->ward_states().end(), [](const auto& state) {
+                return state.status() == karshipta::v1::WARD_MISSION_STATUS_STOPPED ||
+                       state.status() == karshipta::v1::WARD_MISSION_STATUS_REJECTED;
+            });
+        if (!every_ward_settled) {
+            spdlog::warn(
+                "remove_fleet_mission request '{}' rejected: fleet_mission_id '{}' still has an "
+                "active ward",
+                request.request_id(), request.fleet_mission_id());
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message("cannot remove while any ward is still active; stop it first");
+            return ack;
+        }
+        const auto error = fleet_mission_store_.delete_fleet_mission(request.fleet_mission_id());
+        if (error) {
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack.set_message(*error);
+        } else {
+            ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_ACCEPTED);
+            ack.set_message("fleet mission removed");
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("remove_fleet_mission request '{}' failed: {}", request.request_id(), error.what());
+        ack.set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+        ack.set_message(std::string("internal error: ") + error.what());
+    }
+    return ack;
+}
+
+void FleetManager::handle_command_outcome(const karshipta::v1::CommandAck& ack) {
+    if (ack.status() != karshipta::v1::COMMAND_STATUS_SUCCESS &&
+        ack.status() != karshipta::v1::COMMAND_STATUS_REJECTED &&
+        ack.status() != karshipta::v1::COMMAND_STATUS_TIMEOUT) {
+        return;  // ACCEPTED/EXECUTING: not a terminal outcome yet
+    }
+    std::optional<PendingStop> pending;
+    {
+        std::lock_guard lock(pending_stops_mutex_);
+        auto it = pending_stops_.find(ack.command_id());
+        if (it != pending_stops_.end()) {
+            pending = it->second;
+            pending_stops_.erase(it);
+        }
+    }
+    if (!pending) return;  // this ack has nothing to do with a fleet mission
+
+    try {
+        const auto mission = fleet_mission_store_.get_fleet_mission(pending->fleet_mission_id);
+        if (!mission) return;  // removed meanwhile
+        auto state = find_ward_state(*mission, pending->ward_id);
+        if (!state) return;
+
+        if (ack.status() == karshipta::v1::COMMAND_STATUS_SUCCESS) {
+            state->set_status(karshipta::v1::WARD_MISSION_STATUS_STOPPED);
+            state->set_message("");
+        } else {
+            // The stop itself failed or never landed: the ward never
+            // actually stopped, so revert to ACTIVE rather than leaving it
+            // stuck at STOPPING with no way for Remove's safety gate to
+            // ever clear. The operator can retry Stop.
+            state->set_status(karshipta::v1::WARD_MISSION_STATUS_ACTIVE);
+            state->set_message(ack.status() == karshipta::v1::COMMAND_STATUS_REJECTED
+                                    ? ack.message()
+                                    : "stop command timed out");
+        }
+        fleet_mission_store_.update_ward_state(pending->fleet_mission_id, *state);
+        maybe_finalize_stop(pending->fleet_mission_id);
+        if (const auto updated = fleet_mission_store_.get_fleet_mission(pending->fleet_mission_id)) {
+            broadcast_fleet_mission(*updated);
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("handle_command_outcome for fleet_mission '{}' ward '{}' failed: {}",
+                      pending->fleet_mission_id, pending->ward_id, error.what());
+    }
+}
+
+void FleetManager::handle_mission_upload_outcome(const std::string& ward_id,
+                                                  const std::string& mission_id, const bool success,
+                                                  const std::string& message) {
+    try {
+        for (const auto& mission : fleet_mission_store_.list_fleet_missions()) {
+            auto state = find_ward_state(mission, ward_id);
+            if (!state || state->mission_id() != mission_id ||
+                state->status() != karshipta::v1::WARD_MISSION_STATUS_UPLOADING) {
+                continue;
+            }
+            state->set_status(success ? karshipta::v1::WARD_MISSION_STATUS_ACTIVE
+                                       : karshipta::v1::WARD_MISSION_STATUS_REJECTED);
+            state->set_message(success ? "" : message);
+            fleet_mission_store_.update_ward_state(mission.fleet_mission_id(), *state);
+            if (const auto updated = fleet_mission_store_.get_fleet_mission(mission.fleet_mission_id())) {
+                broadcast_fleet_mission(*updated);
+            }
+            return;
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("handle_mission_upload_outcome for ward '{}' mission '{}' failed: {}", ward_id,
+                      mission_id, error.what());
+    }
+}
+
+void FleetManager::maybe_finalize_stop(const std::string& fleet_mission_id) {
+    const auto mission = fleet_mission_store_.get_fleet_mission(fleet_mission_id);
+    if (!mission || mission->status() != karshipta::v1::FLEET_MISSION_STATUS_STOPPING) return;
+    const bool all_settled =
+        std::all_of(mission->ward_states().begin(), mission->ward_states().end(), [](const auto& state) {
+            return state.status() == karshipta::v1::WARD_MISSION_STATUS_STOPPED ||
+                   state.status() == karshipta::v1::WARD_MISSION_STATUS_REJECTED;
+        });
+    if (all_settled) {
+        fleet_mission_store_.set_status(fleet_mission_id, karshipta::v1::FLEET_MISSION_STATUS_STOPPED);
+    }
+}
 
 // ---------- Viewer rejection ----------
 
@@ -472,12 +822,54 @@ void FleetManager::reject_viewer_envelope(const Transport::ClientId client,
             transport_.broadcast(serialize_envelope(ack_envelope));
             break;
         }
-        case karshipta::v1::Envelope::kFleetMissionAssignment: {
-            const auto& request = envelope.fleet_mission_assignment();
-            spdlog::warn("viewer client {} attempted fleet_mission_assignment on fleet_id '{}', "
-                         "rejecting",
-                         client, request.fleet_id());
-            broadcast_gateway_warning("FLEET_MISSION_ASSIGNMENT_REJECTED", kReadOnlySessionMessage);
+        case karshipta::v1::Envelope::kCreateFleetMission: {
+            const auto& request = envelope.create_fleet_mission();
+            spdlog::warn("viewer client {} attempted create_fleet_mission, rejecting", client);
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_fleet_mission_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kStopFleetMission: {
+            const auto& request = envelope.stop_fleet_mission();
+            spdlog::warn("viewer client {} attempted stop_fleet_mission '{}', rejecting", client,
+                         request.fleet_mission_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_fleet_mission_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_fleet_mission_id(request.fleet_mission_id());
+            ack->set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kRemoveFleetMission: {
+            const auto& request = envelope.remove_fleet_mission();
+            spdlog::warn("viewer client {} attempted remove_fleet_mission '{}', rejecting", client,
+                         request.fleet_mission_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_fleet_mission_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_fleet_mission_id(request.fleet_mission_id());
+            ack->set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kUpdateFleetMissionRoutes: {
+            const auto& request = envelope.update_fleet_mission_routes();
+            spdlog::warn("viewer client {} attempted update_fleet_mission_routes '{}', rejecting",
+                         client, request.fleet_mission_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_fleet_mission_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_fleet_mission_id(request.fleet_mission_id());
+            ack->set_status(karshipta::v1::FLEET_MISSION_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
             break;
         }
         default:
@@ -509,5 +901,19 @@ void FleetManager::send_fleet_zone_snapshot(const Transport::ClientId client) co
         }
     } catch (const std::exception& error) {
         spdlog::error("send_fleet_zone_snapshot to client {} failed: {}", client, error.what());
+    }
+}
+
+void FleetManager::send_fleet_mission_snapshot(const Transport::ClientId client) const {
+    // Same reasoning as send_fleet_zone_snapshot(): no request to reject
+    // here, just log and skip this client's snapshot on a store failure.
+    try {
+        for (const auto& mission : fleet_mission_store_.list_fleet_missions()) {
+            karshipta::v1::Envelope envelope;
+            *envelope.mutable_fleet_mission() = mission;
+            transport_.send(client, serialize_envelope(envelope));
+        }
+    } catch (const std::exception& error) {
+        spdlog::error("send_fleet_mission_snapshot to client {} failed: {}", client, error.what());
     }
 }

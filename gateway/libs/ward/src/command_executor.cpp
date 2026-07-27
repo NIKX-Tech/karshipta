@@ -171,7 +171,11 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
             return action_outcome(actions_.arm());
         case karshipta::v1::Command::kDisarm:
             // force means "stop the motors no matter what": MAVSDK kill(). The
-            // console gates this behind its own confirmation dialog.
+            // console gates this behind its own confirmation dialog. Only a
+            // forced disarm interrupts a mission (WardMission::notify_interrupted's
+            // own doc comment) - a normal disarm only succeeds already-grounded,
+            // where no mission can be active anyway.
+            if (command.disarm().force()) mission_.notify_interrupted();
             return action_outcome(command.disarm().force() ? actions_.kill() : actions_.disarm());
         case karshipta::v1::Command::kTakeoff: {
             if (command.takeoff().altitude_rel_m() > 0.0f) {
@@ -184,13 +188,16 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
             return action_outcome(actions_.takeoff());
         }
         case karshipta::v1::Command::kLand:
+            mission_.notify_interrupted();
             return action_outcome(actions_.land());
         case karshipta::v1::Command::kRtl:
+            mission_.notify_interrupted();
             return action_outcome(actions_.return_to_launch());
         case karshipta::v1::Command::kGoto: {
             if (!command.goto_().has_target()) {
                 return {false, "goto has no target"};
             }
+            mission_.notify_interrupted();
             if (command.goto_().speed_m_s() > kNoSpeedRequested) {
                 const auto speed_result = actions_.set_current_speed(command.goto_().speed_m_s());
                 if (speed_result != Result::Success) {

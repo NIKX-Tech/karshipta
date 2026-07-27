@@ -48,6 +48,9 @@ constexpr auto kPersistencePath = "gateway/config/fleet_state.yaml";
 #endif
 // Same treatment for Fleet/Zone's SQLite store (gateway/.gitignore).
 constexpr auto kFleetZoneDbPath = "gateway/config/fleet_zones.db";
+// Same, for FleetMission's own SQLite store - a sibling file, not a table
+// added to kFleetZoneDbPath's database (see FleetMissionStore's own header).
+constexpr auto kFleetMissionDbPath = "gateway/config/fleet_missions.db";
 // Default when gateway.yaml's relay.credentials_path is unset; secrets, so
 // gitignored, unlike gateway.yaml itself (see relay_credentials.yaml.example).
 constexpr auto kDefaultRelayCredentialsPath = "gateway/config/relay_credentials.yaml";
@@ -128,7 +131,10 @@ bool is_fleet_payload(const karshipta::v1::Envelope::PayloadCase payload_case) {
         case karshipta::v1::Envelope::kCreateZone:
         case karshipta::v1::Envelope::kUpdateZone:
         case karshipta::v1::Envelope::kDeleteZone:
-        case karshipta::v1::Envelope::kFleetMissionAssignment:
+        case karshipta::v1::Envelope::kCreateFleetMission:
+        case karshipta::v1::Envelope::kStopFleetMission:
+        case karshipta::v1::Envelope::kRemoveFleetMission:
+        case karshipta::v1::Envelope::kUpdateFleetMissionRoutes:
             return true;
         default:
             return false;
@@ -169,11 +175,29 @@ int main() {
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     auto ward_manager = WardManager::create(*transport, kPersistencePath);
 #endif
-    auto fleet_manager = std::make_unique<FleetManager>(*transport, kFleetZoneDbPath);
+    auto fleet_manager =
+        std::make_unique<FleetManager>(*transport, kFleetZoneDbPath, kFleetMissionDbPath);
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     // Depends on ward_manager (has_ward() rejects an entity_id collision
     // with a MAVLink ward), so it's constructed after it.
     auto herald_manager = std::make_unique<HeraldWardManager>(*transport, *ward_manager);
+
+    // Lets a fleet mission's Stop/Create dispatch (see
+    // FleetManager::handle_stop_fleet_mission/handle_create_fleet_mission)
+    // learn its per-ward outcome without WardManager needing to know
+    // FleetMission exists (see both setters' own doc comments on ward_manager.h).
+    // Registered here, before start_publishing()/restore_and_start() below
+    // ever let a command or upload actually run: set-once, never reassigned
+    // afterward, matching persistence_path_'s own contract.
+    ward_manager->set_command_outcome_observer(
+        [&fleet_manager](const karshipta::v1::CommandAck& ack) {
+            fleet_manager->handle_command_outcome(ack);
+        });
+    ward_manager->set_mission_upload_outcome_observer(
+        [&fleet_manager](const std::string& ward_id, const std::string& mission_id, bool success,
+                          const std::string& message) {
+            fleet_manager->handle_mission_upload_outcome(ward_id, mission_id, success, message);
+        });
 #else
     // No WardManager exists in this build to collide-check against - there
     // are no MAVLink ward_ids at all, so nothing for a Herald entity_id to
@@ -193,6 +217,7 @@ int main() {
             ward_manager->send_ward_info(client);
 #endif
             fleet_manager->send_fleet_zone_snapshot(client);
+            fleet_manager->send_fleet_mission_snapshot(client);
             herald_manager->send_known_wards(client);
         });
 
@@ -316,18 +341,62 @@ int main() {
                 transport->broadcast(serialize_envelope(ack_envelope));
                 break;
             }
-            case karshipta::v1::Envelope::kFleetMissionAssignment:
+            case karshipta::v1::Envelope::kCreateFleetMission: {
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
-                fleet_manager->handle_fleet_mission_assignment(envelope.fleet_mission_assignment(),
-                                                                 *ward_manager);
+                const auto ack =
+                    fleet_manager->handle_create_fleet_mission(envelope.create_fleet_mission(),
+                                                                *ward_manager);
+                karshipta::v1::Envelope ack_envelope;
+                *ack_envelope.mutable_fleet_mission_ack() = ack;
+                transport->broadcast(serialize_envelope(ack_envelope));
 #else
                 spdlog::warn(
-                    "client {} sent fleet_mission_assignment but this gateway was not built with "
-                    "KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON (fanning a mission out inherently needs "
-                    "flight control); ignoring",
+                    "client {} sent create_fleet_mission but this gateway was not built with "
+                    "KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON (a fleet mission inherently needs flight "
+                    "control); ignoring",
                     client);
 #endif
                 break;
+            }
+            case karshipta::v1::Envelope::kStopFleetMission: {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                const auto ack =
+                    fleet_manager->handle_stop_fleet_mission(envelope.stop_fleet_mission(),
+                                                              *ward_manager);
+                karshipta::v1::Envelope ack_envelope;
+                *ack_envelope.mutable_fleet_mission_ack() = ack;
+                transport->broadcast(serialize_envelope(ack_envelope));
+#else
+                spdlog::warn(
+                    "client {} sent stop_fleet_mission but this gateway was not built with "
+                    "KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON; ignoring",
+                    client);
+#endif
+                break;
+            }
+            case karshipta::v1::Envelope::kRemoveFleetMission: {
+                const auto ack =
+                    fleet_manager->handle_remove_fleet_mission(envelope.remove_fleet_mission());
+                karshipta::v1::Envelope ack_envelope;
+                *ack_envelope.mutable_fleet_mission_ack() = ack;
+                transport->broadcast(serialize_envelope(ack_envelope));
+                break;
+            }
+            case karshipta::v1::Envelope::kUpdateFleetMissionRoutes: {
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                const auto ack = fleet_manager->handle_update_fleet_mission_routes(
+                    envelope.update_fleet_mission_routes(), *ward_manager);
+                karshipta::v1::Envelope ack_envelope;
+                *ack_envelope.mutable_fleet_mission_ack() = ack;
+                transport->broadcast(serialize_envelope(ack_envelope));
+#else
+                spdlog::warn(
+                    "client {} sent update_fleet_mission_routes but this gateway was not built "
+                    "with KARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON; ignoring",
+                    client);
+#endif
+                break;
+            }
             default:
                 spdlog::warn("unexpected downstream payload kind {} from client {}",
                              static_cast<int>(envelope.payload_case()), client);

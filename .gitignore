@@ -7,9 +7,10 @@ console/build/
 console/src/lib/gen/
 
 # gateway generated state (operator-facing config in gateway/config/ stays
-# tracked; these two are runtime output, not committed assets)
+# tracked; these are runtime output, not committed assets)
 gateway/config/fleet_state.yaml
 gateway/config/fleet_zones.db
+gateway/config/fleet_missions.db
 
 # relay device credentials (secrets, provisioned out of band against a real
 # relayly server - never committed; gateway.yaml itself stays safe to commit
