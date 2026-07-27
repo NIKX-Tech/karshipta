@@ -73,16 +73,33 @@ services:
   sitl-2:
     image: px4io/px4-sitl:latest
     <<: *px4-broadcast-fix
+    # A service's own `environment:` key replaces the anchor's merged-in
+    # one entirely in YAML (no deep merge), so this must repeat every var
+    # from x-px4-broadcast-fix's environment block, not just the one being
+    # overridden - confirmed directly: sitl-2/sitl-3 silently lost
+    # PX4_HOME_LAT/LON/ALT this way and kept spawning at PX4's compiled-in
+    # default (Zurich) while sitl-1, which has no override, did not.
+    # Offset ~20m south-west of sitl-1's home so all three don't spawn
+    # stacked on the exact same point (0.00015 deg lat / 0.00025 deg lon
+    # at this latitude is roughly 15-20m).
     environment:
       PX4_INSTANCE_NUM: '1'
+      PX4_HOME_LAT: '52.36745'
+      PX4_HOME_LON: '4.90385'
+      PX4_HOME_ALT: '2'
     ports:
       - "14551:14550/udp"
 
   sitl-3:
     image: px4io/px4-sitl:latest
     <<: *px4-broadcast-fix
+    # Offset ~20m south-east of sitl-1's home, mirroring sitl-2, so the
+    # three form a small triangle.
     environment:
       PX4_INSTANCE_NUM: '2'
+      PX4_HOME_LAT: '52.36745'
+      PX4_HOME_LON: '4.90435'
+      PX4_HOME_ALT: '2'
     ports:
       - "14552:14550/udp"
 
