@@ -519,12 +519,27 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
     // handle_remove_ward() below falls through to the real grounded-removal
     // path (a genuine blocking MAVSDK disarm RPC against a fake autopilot
     // that never acks it), hanging until ctest's TIMEOUT kills the test.
-    bool in_air = false;
-    for (int attempt = 0; attempt < 100 && !in_air; ++attempt) {
-        in_air = manager.is_in_air("alpha-air");
-        if (!in_air) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    //
+    // A single true read is not enough: MAVSDK's cached in_air() value can
+    // flicker back to false for one cycle (a reordered/dropped
+    // EXTENDED_SYS_STATE packet over the loopback UDP link, seen in practice
+    // as this exact test intermittently hanging - more often under gcc's
+    // build than clang's, consistent with a genuine timing-sensitive race
+    // rather than a logic bug: remove_ward_impl's own is_in_air() check
+    // (ward_manager.cpp) runs moments after this loop's last read, and a
+    // flip to false in that window sends it down the real blocking-disarm
+    // path this test means to avoid entirely). Require several consecutive
+    // true reads - not just the first one - before trusting the state has
+    // actually settled.
+    constexpr int kRequiredConsecutiveTrueReads = 5;
+    int consecutive_in_air = 0;
+    for (int attempt = 0; attempt < 200 && consecutive_in_air < kRequiredConsecutiveTrueReads;
+         ++attempt) {
+        consecutive_in_air = manager.is_in_air("alpha-air") ? consecutive_in_air + 1 : 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    ASSERT_TRUE(in_air) << "fake autopilot's in-air state never reached TelemetryInfo";
+    ASSERT_GE(consecutive_in_air, kRequiredConsecutiveTrueReads)
+        << "fake autopilot's in-air state never settled true in TelemetryInfo";
 
     const auto remove_ack =
         manager.handle_remove_ward(make_remove_request("req-remove", "alpha-air"));
