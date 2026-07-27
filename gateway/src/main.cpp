@@ -349,14 +349,40 @@ int main() {
 
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     if (ward_manager->restore_and_start() == 0) {
-        // First run, nothing persisted yet: seed the same default SITL
-        // ward earlier milestones connected to, so `cmake --build && run`
-        // still works out of the box with no console/test-client needed.
-        karshipta::v1::AddWard seed;
-        seed.set_ward_id("sitl-1");
-        seed.set_connection_url("udp://:14540");
-        seed.set_ward_class(karshipta::v1::WARD_CLASS_MULTIROTOR);
-        ward_manager->handle_add_ward(seed);
+        // First run, nothing persisted yet: seed the same three SITL wards
+        // deploy/docker-compose.yml brings up, so `docker compose up` and a
+        // bare `cmake --build && run` against a manually started SITL trio
+        // both work out of the box with no console/test-client needed.
+        //
+        // mavlink_system_id must be set explicitly here, not left at the
+        // 0 ("bind to the first autopilot") default: all three connection
+        // URLs share one Mavsdk core (see WardConnection's own comment), so
+        // a second and third ward left at 0 would each just resolve to
+        // whichever system connected first, not their own SITL instance -
+        // confirmed directly by reproducing exactly that with a manually
+        // added second ward before this fix. The system ids here
+        // (1, 2, 3) must match deploy/docker-compose.yml's PX4_INSTANCE
+        // values (0, 1, 2: PX4 sets MAV_SYS_ID to px4_instance+1), and the
+        // ports (14540, 14541, 14542) must match where each instance's
+        // offboard link actually sends (14540+px4_instance).
+        struct SeedWard {
+            std::string ward_id;
+            std::string connection_url;
+            uint32_t system_id;
+        };
+        const SeedWard seeds[] = {
+            {"sitl-1", "udp://:14540", 1},
+            {"sitl-2", "udp://:14541", 2},
+            {"sitl-3", "udp://:14542", 3},
+        };
+        for (const auto& seed_ward : seeds) {
+            karshipta::v1::AddWard seed;
+            seed.set_ward_id(seed_ward.ward_id);
+            seed.set_connection_url(seed_ward.connection_url);
+            seed.set_ward_class(karshipta::v1::WARD_CLASS_MULTIROTOR);
+            seed.set_mavlink_system_id(seed_ward.system_id);
+            ward_manager->handle_add_ward(seed);
+        }
     }
     ward_manager->start_publishing();
 #endif
