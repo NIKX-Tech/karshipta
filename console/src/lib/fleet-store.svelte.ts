@@ -221,6 +221,12 @@ class FleetStore {
 
 	connectGateway(url: string): void {
 		this.disconnectGateway();
+		// disconnectGateway() just resynced fleetGroups/zoneStore from the demo
+		// engine (see its own comment); clear that back out immediately, since
+		// this new gateway's own on-connect snapshot is about to become
+		// authoritative for these three resource types instead.
+		zoneStore.teardown();
+		fleetGroups.teardown();
 		this.gatewayUrl = url;
 		if (typeof localStorage !== 'undefined') {
 			localStorage.setItem(GATEWAY_URL_STORAGE_KEY, url);
@@ -246,6 +252,9 @@ class FleetStore {
 	 */
 	connectRelay(relayUrl: string, deviceId: string, deviceToken: string): void {
 		this.disconnectGateway();
+		// See connectGateway()'s matching comment.
+		zoneStore.teardown();
+		fleetGroups.teardown();
 		this.relayUrl = relayUrl;
 		this.relayDeviceId = deviceId;
 		this.relayDeviceToken = deviceToken;
@@ -290,6 +299,18 @@ class FleetStore {
 		if (this.selectedWardId && !(this.selectedWardId in this.wards)) {
 			this.select(undefined);
 		}
+		// Unlike wards (tagged per-entity with source: 'demo' | 'gateway' and
+		// shown from both at once), Fleet/Zone/FleetMission have no such tag -
+		// they're gateway-owned config, not something meant to show a demo
+		// and a real gateway's copies merged together. A disconnect drops
+		// whatever the just-closed gateway had synced, and the demo engine
+		// (still running the whole time; only wards ever got source-filtered)
+		// becomes authoritative again, so its own data needs pushing back in
+		// - it was never re-sent after the initial start(), and nothing else
+		// would otherwise repopulate these three now-empty stores.
+		zoneStore.teardown();
+		fleetGroups.teardown();
+		this.demoEngine?.resync();
 	}
 
 	setGatewayStatus(status: 'connecting' | 'open' | 'closed'): void {

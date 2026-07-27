@@ -154,6 +154,10 @@ export interface DemoEngine extends FleetTransport {
 	 * `location` (defaults to FAKE_FLEET_CENTER); returns its id */
 	spawnWard(location?: LatLon): string;
 	despawnWard(wardId: string): void;
+	/** re-pushes every persisted Fleet/Zone/FleetMission; see the
+	 * implementation's own doc comment for why fleet-store.svelte.ts needs
+	 * this as a standalone call, not just start()'s one-time sync. */
+	resync(): void;
 }
 
 interface WardSpec {
@@ -296,8 +300,22 @@ export class FakeGateway implements DemoEngine {
 
 	start(): void {
 		if (this.timer !== undefined) return;
-		// "connect" sync: mirrors the gateway's send_fleet_zone_snapshot, so a
-		// Fleet/Zones tab reload still shows whatever was persisted last session.
+		this.resync();
+		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
+	}
+
+	/** Re-pushes every persisted Fleet/Zone/FleetMission, same as the
+	 * gateway's own send_fleet_zone_snapshot/send_fleet_mission_snapshot on
+	 * connect. start() calls this once; fleet-store.svelte.ts's
+	 * disconnectGateway() also calls it directly (independent of the timer
+	 * guard above) to restore this engine's own data after
+	 * connectGateway()/disconnectGateway() clear it from the client-side
+	 * stores - those three resource types have no per-source tag the way
+	 * wards do (fleet.proto's Fleet/Zone/FleetMission are gateway-owned
+	 * config, not something meant to show both a demo and a real gateway's
+	 * copies merged together), so a channel switch must fully swap them,
+	 * not merge. */
+	resync(): void {
 		for (const fleet of this.fleets.values()) {
 			this.onEnvelope({ payload: { $case: 'fleet', fleet } });
 		}
@@ -307,7 +325,6 @@ export class FakeGateway implements DemoEngine {
 		for (const mission of this.fleetMissions.values()) {
 			this.onEnvelope({ payload: { $case: 'fleetMission', fleetMission: mission } });
 		}
-		this.timer = setInterval(() => this.tick(), 1000 / TICK_HZ);
 	}
 
 	stop(): void {
