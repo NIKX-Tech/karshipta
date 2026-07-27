@@ -150,7 +150,7 @@
 	{:else}
 		<button
 			type="button"
-			class="self-start rounded border border-accent/60 bg-accent/15 px-2 py-1 font-mono text-xs font-medium text-accent hover:bg-accent/25"
+			class="self-start rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg"
 			onclick={startDrawing}
 		>
 			+ Draw Zone
