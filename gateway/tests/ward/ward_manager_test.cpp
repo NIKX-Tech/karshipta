@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -521,25 +522,41 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
     // that never acks it), hanging until ctest's TIMEOUT kills the test.
     //
     // A single true read is not enough: MAVSDK's cached in_air() value can
-    // flicker back to false for one cycle (a reordered/dropped
-    // EXTENDED_SYS_STATE packet over the loopback UDP link, seen in practice
+    // flicker back to false for a stretch (a reordered/dropped
+    // EXTENDED_SYS_STATE packet over the loopback UDP link, or MAVSDK's own
+    // internal dispatch lagging under a loaded CI runner), seen in practice
     // as this exact test intermittently hanging - more often under gcc's
     // build than clang's, consistent with a genuine timing-sensitive race
     // rather than a logic bug: remove_ward_impl's own is_in_air() check
     // (ward_manager.cpp) runs moments after this loop's last read, and a
     // flip to false in that window sends it down the real blocking-disarm
-    // path this test means to avoid entirely). Require several consecutive
-    // true reads - not just the first one - before trusting the state has
-    // actually settled.
-    constexpr int kRequiredConsecutiveTrueReads = 5;
-    int consecutive_in_air = 0;
-    for (int attempt = 0; attempt < 200 && consecutive_in_air < kRequiredConsecutiveTrueReads;
-         ++attempt) {
-        consecutive_in_air = manager.is_in_air("alpha-air") ? consecutive_in_air + 1 : 0;
+    // path this test means to avoid entirely. A fixed consecutive-read
+    // count (tried first, still flaked - the flicker can outlast even 5
+    // reads 50ms apart) is the wrong shape for "wait for it to settle";
+    // require it to read true continuously for a real stretch of wall-clock
+    // time instead, which stays correct regardless of how long any single
+    // flicker turns out to be. gtest_discover_tests sets a 60s TIMEOUT on
+    // every test in this suite (see CMakeLists.txt); 30s here leaves ample
+    // margin for the earlier connect-poll and the actual remove_ward call.
+    constexpr auto kRequiredStableDuration = std::chrono::milliseconds(2000);
+    constexpr auto kPollDeadline = std::chrono::seconds(30);
+    std::optional<std::chrono::steady_clock::time_point> stable_since;
+    bool settled = false;
+    const auto deadline = std::chrono::steady_clock::now() + kPollDeadline;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (manager.is_in_air("alpha-air")) {
+            const auto now = std::chrono::steady_clock::now();
+            if (!stable_since) stable_since = now;
+            if (now - *stable_since >= kRequiredStableDuration) {
+                settled = true;
+                break;
+            }
+        } else {
+            stable_since.reset();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    ASSERT_GE(consecutive_in_air, kRequiredConsecutiveTrueReads)
-        << "fake autopilot's in-air state never settled true in TelemetryInfo";
+    ASSERT_TRUE(settled) << "fake autopilot's in-air state never settled true in TelemetryInfo";
 
     const auto remove_ack =
         manager.handle_remove_ward(make_remove_request("req-remove", "alpha-air"));
