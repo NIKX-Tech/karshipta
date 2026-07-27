@@ -179,22 +179,117 @@ message ZoneAck {
   string zone_id = 4;
 }
 
-// ---------- Fleet-wide mission assignment (console -> gateway) ----------
+// ---------- Fleet mission (console -> gateway) ----------
 //
-// Deliberately simple v0 semantics (fleet-mission-model.md): one mission
-// template, uploaded as an independent copy to each selected Ward and
-// started together. No per-ward variation, no area splitting, no role
-// assignment, no cross-fleet composition - that is real multi-agent task
-// allocation, an explicitly separate, later feature.
+// A FleetMission is a trackable, persisted unit: an operator plans a
+// SEPARATE route per selected Ward (no two WardMissionPlans in one
+// FleetMission share a waypoint - sending the same route to multiple
+// wards at once puts them on a literal collision course), submits them
+// together, and can see the result as one entity: status, stop, remove,
+// edit. Replaces an earlier flat-broadcast design (one shared route fanned
+// out to every ward) that had exactly this hazard; that field number is
+// retired below, not reused.
 //
-// The template omits Mission's own mission_id/ward_id fields on purpose:
-// those are meaningless before fan-out. The gateway builds one independent
-// Mission (fresh mission_id, the recipient's ward_id) per selected ward.
-message FleetMissionAssignment {
-  string request_id = 1;
+// Still explicitly out of scope, unchanged from before (fleet-mission-model.md):
+// automatic area splitting, role assignment, or any real multi-agent task
+// allocation. Each ward's route is planned by the operator, not derived.
+
+enum WardMissionStatus {
+  WARD_MISSION_STATUS_UNSPECIFIED = 0;
+  WARD_MISSION_STATUS_UPLOADING = 1;  // upload accepted, not yet confirmed active
+  WARD_MISSION_STATUS_ACTIVE = 2;
+  WARD_MISSION_STATUS_REJECTED = 3;   // reason in message; never started
+  WARD_MISSION_STATUS_STOPPING = 4;   // stop dispatched, awaiting CommandAck
+  WARD_MISSION_STATUS_STOPPED = 5;
+}
+
+enum FleetMissionStatus {
+  FLEET_MISSION_STATUS_UNSPECIFIED = 0;
+  FLEET_MISSION_STATUS_ACTIVE = 1;    // at least one ward is UPLOADING/ACTIVE
+  FLEET_MISSION_STATUS_STOPPING = 2;  // stop requested, not every ward confirmed yet
+  FLEET_MISSION_STATUS_STOPPED = 3;   // every ward is STOPPED or REJECTED
+}
+
+// One ward's own independent route within a FleetMission.
+message WardMissionPlan {
+  string ward_id = 1;
+  repeated karshipta.v1.MissionItem items = 2;
+}
+
+// Current (not historical) per-ward status inside a FleetMission.
+message WardMissionState {
+  string ward_id = 1;
+  WardMissionStatus status = 2;
+  string message = 3;       // rejection/stop-failure reason, empty otherwise
+  string mission_id = 4;    // this ward's own Mission.mission_id, for correlating MissionProgress
+}
+
+message FleetMission {
+  string fleet_mission_id = 1;   // gateway-assigned
   string fleet_id = 2;           // empty = an ad-hoc ward selection, not tied to a saved Fleet
-  repeated string ward_ids = 3;  // the chosen subset of the fleet's wards, or the ad-hoc selection itself
-  string mission_name = 4;
-  repeated karshipta.v1.MissionItem items = 5;
-  uint32 repeat_count = 6;
+  string mission_name = 3;
+  uint32 repeat_count = 4;
+  repeated WardMissionPlan ward_plans = 5;    // one per ward; ward_ids is implicit here
+  repeated WardMissionState ward_states = 6;
+  FleetMissionStatus status = 7;
+  uint64 created_at_ms = 8;
+}
+
+message CreateFleetMission {
+  string request_id = 1;
+  string fleet_id = 2;
+  string mission_name = 3;
+  repeated WardMissionPlan ward_plans = 4;
+  uint32 repeat_count = 5;
+}
+
+enum FleetMissionAckStatus {
+  FLEET_MISSION_ACK_STATUS_UNSPECIFIED = 0;
+  FLEET_MISSION_ACK_STATUS_ACCEPTED = 1;  // the FleetMission itself was created/updated; per-ward outcomes are in ward_states
+  FLEET_MISSION_ACK_STATUS_REJECTED = 2;  // reason in message
+}
+
+// Answers Create/Stop/Remove/UpdateFleetMissionRoutes, correlated by
+// request_id. fleet_mission_id mirrors FleetAck.fleet_id: how a
+// non-requesting client learns which entity a broadcast ack refers to.
+message FleetMissionAck {
+  string request_id = 1;
+  string fleet_mission_id = 2;
+  FleetMissionAckStatus status = 3;
+  string message = 4;
+}
+
+enum FleetMissionStopAction {
+  FLEET_MISSION_STOP_ACTION_UNSPECIFIED = 0;  // gateway treats as RTL
+  FLEET_MISSION_STOP_ACTION_RTL = 1;
+  FLEET_MISSION_STOP_ACTION_HOLD = 2;
+  FLEET_MISSION_STOP_ACTION_LAND = 3;
+}
+
+message StopFleetMission {
+  string request_id = 1;
+  string fleet_mission_id = 2;
+  FleetMissionStopAction action = 3;
+}
+
+// The gateway rejects unless every ward_state is STOPPED or REJECTED -
+// removing the record never touches a ward's connection or flight state,
+// only tracking rows, so this only checks already-persisted status, not
+// live telemetry (that check already happened inside StopFleetMission).
+message RemoveFleetMission {
+  string request_id = 1;
+  string fleet_mission_id = 2;
+}
+
+// Re-plans routes for an existing FleetMission ("Edit"). Submitting
+// re-plans AND re-dispatches (not just saves a draft). Gateway rejects
+// unless every ward_state is STOPPED/REJECTED, same gate as
+// RemoveFleetMission - never let a route change land under an active
+// mission, the exact hazard this whole message family exists to remove.
+message UpdateFleetMissionRoutes {
+  string request_id = 1;
+  string fleet_mission_id = 2;
+  string mission_name = 3;
+  repeated WardMissionPlan ward_plans = 4;
+  uint32 repeat_count = 5;
 }
