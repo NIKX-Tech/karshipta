@@ -139,6 +139,11 @@ services:
         # value is read by the operator's browser on the host, never by
         # anything inside the container network.
         PUBLIC_GATEWAY_WS_URL: ws://localhost:8765
+        # Optional: an OpenAIP API key (free signup at openaip.net) turns on
+        # the airspace layer (docs/console-ux.md). Passed through from the
+        # host shell/.env, defaulting to empty - unset means the layer stays
+        # off, same silent-by-design behavior as `npm run dev` with no key.
+        PUBLIC_OPENAIP_KEY: ${PUBLIC_OPENAIP_KEY:-}
     <<: *log-limits
     ports:
       - "5173:80"

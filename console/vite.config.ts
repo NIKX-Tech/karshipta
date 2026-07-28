@@ -1,9 +1,19 @@
+import { readFileSync } from 'node:fs';
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+// Surfaced in the About dialog (about-dialog.svelte); read once at build
+// time since there's no server left at runtime to ask package.json for it
+// (same reasoning as PUBLIC_OPENAIP_KEY/PUBLIC_GATEWAY_WS_URL in the
+// Dockerfile - a static build has nothing to read a file from later).
+const { version: appVersion } = JSON.parse(readFileSync('./package.json', 'utf-8'));
+
 export default defineConfig({
+	define: {
+		__APP_VERSION__: JSON.stringify(appVersion)
+	},
 	plugins: [
 		tailwindcss(),
 		sveltekit({
