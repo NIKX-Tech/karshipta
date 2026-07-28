@@ -111,7 +111,15 @@ public:
                 telemetry_server_.publish_extended_sys_state(
                     mavsdk::TelemetryServer::VtolState::Undefined,
                     mavsdk::TelemetryServer::LandedState::InAir);
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // 10ms, not 50ms: a shorter gap between publishes means less
+                // time for a dropped/reordered UDP packet or CI-runner
+                // scheduling jitter to leave MAVSDK's cached in_air() reading
+                // stale, directly shrinking the window
+                // HandleRemoveWardRejectsWhileAirborne's own poll below is
+                // racing against (see its comment - this test has flaked in
+                // CI three times despite two rounds of widening that poll's
+                // own margin, gcc specifically).
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         });
     }
@@ -535,11 +543,18 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
     // reads 50ms apart) is the wrong shape for "wait for it to settle";
     // require it to read true continuously for a real stretch of wall-clock
     // time instead, which stays correct regardless of how long any single
-    // flicker turns out to be. gtest_discover_tests sets a 60s TIMEOUT on
-    // every test in this suite (see CMakeLists.txt); 30s here leaves ample
-    // margin for the earlier connect-poll and the actual remove_ward call.
-    constexpr auto kRequiredStableDuration = std::chrono::milliseconds(2000);
-    constexpr auto kPollDeadline = std::chrono::seconds(30);
+    // flicker turns out to be.
+    //
+    // 2s stable / 30s deadline (the first version of this fix) still
+    // flaked once more in CI after landing; widened further and paired
+    // with FakeInAirAutopilot's own publish interval dropping from 50ms to
+    // 10ms above (less time for any single gap to matter). CMakeLists.txt's
+    // gtest_discover_tests TIMEOUT also moved from 60s to 90s (suite-wide -
+    // gtest_discover_tests has no clean way to set a per-test override
+    // before discovery runs) so this poll's own budget isn't competing
+    // with the ctest-level kill switch for the same seconds.
+    constexpr auto kRequiredStableDuration = std::chrono::milliseconds(4000);
+    constexpr auto kPollDeadline = std::chrono::seconds(60);
     std::optional<std::chrono::steady_clock::time_point> stable_since;
     bool settled = false;
     const auto deadline = std::chrono::steady_clock::now() + kPollDeadline;
