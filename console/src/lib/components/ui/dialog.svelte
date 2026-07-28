@@ -92,7 +92,7 @@
 		role={variant}
 		aria-modal="true"
 		aria-label={label}
-		class="w-80 rounded border border-edge bg-panel p-4"
+		class="w-100 rounded border border-edge bg-panel p-4"
 	>
 		{@render children()}
 	</div>

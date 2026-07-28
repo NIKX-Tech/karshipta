@@ -265,7 +265,7 @@ explicit WardMission(WardConnection& connection);
   counterparts. Fast MAVSDK calls (no data transfer) fired directly by
   `CommandExecutor`'s own worker thread, which then waits for the result
   itself (`command_executor.cpp`'s `wait_for_mission_result()`) rather than
-  blocking inside this class's call — only `enqueue_upload()`/
+  blocking inside this class's call - only `enqueue_upload()`/
   `enqueue_download()` go through this class's own queue.
 - **The async callback must not assume anything about the caller's
   lifetime.** It can run on a MAVSDK-internal thread after the caller has
