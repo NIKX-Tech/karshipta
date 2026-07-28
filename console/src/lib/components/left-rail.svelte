@@ -9,6 +9,7 @@
 	import ConnectionPanel from '$lib/components/connection-panel.svelte';
 	import Tabs, { type TabItem } from '$lib/components/ui/tabs.svelte';
 	import Disclosure from '$lib/components/ui/disclosure.svelte';
+	import AboutDialog from '$lib/components/about-dialog.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -16,6 +17,8 @@
 	}
 
 	const { fleetLabel, onstartdemoplacement }: Props = $props();
+
+	let aboutOpen = $state(false);
 
 	// Gateway first: it's the prerequisite for anything else here to show
 	// real (non-demo) data, not just another content tab - the empty
@@ -165,6 +168,31 @@
 				{/if}
 			{/snippet}
 		</Tabs>
+
+		<div class="flex-1"></div>
+		<button
+			type="button"
+			class="flex h-7 w-7 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
+			aria-label="About Karshipta"
+			title="About Karshipta"
+			onclick={() => (aboutOpen = true)}
+		>
+			<svg
+				width="16"
+				height="16"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<circle cx="12" cy="12" r="9" />
+				<line x1="12" y1="11" x2="12" y2="16.5" />
+				<circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none" />
+			</svg>
+		</button>
 	</div>
 
 	{#if !leftRailUi.collapsed}
@@ -319,3 +347,7 @@
 		</aside>
 	{/if}
 </div>
+
+{#if aboutOpen}
+	<AboutDialog onclose={() => (aboutOpen = false)} />
+{/if}
