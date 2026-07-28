@@ -155,7 +155,7 @@ docker run --rm -it -p 14550:14550/udp -p 14540:14540/udp px4io/px4-sitl:latest
 This class is exercised today through the normal `CommandExecutor`/
 `WardManager` path (see `docs/quickstart.md`); the transcript below predates
 that wiring and was captured with a small standalone harness linked against
-the `ward` library instead: connect, `TelemetryInfo::check_drone_health()`,
+the `ward` library instead: connect, `TelemetryInfo::is_health_ok()`,
 then `arm()` / `takeoff()` / (wait for `check_current_takeoff_process(2.5f)`)
 / `land()` / `landing_state()`, called directly with no `CommandExecutor` in
 between. Kept as-is since it still proves this class's own MAVSDK calls work

@@ -14,7 +14,9 @@
 		<img src={logoMark} alt="" class="h-5 w-auto" aria-hidden="true" />
 		<h3 class="font-display text-sm font-semibold">Karshipta</h3>
 	</div>
-	<p class="mt-1 font-mono text-[11px] text-fg-muted tabular-nums">console v{__APP_VERSION__}</p>
+	<p class="mt-1 font-mono text-[11px] text-fg-muted tabular-nums">
+		v{__PRODUCT_VERSION__} &middot; console v{__APP_VERSION__}
+	</p>
 
 	<p class="mt-3 text-xs text-fg-muted">
 		Open-source, self-hosted command and control for unmanned vehicle and tracker fleets - from

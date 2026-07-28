@@ -7,7 +7,7 @@
 
 ## What Karshipta is
 
-An open-source, self-hosted, web-based command and control platform for fleets of drones and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from a browser. The flagship demo: `docker compose up` starts 3 PX4 SITL wards plus the gateway plus the web console, and you watch a simulated fleet fly missions in your browser within 60 seconds.
+An open-source, self-hosted, web-based command and control platform for fleets of unmanned vehicles and trackers. Users connect real or simulated wards (PX4/ArduPilot over MAVLink, or non-MAVLink trackers via Herald) and monitor and task them from a browser. The flagship demo: `docker compose up` starts 3 PX4 SITL wards plus the gateway plus the web console, and you watch a simulated fleet fly missions in your browser within 60 seconds.
 
 The gateway is the heart of the system and it is yours.
 
@@ -61,8 +61,8 @@ Accept a [Herald](https://github.com/NIKX-Tech/herald) message over `POST /heral
 **M8: Relay transport, verified end to end (github issue #34).**
 The second `Transport` implementation `M4` scoped (self-hosted, E2E-encrypted device pairing and relay via [relayly](https://github.com/NIKX-Tech/relayly)) is built and verified against a real relayly server, a real gateway, and a real console: pairing, the Noise XX handshake, telemetry, and command round trips all confirmed over the relay, not just unit-tested. See `gateway/docs/relay-transport.md`.
 
-**M9: Fleet, Zone, and fleet-level mission assignment (github issues #84-89).**
-Named, persistent Wards groupings (Fleet) and operator-drawn keep-in/keep-out polygons (Zone), each with gateway-owned SQLite persistence (`FleetZoneStore`) and wire-level CRUD (`FleetManager`), plus `FleetMissionAssignment` to fan one mission out to a chosen subset of a Fleet's Wards as independent per-ward uploads. Design record: `docs/fleet-mission-model.md`. Reference docs: `gateway/docs/fleet-manager.md`.
+**M9: Fleet, Zone, and Fleet Mission (github issues #84-89).**
+Named, persistent Wards groupings (Fleet) and operator-drawn keep-in/keep-out polygons (Zone), each with gateway-owned SQLite persistence (`FleetZoneStore`) and wire-level CRUD (`FleetManager`), plus a Fleet Mission system (`FleetMissionStore`, `CreateFleetMission`/`StopFleetMission`/`RemoveFleetMission`/`UpdateFleetMissionRoutes`) giving each selected Ward its own independently-planned route rather than one shared route fanned out to all of them - the original draft did the latter, replaced before this milestone shipped for a real collision-hazard reason. Design record: `docs/fleet-mission-model.md`. Reference docs: `gateway/docs/fleet-manager.md`.
 
 **M10: Concurrency and crash-safety hardening (audit-driven, github issues #49, #67, #69, #71, #73-76).**
 A ward-manager concurrency audit and a follow-up Fleet/Zone audit each produced a batch of fixes: two-level locking replacing a single fleet-wide mutex (closing a slow-teardown-blocks-everything gap), `steady_clock`-scheduled telemetry publishing, per-tick `protobuf::Arena` allocation, atomic config writes, WebSocket outbound-backlog capping, and, for Fleet/Zone, a store-wide mutex plus a SQL transaction around `create_zone`'s multi-statement insert, and exception-to-ack conversion so a store failure rejects one request instead of crashing the gateway process.

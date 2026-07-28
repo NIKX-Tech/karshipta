@@ -4,7 +4,7 @@
 
 # Karshipta
 
-**Open-source, self-hosted command and control for unmanned vehicle and tracker fleets. In your browser.**
+**Open-source, self-hosted command and control for fleets of unmanned vehicles and trackers. In your browser.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/NIKX-Tech/karshipta/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/NIKX-Tech/karshipta/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/NIKX-Tech/karshipta?style=flat-square&color=blue)](https://www.gnu.org/licenses/agpl-3.0)
@@ -25,7 +25,7 @@ Uncomment as they go live:
 [![Sponsor GitHub](https://img.shields.io/badge/sponsor-GitHub-EA4AAA?style=flat-square&logo=github-sponsors)](https://github.com/sponsors/NIKX-Tech)
 -->
 
-Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and gives you a live web console to monitor and task the whole fleet: map, telemetry, commands, missions. A ward is any tracked, controlled unit: a flight vehicle today, and any other MAVLink-speaking tracked entity (a livestock tag, a generic tracker) tomorrow. Self-hosted, no cloud dependency, one binary protobuf contract end to end.
+Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and gives you a live web console to organize, monitor, and task the whole fleet: map, telemetry, commands, missions, geofenced zones. A ward is any tracked, controlled unit — flight (multirotor, fixed-wing, VTOL, helicopter), ground, underwater, surface vessel — plus trackers with no autopilot at all (livestock GPS tags, generic trackers), ingested over HTTP instead of MAVLink. Group wards into Fleets, draw keep-in/keep-out Zones, and dispatch a Fleet Mission where every ward flies its own independently-planned route, not one shared route broadcast to everyone. Self-hosted, no cloud dependency, one binary protobuf contract end to end.
 
 > Named after Karshipta, the Avestan bird said to be the chief of all birds, the messenger that kept an isolated refuge connected to the outside world.
 
@@ -37,15 +37,15 @@ Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and 
 
 ## Status
 
-Early development, pre-release. The roadmap to v0.1 is in [ROADMAP.md](ROADMAP.md). Star the repo to follow the launch.
+**v0.1.0 — first public release.** [ROADMAP.md](ROADMAP.md) covers what shipped and what's next.
 
 | Component | State |
 |---|---|
-| `proto/` protobuf contract | ✅ v1 schema defined |
-| `console/` web dashboard | ✅ map, commands, missions, simulated fleet; demo GIF and a fresh-eyes quickstart pass still open (C6, [#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)) |
-| `gateway/` MAVLink edge service | ✅ connect, telemetry, commands, multi-ward, relay transport, missions, Docker demo (M1 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md)) |
-| `deploy/` one-command demo | ✅ SITL + gateway + console all wired up (M6, C6) |
-| Prebuilt gateway binaries | ✅ macOS (arm64), Linux, Windows, published to [GitHub Releases](https://github.com/NIKX-Tech/karshipta/releases) on each tagged release |
+| `proto/` protobuf contract | `karshipta.v1` schema, the single source of truth for the wire format |
+| `gateway/` MAVLink + Herald edge service | connectivity, telemetry, commands, missions, multi-ward, Fleet/Zone/Fleet-Mission persistence, Herald ingestion (native, vendor-mapped, GT06), relay transport, concurrency-hardened — M1 to M10 in [gateway/BRIEF.md](gateway/BRIEF.md) |
+| `console/` web dashboard | map, commands, missions, Fleet and Zone management, per-ward Fleet Missions, airspace overlay, simulated fleet, published as an embeddable npm package — C1 to C8 in [ROADMAP.md](ROADMAP.md); a demo GIF and a fresh-eyes quickstart pass are still open ([#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)), not blocking this release |
+| `deploy/` one-command demo | SITL + gateway + console all wired up |
+| Prebuilt gateway binaries | macOS (arm64), Linux, Windows, published to [GitHub Releases](https://github.com/NIKX-Tech/karshipta/releases) on each tagged release |
 
 ## Try the console
 
@@ -83,6 +83,29 @@ from [openaip.net](https://www.openaip.net/): put `PUBLIC_OPENAIP_KEY=<your
 key>` in `deploy/.env` (Compose only auto-loads a `.env` file from the same
 directory as the compose file passed to `-f`, not the directory you run the
 command from). Without it the map works the same, just without that layer.
+
+## Fleets, Zones, and Missions
+
+A **Fleet** is a named, persistent group of wards — a ward can belong to
+more than one. A **Zone** is a named keep-in or keep-out polygon, drawn on
+the map, checked against mission waypoints before you dispatch. A **Fleet
+Mission** assigns a route to a Fleet or an ad-hoc set of wards, but not the
+same route to everyone: each ward gets its own independently-planned path,
+tracked through upload, active flight, and stop, both per-ward and as one
+aggregate status on its own card. Stopping one falls back to RTL by
+default, with Hold-in-place or Land available per ward; removing or editing
+a Fleet Mission is safety-gated until every ward it touched has actually
+stopped. See [docs/fleet-mission-model.md](docs/fleet-mission-model.md) for
+the full design and [docs/console-ux.md](docs/console-ux.md) for the
+console layout.
+
+## Building on Karshipta (SDK)
+
+Two ways to build against Karshipta instead of just running the console
+as-is: embed its own UI pieces via the published
+`@nikx-tech/karshipta-console-core` npm package, or talk to the gateway
+directly over its WebSocket wire protocol from any language that can decode
+protobuf. See [docs/sdk.md](docs/sdk.md) for both.
 
 ## Architecture
 
@@ -144,7 +167,7 @@ See [docs/architecture.md](docs/architecture.md) for the full breakdown.
 
 ## Contributing
 
-Contributions are welcome; the surface is kept deliberately small until the v0.1 launch. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the branching model (`dev` for integration, `main` for releases), the ground rules, and local setup. All contributors sign the lightweight CLA in [CLA.md](CLA.md).
+Contributions are welcome; the surface is kept deliberately small. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the branching model (`dev` for integration, `main` for releases), the ground rules, and local setup. All contributors sign the lightweight CLA in [CLA.md](CLA.md).
 
 ## Safety disclaimer
 

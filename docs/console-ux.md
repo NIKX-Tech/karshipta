@@ -33,7 +33,7 @@ rail itself.
 - **Map (center)**: fills all remaining space. Markers are amber arrows rotating with heading; labels stay upright. Heading applies to any moving ward, not just flight ones. Goto targeting, mission-waypoint placement, and zone-vertex placement all arm a crosshair, mutually exclusive with each other (zone drawing takes priority over every other click-driven tool). An empty-state overlay with the three onboarding actions renders here when the fleet is empty, except while a zone is being drawn (drawing a safety zone doesn't require any ward to exist first).
 - **Right panel**: an icon rail (Ward / Mission / Zones) stays reachable regardless of whether a ward is selected. Starts collapsed; selecting a ward auto-expands to the Ward tab. A small always-visible status strip (id, mode, armed, link, battery) sits above the tabs whenever a ward is selected, regardless of which tab is active, so critical status is never hidden behind Mission or Zones.
   - **Ward tab**: full telemetry of the selected ward, then the command dock, then command trackers, then the mission panel. The command dock and mission panel only render for a ward with a `flight` state; a non-flight ward (e.g. a tag) shows telemetry only.
-  - **Mission tab**: pick a Fleet or an ad-hoc set of individual wards, plan a route by clicking the map, assign. See "Fleet-level missions" in `fleet-mission-model.md`.
+  - **Mission tab**: defaults to a list of existing Fleet Missions as status cards; "Add Mission" opens a two-step wizard (pick a Fleet or ad-hoc wards, then plan a separate route per ward). See "Fleet Mission" in `fleet-mission-model.md`.
   - **Zones tab**: draw, list, and edit keep-in/keep-out safety polygons. See "Zones" below.
 - **Events (overlay, bottom right of map)**: fleet-wide feed with severity dots and mono timestamps.
 
@@ -42,7 +42,7 @@ rail itself.
 | Milestone | Slot |
 |---|---|
 | Fleet grouping (shipped) | left rail, next to the ward list it groups |
-| Mission assignment (shipped) | right panel MISSION tab; waypoints draw on the map as a dashed blue route with numbered points |
+| Fleet Mission (shipped) | right panel MISSION tab; list of mission cards by default, wizard on "Add Mission"; each selected ward's own route draws as its own numbered dashed line, distinctly colored per ward |
 | Zones (shipped) | right panel ZONES tab; saved zones and the in-progress draft each get their own map source/layer, distinct from the read-only airspace layer |
 | Telemetry charts / log review (v0.2) | bottom drawer under the map, collapsed by default |
 | Video feeds (later) | Ward tab top, above telemetry |
@@ -73,16 +73,30 @@ membership can shrink as well as grow) with a checkbox per ward. The
 popover overlays the row instead of swapping the ward-card list in place,
 which used to shift every row below it as the section's height changed.
 
-## Fleet-wide mission assignment
+## Fleet Mission
 
-The right panel's Mission tab: pick an existing Fleet (radio) or check off
-individual wards ad hoc - the two are mutually exclusive, picking one
-clears the other. "Plan route" arms the same click-to-add-waypoint flow a
-solo mission uses, drawn on the same dashed-route map layer (mutually
-exclusive with a solo ward's own draft). "Assign" sends one
-`FleetMissionAssignment`; the gateway fans it out as an independent
-upload-plus-start per ward, the console never loops per-ward uploads
-itself.
+The right panel's Mission tab defaults to a list of existing Fleet
+Missions as status cards, not a picker - each card shows aggregate and
+per-ward status, with a kebab menu for Stop / Remove / Edit. An "Add
+Mission" button (the same accent-colored primary treatment as "+ Add
+Ward"/"+ New Fleet") opens a two-step wizard:
+
+1. Pick an existing Fleet (radio) or check off individual wards ad hoc -
+   the two are mutually exclusive, picking one clears the other.
+2. Plan a *separate* route per selected ward: a ward switcher drives which
+   one the map's click-to-add-waypoint flow is currently editing, drawn as
+   its own numbered dashed line, distinctly colored per ward, on the same
+   route map layer a solo mission uses (mutually exclusive with a solo
+   ward's own draft).
+
+Submitting sends `CreateFleetMission` (or `UpdateFleetMissionRoutes` when
+editing an existing one), one `WardMissionPlan` per ward - the gateway
+dispatches each ward's own independent upload-plus-start; the console
+never assumes wards share a route, only that they were submitted together.
+Stopping a mission offers RTL (default), Hold-in-place, or Land per ward;
+Remove and Edit are disabled until every ward in the mission has actually
+stopped. See "Fleet Mission" in `fleet-mission-model.md` for the full
+design and the safety reasoning behind per-ward routes.
 
 ## Zones
 
