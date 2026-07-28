@@ -50,8 +50,8 @@ own manager.
 
 ## Two release artifacts, one codebase
 
-`karshipta-gateway` (drones, MAVLink) and `karshipta-herald` (generic tags/GPS
-devices via this Herald path, no MAVLink) are two separate, fixed products
+`karshipta-gateway` (MAVLink flight vehicles) and `karshipta-herald` (generic
+tags/GPS devices via this Herald path, no MAVLink) are two separate, fixed products
 built from this same repo - not a runtime toggle either exposes, a
 build-time CMake option (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK`, default `ON`,
 see the root `CMakeLists.txt`) used only when producing the two artifacts.

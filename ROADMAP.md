@@ -4,12 +4,14 @@
 
 Everything a single operator needs to fly their own fleet safely on their own infrastructure is open source and free, forever: connectivity, live telemetry, commands, missions, airspace awareness, the demo environment. A commercial hosted edition (by NIKX Technologies B.V.) will cover what goes beyond that: hosting operated for you, sharing fleets beyond your team, organizational scale, compliance, and managed data services. Features never move from the open side to the commercial side.
 
-## v0.1 (first public release)
+## v0.1.0 (first public release)
 
-- Gateway: multi-ward MAVLink connectivity via MAVSDK (PX4 SITL), telemetry at 2 to 10 Hz, commands (arm, disarm, takeoff, land, RTL, goto), mission upload and progress. Milestones M1 to M6 in [gateway/BRIEF.md](gateway/BRIEF.md).
-- Console: milestones C1 to C6 below.
-- One-command demo: docker compose with 3 PX4 SITL wards.
-- Optional E2E-encrypted relay transport for remote operations.
+Everything needed to run a fleet end to end, on your own infrastructure:
+
+- **Gateway**: multi-ward MAVLink connectivity via MAVSDK (PX4, ArduPilot SITL), telemetry at 2 to 10 Hz, commands (arm, disarm, takeoff, land, RTL, goto), mission upload/start/pause/progress, Herald ingestion for trackers with no autopilot (native, vendor-mapped, GT06), optional E2E-encrypted relay transport for remote operations. Milestones M1 to M10 in [gateway/BRIEF.md](gateway/BRIEF.md).
+- **Fleet, Zone, and Fleet Mission**: named ward groups, advisory keep-in/keep-out geofencing, per-ward independently-routed missions with a trackable lifecycle. See below.
+- **Console**: full ward directory and telemetry, command panel, mission planning, Fleet/Zone management, worldwide airspace overlay, published as an embeddable npm package. Milestones C1 to C8 below.
+- **One-command demo**: docker compose with 3 PX4 SITL wards, gateway, and console all wired up.
 
 ### Console milestones
 
@@ -20,17 +22,35 @@ Everything a single operator needs to fly their own fleet safely on their own in
 | C3 | Missions: click-to-plan waypoints, upload, start/pause, looping, live progress (pairs with gateway M5) | done |
 | C4 | Live gateway: verified against the real gateway as M2 to M4 land; reconnect UX, link states, multi-ward, read-only viewer mode | done |
 | C5 | Airspace layer: worldwide geo-zones (OpenAIP) on the map, goto/waypoint warnings | done |
-| C6 | Demo polish: console Dockerfile, compose service, demo GIF | in progress: Dockerfile and compose service done; demo GIF and a human-verified quickstart pass still open (#22, #32) |
+| C6 | Demo polish: console Dockerfile, compose service, demo GIF | Dockerfile and compose service done; a demo GIF and a fresh-eyes quickstart pass ([#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)) are tracked as post-release polish, not a v0.1.0 blocker |
 | C7 | Onboarding and ward management: empty-state console, add demo/simulated/real wards from the UI, gateway connection panel (pairs with gateway M4) | done |
 | C8 | console-core packaging: the console's lib published as a reusable npm package | done |
 
 ### Ward rename
 
-Renamed the core entity from Vehicle to Ward across proto, gateway, and console, and generalized it to represent non-flight tracked entities (livestock GPS tags, generic trackers) alongside flight vehicles. Landed as one combined PR before v0.1's first public release, since it changed the wire vocabulary and was much cheaper to do before release than after. See `docs/glossary.md` for the current vocabulary.
+Renamed the core entity from Vehicle to Ward across proto, gateway, and console, and generalized it to represent non-flight tracked entities (livestock GPS tags, generic trackers) alongside flight vehicles. Landed as one combined PR before v0.1.0's first public release, since it changed the wire vocabulary and was much cheaper to do before release than after. See `docs/glossary.md` for the current vocabulary.
 
-### Fleet, Zone, and mission assignment
+### Fleet, Zone, and Fleet Mission
 
-New Fleet and Zone entities (named, persistent, shared objects, not live telemetry), a deliberately simple FleetMissionAssignment (one mission template applied to a chosen subset of a Fleet's Wards or an ad-hoc ward selection, no per-ward variation, no multi-agent task allocation), a narrow SQLite persistence layer in the gateway for just Fleet and Zone, and a collapsible icon-rail console UI on both edges: Fleet management in the left rail (alongside ward directory navigation), Ward / Mission / Zones tabs in the right rail. Organization/multi-tenancy stays out of this repo entirely, Enterprise-only. See [docs/fleet-mission-model.md](docs/fleet-mission-model.md) for the full design.
+New Fleet and Zone entities (named, persistent, shared objects, not live telemetry) and a Fleet Mission system, with a narrow SQLite persistence layer in the gateway for all three, and a collapsible icon-rail console UI on both edges: Fleet management in the left rail (alongside ward directory navigation), Ward / Mission / Zones tabs in the right rail.
+
+The mission design changed once before release, for a real reason. The
+original draft applied one shared mission template to a chosen subset of a
+Fleet's wards or an ad-hoc selection, uploaded as independent copies that
+all started together — every ward flying the identical route at the
+identical time, simultaneously, is a genuine collision hazard, not a
+simplification worth keeping. It was replaced before v0.1.0 shipped, not
+after. Today, a Fleet Mission gives each selected ward its own
+independently-planned route, submitted together as one trackable unit:
+a list of mission cards, each showing per-ward and aggregate status through
+upload, active flight, and stop, not a fire-and-forget broadcast. Stopping
+a mission defaults to RTL, with Hold-in-place or Land available per ward;
+removing or editing a Fleet Mission is safety-gated until every ward it
+touched has actually stopped. See
+[docs/fleet-mission-model.md](docs/fleet-mission-model.md) for the full
+design, including why it changed.
+
+Organization/multi-tenancy stays out of this repo entirely, Enterprise-only.
 
 ## v0.2
 

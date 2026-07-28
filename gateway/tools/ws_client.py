@@ -2,7 +2,7 @@
 """Tiny verification client for the gateway WebSocket transport (BRIEF M2).
 
 Connects to the gateway, decodes each binary Envelope frame, and prints
-VehicleInfo and VehicleState lines. Not part of any build; a hand tool for
+WardInfo and WardState lines. Not part of any build; a hand tool for
 checking the wire without starting the console.
 
 Setup (once):
@@ -38,16 +38,20 @@ async def main(url: str) -> None:
             envelope = envelope_pb2.Envelope()
             envelope.ParseFromString(frame)
             kind = envelope.WhichOneof("payload")
-            if kind == "vehicle_info":
-                info = envelope.vehicle_info
-                print(f"info  {info.vehicle_id}: {info.autopilot} sysid={info.mavlink_system_id}")
-            elif kind == "vehicle_state":
-                state = envelope.vehicle_state
+            if kind == "ward_info":
+                info = envelope.ward_info
+                print(f"info  {info.ward_id}: {info.autopilot} sysid={info.mavlink_system_id}")
+            elif kind == "ward_state":
+                state = envelope.ward_state
                 position = state.position
+                # flight is unset for non-flight wards (e.g. a Herald-ingested
+                # livestock tag), so armed/in_air only make sense to print
+                # when it's actually present.
+                armed = state.flight.armed if state.HasField("flight") else "n/a"
                 print(
-                    f"state {state.vehicle_id}: alt={position.altitude_rel_m:.1f}m "
+                    f"state {state.ward_id}: alt={position.altitude_rel_m:.1f}m "
                     f"lat={position.latitude_deg:.6f} lon={position.longitude_deg:.6f} "
-                    f"battery={state.battery.remaining_pct:.0f}% armed={state.armed}"
+                    f"battery={state.battery.remaining_pct:.0f}% armed={armed}"
                 )
             else:
                 print(f"{kind}: {len(frame)} bytes")

@@ -10,9 +10,17 @@ import { defineConfig } from 'vite';
 // Dockerfile - a static build has nothing to read a file from later).
 const { version: appVersion } = JSON.parse(readFileSync('./package.json', 'utf-8'));
 
+// The whole product's own release version, distinct from __APP_VERSION__
+// above (console-core's own independent npm package version - the two
+// track different things and can drift, see ../CHANGELOG.md). A plain-text
+// file at the repo root, not derived from a git tag at build time: kept
+// simple, bumped by hand alongside each release tag.
+const productVersion = readFileSync('../VERSION', 'utf-8').trim();
+
 export default defineConfig({
 	define: {
-		__APP_VERSION__: JSON.stringify(appVersion)
+		__APP_VERSION__: JSON.stringify(appVersion),
+		__PRODUCT_VERSION__: JSON.stringify(productVersion)
 	},
 	plugins: [
 		tailwindcss(),
