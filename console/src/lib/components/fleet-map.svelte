@@ -77,6 +77,16 @@
 	// landing on the map is immediately losing your bearings.
 	const INITIAL_ZOOM = 12;
 
+	// Below this, don't fetch airspace data at all - airspace boundaries
+	// (FIRs, TMAs, prohibited zones) are country/region-scale shapes, not
+	// meaningful at a world- or continent-level view, and every fetch below
+	// this zoom would just be hitting openaip.ts's 5-degree bbox clamp
+	// repeatedly for no visual benefit. 7 is roughly "a country fills the
+	// screen" - well above "the whole continent" (where clamping would
+	// otherwise fire on almost every pan) and well below the fleet's own
+	// working zoom (INITIAL_ZOOM=12), so this never affects normal use.
+	const MIN_GEOZONE_ZOOM = 7;
+
 	// All free, no API key: CARTO for dark/light - the same pair the rest of
 	// the UI's own theme.css tokens use, so the map follows the app-wide
 	// theme toggle (themeStore) rather than exposing a second, independent
@@ -123,7 +133,12 @@
 		satellite ? SATELLITE_TILES : themeStore.current === 'light' ? LIGHT_TILES : DARK_TILES
 	);
 
-	let showGeozones = $state(true);
+	// Off by default: an operator who configures PUBLIC_OPENAIP_KEY opts
+	// into the layer existing at all, but seeing it on every load regardless
+	// wasn't the intent - matches "Zones" (showZones) already defaulting to
+	// on being the operator's OWN drawn geometry, a different trust level
+	// than a third-party overlay.
+	let showGeozones = $state(false);
 	let showZones = $state(true);
 	let layersMenuOpen = $state(false);
 	let layersMenuEl: HTMLDivElement | undefined;
@@ -460,7 +475,13 @@
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
 		});
+		// Safe to call unconditionally on every moveend: geozoneStore.requestViewport()
+		// itself no-ops while inactive (no key configured) or not visible
+		// (the "No-fly zones" checkbox, see the setVisible() effect below) -
+		// this function only adds the zoom-level check on top, since the
+		// store has no opinion on zoom, only on bbox size.
 		const requestGeozones = () => {
+			if (created.getZoom() < MIN_GEOZONE_ZOOM) return;
 			const bounds = created.getBounds();
 			const viewport: ViewportBounds = [
 				bounds.getWest(),
@@ -747,10 +768,22 @@
 		);
 	});
 
-	// no-fly-zone layer visibility, independent of whether zones are loaded
-	// at all (geozoneStore.active, gated on the control below even
-	// existing) - a viewer who doesn't want the clutter can turn it off
-	// without losing the underlying data/fetches
+	// Tells the store itself whether fetching should be happening at all,
+	// not just whether the map layer is painted - geozoneStore.requestViewport()
+	// and its own failure-retry loop both gate on this internally now.
+	// Previously this effect only ever touched the map layer's CSS
+	// visibility, so unchecking "No-fly zones" hid already-fetched data but
+	// left requestGeozones() (called on every moveend, unconditionally)
+	// still firing real network requests in the background indefinitely -
+	// a real bug, not a feature: burning through OpenAIP's rate limit even
+	// with the layer explicitly turned off.
+	$effect(() => {
+		geozoneStore.setVisible(showGeozones);
+	});
+
+	// no-fly-zone layer's own paint visibility, independent of whether
+	// zones are loaded at all (geozoneStore.active, gated on the control
+	// below even existing)
 	$effect(() => {
 		const activeMap = map;
 		const visible = showGeozones;
@@ -1251,6 +1284,21 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
+	{#if geozoneStore.active && geozoneStore.loadError}
+		<!-- Reassuring, not alarming: this is almost always OpenAIP's own
+		     rate limit (see geozone-store.svelte.ts), which clears on its own
+		     within FAILURE_COOLDOWN_MS - not a real, ongoing failure the
+		     operator needs to act on. The raw error still goes to
+		     console.error and sits in the title attribute for anyone who
+		     wants it. -->
+		<p
+			role="status"
+			title={geozoneStore.loadError}
+			class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2 rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
+		>
+			Loading airspace data - this can take a few seconds.
+		</p>
+	{/if}
 
 	<!--
 		Bottom-right, stacked directly above MapLibre's own NavigationControl
@@ -1361,43 +1409,49 @@
 		</div>
 	</div>
 
-	{#if zoneStore.zoneIds.length > 0 && showZones}
-		<ul
-			class="absolute left-[10px] flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1 {geozoneStore.active &&
-			showGeozones
-				? 'bottom-16'
-				: 'bottom-8'}"
-			aria-label="Zone legend"
+	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones)}
+		{@const showZoneRow = zoneStore.zoneIds.length > 0 && showZones}
+		{@const showGeozoneRow = geozoneStore.active && showGeozones}
+		<!-- One panel, not two separately-floating boxes: they used to sit at
+		     different bottom offsets that had to be kept in sync by hand, and
+		     read as visually disconnected even when both were showing. -->
+		<div
+			class="absolute bottom-8 left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5"
 		>
-			<li class="flex items-center gap-1 text-[10px]">
-				<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_IN_COLOR}"></span>
-				Keep in
-			</li>
-			<li class="flex items-center gap-1 text-[10px]">
-				<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_OUT_COLOR}"></span>
-				Keep out
-			</li>
-		</ul>
-	{/if}
-
-	{#if geozoneStore.active && showGeozones}
-		<ul
-			class="absolute bottom-8 left-[10px] flex gap-3 rounded border border-edge bg-panel/90 px-2 py-1"
-			aria-label="Airspace zone legend"
-		>
-			<li class="flex items-center gap-1 text-[10px]">
-				<span class="h-2 w-2 rounded-full" style="background-color: #e74c3c"></span>
-				Prohibited
-			</li>
-			<li class="flex items-center gap-1 text-[10px]">
-				<span class="h-2 w-2 rounded-full" style="background-color: #f5a623"></span>
-				Restricted
-			</li>
-			<li class="flex items-center gap-1 text-[10px]">
-				<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
-				Other airspace
-			</li>
-		</ul>
+			{#if showZoneRow}
+				<ul class="flex gap-3" aria-label="Zone legend">
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_IN_COLOR}"
+						></span>
+						Keep in
+					</li>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_OUT_COLOR}"
+						></span>
+						Keep out
+					</li>
+				</ul>
+			{/if}
+			{#if showGeozoneRow}
+				<ul
+					class="flex gap-3 {showZoneRow ? 'border-t border-edge pt-1.5' : ''}"
+					aria-label="Airspace zone legend"
+				>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: #e74c3c"></span>
+						Prohibited
+					</li>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: #f5a623"></span>
+						Restricted
+					</li>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
+						Other airspace
+					</li>
+				</ul>
+			{/if}
+		</div>
 	{/if}
 </div>
 
