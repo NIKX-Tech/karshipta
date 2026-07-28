@@ -399,5 +399,14 @@ if(KARSHIPTA_GATEWAY_BUILD_TESTS)
   endif()
 
   include(GoogleTest)
-  gtest_discover_tests(karshipta_gateway_tests PROPERTIES TIMEOUT 60)
+  # 90s, not the more typical 60s: WardManagerTest.HandleRemoveWardRejectsWhileAirborne
+  # (ward_manager_test.cpp) polls a real MAVSDK telemetry cache for up to 60s
+  # to rule out a CI-runner-timing-dependent flicker (see its own comment);
+  # a shorter global ceiling would cut that margin off before it gets to use
+  # it. Applied suite-wide (gtest_discover_tests has no clean way to set a
+  # per-test TIMEOUT before discovery runs at build/test time) rather than
+  # only for that one test; harmless everywhere else, since every other
+  # test here finishes in well under a second and a timeout ceiling only
+  # matters when something has actually hung.
+  gtest_discover_tests(karshipta_gateway_tests PROPERTIES TIMEOUT 90)
 endif()

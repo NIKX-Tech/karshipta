@@ -78,10 +78,11 @@ console itself, built as a static site and served by nginx. Open
 [http://localhost:5173](http://localhost:5173): `sitl-1` is live on the map
 instead of the fake fleet, no extra setup.
 
-Optionally, set `PUBLIC_OPENAIP_KEY` (a free key from
-[openaip.net](https://www.openaip.net/)) before the `up` command to turn on
-the airspace layer (docs/console-ux.md); without it the map works the same,
-just without that layer.
+Optionally, turn on the airspace layer (docs/console-ux.md) with a free key
+from [openaip.net](https://www.openaip.net/): put `PUBLIC_OPENAIP_KEY=<your
+key>` in `deploy/.env` (Compose only auto-loads a `.env` file from the same
+directory as the compose file passed to `-f`, not the directory you run the
+command from). Without it the map works the same, just without that layer.
 
 ## Architecture
 
