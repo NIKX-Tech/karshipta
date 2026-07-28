@@ -37,7 +37,7 @@ New Fleet and Zone entities (named, persistent, shared objects, not live telemet
 The mission design changed once before release, for a real reason. The
 original draft applied one shared mission template to a chosen subset of a
 Fleet's wards or an ad-hoc selection, uploaded as independent copies that
-all started together — every ward flying the identical route at the
+all started together - every ward flying the identical route at the
 identical time, simultaneously, is a genuine collision hazard, not a
 simplification worth keeping. It was replaced before v0.1.0 shipped, not
 after. Today, a Fleet Mission gives each selected ward its own

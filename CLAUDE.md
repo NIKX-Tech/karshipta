@@ -48,7 +48,7 @@ cmake -S gateway -B gateway/build
 cmake --build gateway/build
 ./gateway/build/src/karshipta_gateway   # needs PX4 SITL running, see docs/quickstart.md
 ```
-Tests are off by default (`-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`; `-R <name>` runs one). Platform-specific setup (Windows vendoring, WSL toolchain) is in `docs/quickstart-windows.md` and each component's own `CLAUDE.local.md` — don't re-derive it from scratch.
+Tests are off by default (`-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`; `-R <name>` runs one). Platform-specific setup (Windows vendoring, WSL toolchain) is in `docs/quickstart-windows.md` and each component's own `CLAUDE.local.md` - don't re-derive it from scratch.
 
 CI (`.github/workflows/ci.yml`) runs a `proto`, a `console`, and a `gateway` job (gcc + clang matrix) on every push.
 
@@ -74,4 +74,4 @@ MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` and `docs
 
 ## Safety
 
-This project is simulation-first and not certified for real flight operations. The README must always carry this disclaimer. Never add features that bypass autopilot safety checks (e.g. forced arming overrides) without an explicit, logged decision.
+This project is simulation-first and not certified for real flight operations yet. The README must always carry this disclaimer. Never add features that bypass autopilot safety checks (e.g. forced arming overrides) without an explicit, logged decision.

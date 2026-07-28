@@ -25,7 +25,7 @@ Uncomment as they go live:
 [![Sponsor GitHub](https://img.shields.io/badge/sponsor-GitHub-EA4AAA?style=flat-square&logo=github-sponsors)](https://github.com/sponsors/NIKX-Tech)
 -->
 
-Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and gives you a live web console to organize, monitor, and task the whole fleet: map, telemetry, commands, missions, geofenced zones. A ward is any tracked, controlled unit — flight (multirotor, fixed-wing, VTOL, helicopter), ground, underwater, surface vessel — plus trackers with no autopilot at all (livestock GPS tags, generic trackers), ingested over HTTP instead of MAVLink. Group wards into Fleets, draw keep-in/keep-out Zones, and dispatch a Fleet Mission where every ward flies its own independently-planned route, not one shared route broadcast to everyone. Self-hosted, no cloud dependency, one binary protobuf contract end to end.
+Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and gives you a live web console to organize, monitor, and task the whole fleet: map, telemetry, commands, missions, geofenced zones. A ward is any tracked, controlled unit - flight (multirotor, fixed-wing, VTOL, helicopter), ground, underwater, surface vessel - plus trackers with no autopilot at all (livestock GPS tags, generic trackers), ingested over HTTP instead of MAVLink. Group wards into Fleets, draw keep-in/keep-out Zones, and dispatch a Fleet Mission where every ward flies its own independently-planned route, not one shared route broadcast to everyone. Self-hosted, no cloud dependency, one binary protobuf contract end to end.
 
 > Named after Karshipta, the Avestan bird said to be the chief of all birds, the messenger that kept an isolated refuge connected to the outside world.
 
@@ -37,13 +37,13 @@ Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and 
 
 ## Status
 
-**v0.1.0 — first public release.** [ROADMAP.md](ROADMAP.md) covers what shipped and what's next.
+**v0.1.0 - first public release.** [ROADMAP.md](ROADMAP.md) covers what shipped and what's next.
 
 | Component | State |
 |---|---|
 | `proto/` protobuf contract | `karshipta.v1` schema, the single source of truth for the wire format |
-| `gateway/` MAVLink + Herald edge service | connectivity, telemetry, commands, missions, multi-ward, Fleet/Zone/Fleet-Mission persistence, Herald ingestion (native, vendor-mapped, GT06), relay transport, concurrency-hardened — M1 to M10 in [gateway/BRIEF.md](gateway/BRIEF.md) |
-| `console/` web dashboard | map, commands, missions, Fleet and Zone management, per-ward Fleet Missions, airspace overlay, simulated fleet, published as an embeddable npm package — C1 to C8 in [ROADMAP.md](ROADMAP.md); a demo GIF and a fresh-eyes quickstart pass are still open ([#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)), not blocking this release |
+| `gateway/` MAVLink + Herald edge service | connectivity, telemetry, commands, missions, multi-ward, Fleet/Zone/Fleet-Mission persistence, Herald ingestion (native, vendor-mapped, GT06), relay transport, concurrency-hardened - M1 to M10 in [gateway/BRIEF.md](gateway/BRIEF.md) |
+| `console/` web dashboard | map, commands, missions, Fleet and Zone management, per-ward Fleet Missions, airspace overlay, simulated fleet, published as an embeddable npm package - C1 to C8 in [ROADMAP.md](ROADMAP.md); a demo GIF and a fresh-eyes quickstart pass are still open ([#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)), not blocking this release |
 | `deploy/` one-command demo | SITL + gateway + console all wired up |
 | Prebuilt gateway binaries | macOS (arm64), Linux, Windows, published to [GitHub Releases](https://github.com/NIKX-Tech/karshipta/releases) on each tagged release |
 
@@ -86,7 +86,7 @@ command from). Without it the map works the same, just without that layer.
 
 ## Fleets, Zones, and Missions
 
-A **Fleet** is a named, persistent group of wards — a ward can belong to
+A **Fleet** is a named, persistent group of wards - a ward can belong to
 more than one. A **Zone** is a named keep-in or keep-out polygon, drawn on
 the map, checked against mission waypoints before you dispatch. A **Fleet
 Mission** assigns a route to a Fleet or an ad-hoc set of wards, but not the

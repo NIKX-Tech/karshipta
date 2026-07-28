@@ -1498,6 +1498,43 @@
 		filter: none !important;
 		background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='29' height='29' viewBox='0 0 29 29'%3E%3Cpath d='M14.5 4.5 L18 14.5 L11 14.5 Z' fill='%23f5a623'/%3E%3Cpath d='M14.5 24.5 L11 14.5 L18 14.5 Z' fill='%238b98a5'/%3E%3C/svg%3E") !important;
 	}
+	/*
+	 * Same fix, same reason, for the zoom in/out buttons: MapLibre's own
+	 * icons here are a filled +/- glyph, a different visual weight than
+	 * this file's stroke-based line icons everywhere else (layers, ruler,
+	 * attribution's "i") - the invert filter alone made them the right
+	 * rough color but not the same style, which is what read as
+	 * mismatched. stroke-width 1.75, not the attribution "i"'s 2.75 (fixed
+	 * to match, below): 1.75 is this file's own actual dominant weight for
+	 * every inline-SVG button icon (layers, ruler), so these two match the
+	 * majority instead of the one other vendor-icon override that had
+	 * drifted from it.
+	 *
+	 * These also read as oversized even after the color and stroke-width
+	 * fixes: with no explicit background-size, the icon fills the
+	 * button's entire native 29px box edge to edge, where the layers/
+	 * ruler buttons instead show a small ~15px icon with real padding
+	 * around it inside their own box. Button size is left alone (resizing
+	 * it to 32px like the attribution "i" was tried and made the whole
+	 * control read as bigger overall, not just the glyph inside it, which
+	 * wasn't the actual complaint) - only the icon itself is shrunk via
+	 * background-size, keeping the same 29px button MapLibre already uses
+	 * here.
+	 */
+	:global(.maplibregl-ctrl-zoom-in .maplibregl-ctrl-icon) {
+		filter: none !important;
+		background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='1.75' stroke-linecap='round'%3E%3Cline x1='12' y1='6' x2='12' y2='18'/%3E%3Cline x1='6' y1='12' x2='18' y2='12'/%3E%3C/svg%3E") !important;
+		background-size: 15px !important;
+		background-position: center !important;
+		background-repeat: no-repeat !important;
+	}
+	:global(.maplibregl-ctrl-zoom-out .maplibregl-ctrl-icon) {
+		filter: none !important;
+		background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='1.75' stroke-linecap='round'%3E%3Cline x1='6' y1='12' x2='18' y2='12'/%3E%3C/svg%3E") !important;
+		background-size: 15px !important;
+		background-position: center !important;
+		background-repeat: no-repeat !important;
+	}
 	:global(.maplibregl-ctrl-attrib) {
 		background: transparent !important;
 		color: var(--color-fg-muted) !important;
@@ -1592,8 +1629,12 @@
 		   (--color-fg-muted, the same currentColor they resolve to via
 		   text-fg-muted) - an earlier pass brightened it to --color-fg while
 		   chasing a visibility fix, making it stand out white against its
-		   grayish siblings instead of matching them. */
-		background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='12' y1='10.5' x2='12' y2='16'/%3E%3Ccircle cx='12' cy='7' r='1.3' fill='%238b98a5' stroke='none'/%3E%3C/svg%3E") !important;
+		   grayish siblings instead of matching them. stroke-width 1.75, not
+		   the 2.75 this used to be: 1.75 is this file's own actual dominant
+		   weight for every inline-SVG button icon (layers, ruler) - 2.75 had
+		   drifted heavier than all of them, reading as visibly thicker than
+		   its siblings once actually compared side by side. */
+		background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='12' y1='10.5' x2='12' y2='16'/%3E%3Ccircle cx='12' cy='7' r='1.3' fill='%238b98a5' stroke='none'/%3E%3C/svg%3E") !important;
 		background-size: 16px !important;
 		background-position: center !important;
 		background-repeat: no-repeat !important;
