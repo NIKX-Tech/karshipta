@@ -760,6 +760,20 @@
 		activeMap.setLayoutProperty(GEOZONE_LINE_LAYER, 'visibility', visibility);
 	});
 
+	// Operator-drawn zone layer visibility - same shape as the geozone
+	// effect just above, which this one was missing entirely: showZones
+	// only ever gated the legend chip's own rendering, never the actual
+	// ZONE_FILL_LAYER/ZONE_LINE_LAYER on the map, so the "Zones" checkbox
+	// visibly did nothing to the polygons themselves.
+	$effect(() => {
+		const activeMap = map;
+		const visible = showZones;
+		if (!activeMap || !mapLoaded) return;
+		const visibility = visible ? 'visible' : 'none';
+		activeMap.setLayoutProperty(ZONE_FILL_LAYER, 'visibility', visibility);
+		activeMap.setLayoutProperty(ZONE_LINE_LAYER, 'visibility', visibility);
+	});
+
 	// close the layers menu on an outside click or Escape, same convention
 	// as any other dismissable popover in this app
 	$effect(() => {
