@@ -89,7 +89,7 @@ jobs:
       - name: Cache Windows vendored dependencies
         if: runner.os == 'Windows'
         id: win-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: gateway/third_party
           key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12
@@ -224,7 +224,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.name.outputs.artifact }}
           path: |
@@ -239,7 +239,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
