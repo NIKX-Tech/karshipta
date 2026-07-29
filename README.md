@@ -29,7 +29,7 @@ Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and 
 
 > Named after Karshipta, the Avestan bird said to be the chief of all birds, the messenger that kept an isolated refuge connected to the outside world.
 
-![Karshipta console showing three simulated wards on a dark map](docs/images/console.png)
+![Karshipta console showing three simulated wards on a dark map](https://github.com/NIKX-Tech/karshipta/releases/download/docs-assets/karshipta-demo.gif)
 
 *The console flying three demo wards over the PX4 SITL home position.*
 

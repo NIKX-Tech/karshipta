@@ -66,11 +66,11 @@ MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` and `docs
 
 ## Hygiene rules (strict)
 
-- Never use em dashes in any text, code comments, docs, or commit messages.
-- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code.
+- Stick to plain ASCII punctuation in text, code comments, docs, and commit messages: hyphens, colons, parentheses. No em dashes or curly quotes; they render inconsistently across terminals, diffs, and editors.
 - Commits: conventional style (`feat(console): ...`, `fix(gateway): ...`), imperative subject, body explains why.
 - Production quality only: typed end to end, no `any`, no magic strings, errors observable, warnings are errors.
 - Small PRs. Every change verifiable by a human from written instructions.
+- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code.
 
 ## Safety
 
