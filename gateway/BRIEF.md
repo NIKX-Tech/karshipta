@@ -85,4 +85,4 @@ A ward-manager concurrency audit and a follow-up Fleet/Zone audit each produced 
 
 - Everything in English, in GitHub issues/PRs on `NIKX-Tech/karshipta`.
 - Small PRs, reviewed by Erfan. Weekly 30 min sync, demo-driven.
-- Claude-assisted development is expected and encouraged: keep `gateway/CLAUDE.md` (provided) in the repo and start your sessions from it. You review and must be able to explain every line that gets merged.
+- AI-assisted development is expected and encouraged: keep `gateway/CLAUDE.md` (provided) in the repo and start your sessions from it. You review and must be able to explain every line that gets merged.
