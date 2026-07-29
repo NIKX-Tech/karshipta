@@ -89,7 +89,7 @@ jobs:
       - name: Cache Windows vendored dependencies
         if: runner.os == 'Windows'
         id: win-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: gateway/third_party
           key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12
