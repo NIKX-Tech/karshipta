@@ -4,21 +4,61 @@ package karshipta.v1;
 
 import "karshipta/v1/telemetry.proto";
 import "karshipta/v1/command.proto";
+import "karshipta/v1/fleet.proto";
 
 // Every WebSocket frame is exactly one binary-encoded Envelope.
-// Gateway -> console: vehicle_info, vehicle_state, event, command_ack, mission_progress.
-// Console -> gateway: command, mission_upload.
+// Gateway -> console: ward_info, ward_state, event, command_ack,
+//                     mission_progress, ward_config_ack, mission_download,
+//                     fleet, zone, fleet_ack, zone_ack, fleet_mission,
+//                     fleet_mission_ack.
+// Console -> gateway: command, mission_upload, add_ward, remove_ward,
+//                     mission_file_upload, mission_download_request,
+//                     create_fleet, rename_fleet, delete_fleet,
+//                     add_ward_to_fleet, remove_ward_from_fleet,
+//                     create_zone, update_zone, delete_zone,
+//                     create_fleet_mission, stop_fleet_mission,
+//                     remove_fleet_mission, update_fleet_mission_routes.
 message Envelope {
+  // Field 29 was FleetMissionAssignment: one shared route fanned out to
+  // every ward - a real collision hazard, replaced by
+  // CreateFleetMission's per-ward WardMissionPlan below, not reused.
+  reserved 29;
+  reserved "fleet_mission_assignment";
+
   oneof payload {
     // downstream (gateway to console)
-    VehicleInfo vehicle_info = 1;
-    VehicleState vehicle_state = 2;
+    WardInfo ward_info = 1;
+    WardState ward_state = 2;
     Event event = 3;
     CommandAck command_ack = 4;
     MissionProgress mission_progress = 5;
+    WardConfigAck ward_config_ack = 6;
+    Mission mission_download = 14;         // response to mission_download_request
+    Fleet fleet = 17;                      // sync on connect, one message per fleet
+    Zone zone = 18;                        // sync on connect, one message per zone
+    FleetAck fleet_ack = 19;
+    ZoneAck zone_ack = 20;
+    FleetMission fleet_mission = 30;       // sync on connect, one message per fleet mission
+    FleetMissionAck fleet_mission_ack = 31;
 
     // upstream (console to gateway)
     Command command = 10;
     Mission mission_upload = 11;
+    AddWard add_ward = 12;
+    RemoveWard remove_ward = 13;
+    MissionFileUpload mission_file_upload = 15;
+    MissionDownloadRequest mission_download_request = 16;
+    CreateFleet create_fleet = 21;
+    RenameFleet rename_fleet = 22;
+    DeleteFleet delete_fleet = 23;
+    AddWardToFleet add_ward_to_fleet = 24;
+    RemoveWardFromFleet remove_ward_from_fleet = 25;
+    CreateZone create_zone = 26;
+    UpdateZone update_zone = 27;
+    DeleteZone delete_zone = 28;
+    CreateFleetMission create_fleet_mission = 32;
+    StopFleetMission stop_fleet_mission = 33;
+    RemoveFleetMission remove_fleet_mission = 34;
+    UpdateFleetMissionRoutes update_fleet_mission_routes = 35;
   }
 }

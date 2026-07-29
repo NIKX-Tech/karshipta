@@ -17,13 +17,20 @@ message VelocityNed {
   float down_m_s = 3;
 }
 
-enum VehicleType {
-  VEHICLE_TYPE_UNSPECIFIED = 0;
-  VEHICLE_TYPE_MULTIROTOR = 1;
-  VEHICLE_TYPE_FIXED_WING = 2;
-  VEHICLE_TYPE_VTOL = 3;
-  VEHICLE_TYPE_HELICOPTER = 4;
-  VEHICLE_TYPE_GROUND = 5;
+// The kind of ward: flight classes (an autopilot-controlled vehicle) or
+// non-flight classes (a tracked entity with no autopilot at all, e.g. a
+// livestock GPS tag). WardState.flight is populated only for the former.
+enum WardClass {
+  WARD_CLASS_UNSPECIFIED = 0;
+  WARD_CLASS_MULTIROTOR = 1;
+  WARD_CLASS_FIXED_WING = 2;
+  WARD_CLASS_VTOL = 3;
+  WARD_CLASS_HELICOPTER = 4;
+  WARD_CLASS_GROUND = 5;
+  WARD_CLASS_UNDERWATER = 6;
+  WARD_CLASS_SURFACE_VESSEL = 7;
+  WARD_CLASS_LIVESTOCK_TAG = 8;
+  WARD_CLASS_GENERIC_TRACKER = 9;
 }
 
 enum FlightMode {
@@ -53,4 +60,20 @@ enum Severity {
   SEVERITY_WARNING = 2;
   SEVERITY_CRITICAL = 3;
   SEVERITY_EMERGENCY = 4;
+}
+
+// What is actually producing this ward's telemetry. Distinct from a
+// gateway's own local/remote transport concern (that's about how the data
+// reaches a console, not what generated it): SITL is a real autopilot
+// binary flying simulated physics (a legitimate, common self-hosted setup,
+// see the console's "Add simulated ward" onboarding flow), while
+// SYNTHETIC means no autopilot exists at all, only demo math standing in
+// for one (the OSS console's own FakeGateway, or a hosted demo fleet).
+// Conflating those two into one "is this simulated" boolean would be
+// inaccurate, so this is an enum instead.
+enum WardOrigin {
+  WARD_ORIGIN_UNSPECIFIED = 0;
+  WARD_ORIGIN_HARDWARE = 1;
+  WARD_ORIGIN_SITL = 2;
+  WARD_ORIGIN_SYNTHETIC = 3;
 }

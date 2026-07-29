@@ -1,6 +1,6 @@
 # CLAUDE.md: Karshipta monorepo
 
-Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones and unmanned vehicles. Users connect real or simulated vehicles (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. Flagship demo: `docker compose up` starts 3 PX4 SITL vehicles, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
+Karshipta is an open-source, self-hosted, web-based command and control platform for fleets of drones, unmanned vehicles, and other tracked entities. Users connect real or simulated wards (PX4/ArduPilot over MAVLink) and monitor and task them from the browser. A ward is any tracked, controlled unit: a flight vehicle today, plus any other tracked entity alongside it, whether MAVLink-speaking (a generic tracker) or ingested over HTTP via a Herald message (a livestock GPS tag, no command surface, see `gateway/docs/herald-ingest.md`). Flagship demo: `docker compose up` starts 3 PX4 SITL wards, the gateway, and the web console; a simulated fleet flies missions in the browser within 60 seconds.
 
 Owned by NIKX Technologies B.V. License: AGPL-3.0. Domain: karshipta.com.
 
@@ -24,22 +24,54 @@ deploy/      docker-compose demo, SITL configs
 docs/        architecture, quickstart
 ```
 
+Each gateway class has a matching reference doc in `gateway/docs/<class-name>.md` (e.g. `ward-manager.md`, `websocket-transport.md`, `herald-ingest.md`); read those before re-deriving behavior from headers.
+
+## Commands
+
+Proto (validate a schema change before it lands; mirrors CI):
+```
+protoc -I proto --descriptor_set_out=/dev/null proto/karshipta/v1/*.proto
+```
+
+Console (`console/`; regenerate types after any `.proto` change):
+```
+npm install && npm run proto:gen
+npm run dev -- --open   # dev server, standalone simulated fleet
+npm run build
+npm run check           # svelte-kit sync + svelte-check (strict TS)
+npm run lint             # prettier --check + eslint
+```
+
+Gateway (`gateway/`):
+```
+cmake -S gateway -B gateway/build
+cmake --build gateway/build
+./gateway/build/src/karshipta_gateway   # needs PX4 SITL running, see docs/quickstart.md
+```
+Tests are off by default (`-DKARSHIPTA_GATEWAY_BUILD_TESTS=ON`, then `ctest --test-dir gateway/build`; `-R <name>` runs one). Platform-specific setup (Windows vendoring, WSL toolchain) is in `docs/quickstart-windows.md` and each component's own `CLAUDE.local.md` - don't re-derive it from scratch.
+
+CI (`.github/workflows/ci.yml`) runs a `proto`, a `console`, and a `gateway` job (gcc + clang matrix) on every push.
+
 ## Current phase
 
-MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` (gateway M1 to M6) and `docs/architecture.md`. Do not scaffold features beyond the current milestone.
+MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` and `docs/architecture.md`. Do not scaffold features beyond the current milestone.
 
 ## Branching
 
 `dev` is the integration branch: all work and PRs target it. `main` is production only, advanced by reviewed merges from `dev`, and carries the release tags. Never commit directly to `main`.
 
+## Terminology
+
+`docs/glossary.md` is the locked vocabulary. In code, schema, and technical docs the unit is always a "ward" (never "vehicle" or "drone"), a gateway manages a "fleet", and MAVLink endpoints are "connection URLs". Reviews enforce this.
+
 ## Hygiene rules (strict)
 
-- Never use em dashes in any text, code comments, docs, or commit messages.
-- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code.
+- Stick to plain ASCII punctuation in text, code comments, docs, and commit messages: hyphens, colons, parentheses. No em dashes or curly quotes; they render inconsistently across terminals, diffs, and editors.
 - Commits: conventional style (`feat(console): ...`, `fix(gateway): ...`), imperative subject, body explains why.
 - Production quality only: typed end to end, no `any`, no magic strings, errors observable, warnings are errors.
 - Small PRs. Every change verifiable by a human from written instructions.
+- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code.
 
 ## Safety
 
-This project is simulation-first and not certified for real flight operations. The README must always carry this disclaimer. Never add features that bypass autopilot safety checks (e.g. forced arming overrides) without an explicit, logged decision.
+This project is simulation-first and not certified for real flight operations yet. The README must always carry this disclaimer. Never add features that bypass autopilot safety checks (e.g. forced arming overrides) without an explicit, logged decision.

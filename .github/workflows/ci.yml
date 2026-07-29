@@ -9,7 +9,7 @@ jobs:
   proto:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Validate schema
@@ -21,8 +21,8 @@ jobs:
       run:
         working-directory: console
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -38,4 +38,51 @@ jobs:
       - name: Build
         run: npm run build
 
-  # gateway job lands with M1 (CMake build, gcc + clang, -Wall -Wextra -Werror)
+  gateway:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        compiler: [{ cc: gcc, cxx: g++ }, { cc: clang, cxx: clang++ }]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install MAVSDK, spdlog, protobuf
+        run: |
+          curl -fsSL -o /tmp/mavsdk.deb https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb
+          sudo apt-get update
+          sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev protobuf-compiler libprotobuf-dev
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cxx }}
+        run: cmake -S gateway -B gateway/build -DKARSHIPTA_GATEWAY_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build gateway/build -j "$(nproc)"
+      - name: Test
+        run: ctest --test-dir gateway/build --output-on-failure
+
+  # karshipta-herald: the MAVLink-disabled release artifact (generic tags/GPS
+  # devices, no drones - see gateway/CLAUDE.md's KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+  # option). Deliberately does NOT install MAVSDK here: the entire point of
+  # this job is proving the build genuinely does not need it, not just that
+  # the flag compiles while MAVSDK sits there unused. No test step - the
+  # existing suite constructs real WardManager instances throughout and is
+  # not yet adapted for this configuration (KARSHIPTA_GATEWAY_BUILD_TESTS=ON
+  # combined with this flag OFF is a hard CMake error, on purpose).
+  gateway-herald-only:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        compiler: [{ cc: gcc, cxx: g++ }, { cc: clang, cxx: clang++ }]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install spdlog, protobuf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libspdlog-dev protobuf-compiler libprotobuf-dev
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cxx }}
+        run: cmake -S gateway -B gateway/build -DKARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF
+      - name: Build
+        run: cmake --build gateway/build -j "$(nproc)"

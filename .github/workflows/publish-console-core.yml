@@ -1,0 +1,50 @@
+name: publish console-core
+
+on:
+  push:
+    branches: [dev, main]
+    paths: ['console/**']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: '@nikx-tech'
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate protobuf types
+        run: npm run proto:gen
+      - name: Build the package
+        run: npm run package
+      # npm consumers get one stable line: whatever is published under
+      # "latest" is a deliberate version someone chose in package.json,
+      # from dev or main alike; there is no separate prerelease/dev tag to
+      # track. A push that does not change the version is a silent no-op,
+      # not a failure: most console commits do not touch console-core's
+      # version, and that must not fail CI.
+      - name: Publish if the version changed
+        run: |
+          PUBLISHED=$(npm view "$(node -p "require('./package.json').name")" version --registry https://npm.pkg.github.com 2>/dev/null || echo "none")
+          LOCAL=$(node -p "require('./package.json').version")
+          if [ "$PUBLISHED" = "$LOCAL" ]; then
+            echo "console-core@$LOCAL already published, skipping"
+          else
+            echo "publishing console-core@$LOCAL (was $PUBLISHED)"
+            npm publish --tag latest
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
