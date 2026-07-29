@@ -27,7 +27,8 @@ You are assisting development of the Karshipta console: a SvelteKit web dashboar
 
 ## Hygiene
 
-- Never use em dashes anywhere. Never add AI attribution to commits. Conventional commits (`feat(console): ...`).
+- Plain ASCII punctuation only: hyphens, colons, parentheses, no em dashes or curly quotes, for consistent rendering across terminals, diffs, and editors.
+- Conventional commits (`feat(console): ...`). Never add AI attribution to commits.
 
 ## When asked to write code
 

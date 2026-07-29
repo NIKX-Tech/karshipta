@@ -27,9 +27,9 @@ You are assisting development of the Karshipta gateway: a C++20 service that bri
 
 ## Commit and text hygiene
 
-- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code comments.
-- Never use em dashes in any text, docs, commit messages, or comments.
+- Plain ASCII punctuation only in text, docs, commit messages, and comments: hyphens, colons, parentheses, no em dashes or curly quotes, for consistent rendering across terminals, diffs, and editors.
 - Commit messages: imperative mood, concise subject, body explains why. Conventional style: `feat(gateway): ...`, `fix(gateway): ...`.
+- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code comments.
 
 ## When asked to write code
 
