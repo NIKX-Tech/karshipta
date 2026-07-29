@@ -70,7 +70,7 @@ MVP sprint toward public launch. Milestones live in `gateway/BRIEF.md` and `docs
 - Commits: conventional style (`feat(console): ...`, `fix(gateway): ...`), imperative subject, body explains why.
 - Production quality only: typed end to end, no `any`, no magic strings, errors observable, warnings are errors.
 - Small PRs. Every change verifiable by a human from written instructions.
-- Never add "Co-Authored-By: Claude" or any AI attribution to commits, PRs, or code.
+- No co-author trailers or attribution referencing AI assistance in commits, PRs, or code.
 
 ## Safety
 
