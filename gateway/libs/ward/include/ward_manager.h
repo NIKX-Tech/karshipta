@@ -465,7 +465,7 @@ private:
     // usable) and returns a rejection reason instead. Does not touch
     // reconnect_worker, busy, or the map; callers finish those themselves.
     [[nodiscard]] std::optional<std::string> verify_grounded_and_disarm(
-        const std::string& ward_id, ManagedWard& ward);
+        const std::string& ward_id, const std::shared_ptr<ManagedWard>& ward);
 
     // Wraps ack in an Envelope and broadcasts it. Takes no lock; safe from
     // executor worker threads and from under wards_mutex_.
@@ -514,9 +514,14 @@ private:
 
     // No-op (returns true) if ward isn't armed; otherwise attempts to
     // disarm and returns whether it succeeded. Precondition: caller has set
-    // ward.busy (the pointees it reads are stable while busy holds).
-    // Blocking MAVSDK call; prefer calling it unlocked.
-    [[nodiscard]] bool disarm_if_armed(const std::string& ward_id, ManagedWard& ward);
+    // ward.busy (the pointees it reads are stable while busy holds). Runs
+    // the blocking MAVSDK call on its own thread with a bounded wait (see
+    // implementation); takes the shared_ptr, not a bare reference, because
+    // a timed-out attempt keeps running detached in the background and
+    // needs its own strong reference to keep the ManagedWard (and its
+    // owned WardActions) alive independent of the caller's lifetime.
+    [[nodiscard]] bool disarm_if_armed(const std::string& ward_id,
+                                        const std::shared_ptr<ManagedWard>& ward);
 
     // Requests reconnect_worker to stop and joins it; no-op if not running.
     // Must be called under ward.mutex_ (other threads read joinable() on
