@@ -115,32 +115,38 @@ One shared wire contract, one gateway process, and two ways in for a ward.
 flowchart TD
     proto["<b>proto/karshipta/v1</b><br/><span style='font-size:11px'>the wire contract</span>"]:::contractNode
     console["<b>Console</b><br/><span style='font-size:11px'>SvelteKit + MapLibre</span>"]:::consoleNode
+
+    subgraph flight ["<b>FLIGHT</b> &middot; MAVLink vehicles"]
+        mavsdk["<b>MAVSDK</b>"]:::flightNode <-->|"MAVLink, UDP 14540+"| vehicle["<b>PX4 / ArduPilot</b><br/><span style='font-size:11px'>SITL or real autopilot</span>"]:::flightNode
+    end
+
     gateway["<b>Gateway</b> <span style='font-size:11px'>C++20</span><br/><span style='font-size:11px'>WardManager &middot; HeraldWardManager &middot; FleetManager</span>"]:::gatewayNode
+
+    subgraph herald ["<b>HERALD</b> &middot; anything without an autopilot"]
+        tags["<b>Tags &amp; generic<br/>trackers</b>"]:::heraldNode --> native["<b>Native</b><br/><span style='font-size:11px'>POST /herald</span>"]:::heraldNode
+        tags --> mapped["<b>Mapped</b><br/><span style='font-size:11px'>POST /herald/mapped/&lt;source&gt;</span>"]:::heraldNode
+        tags --> gt06["<b>GT06</b><br/><span style='font-size:11px'>TCP :5023</span>"]:::heraldNode
+    end
 
     proto -. "protoc: C++" .-> gateway
     proto -. "ts-proto: TS" .-> console
 
-    console == "WebSocket, LAN direct" ==> gateway
-    console -- "Relay (relayly), NAT traversal" --> gateway
+    relayly["<b>Relayly</b><br/><span style='font-size:11px'>NAT traversal &middot; Noise XX<br/>end-to-end encrypted</span>"]:::relayNode
 
-    subgraph flight ["<b>FLIGHT</b> &middot; MAVLink vehicles"]
-        mavsdk["<b>MAVSDK</b>"]:::flightNode -- "MAVLink, UDP 14540+" --> vehicle["<b>PX4 / ArduPilot</b><br/><span style='font-size:11px'>SITL or real autopilot</span>"]:::flightNode
-    end
+    console <==>|"WebSocket, LAN direct"| gateway
+    console <==> relayly <==> gateway
 
-    subgraph herald ["<b>HERALD</b> &middot; anything without an autopilot"]
-        native["<b>Native</b><br/><span style='font-size:11px'>POST /herald</span>"]:::heraldNode --> tags["<b>Tags &amp; generic<br/>trackers</b>"]:::heraldNode
-        mapped["<b>Mapped</b><br/><span style='font-size:11px'>POST /herald/mapped/&lt;source&gt;</span>"]:::heraldNode --> tags
-        gt06["<b>GT06</b><br/><span style='font-size:11px'>TCP :5023</span>"]:::heraldNode --> tags
-    end
+    flight <--> gateway
+    herald --> gateway
 
-    gateway --> flight
-    gateway --> herald
+    flight ~~~ herald
 
-    classDef contractNode fill:none,stroke:#f5a623,stroke-width:2px
+    classDef contractNode fill:none,stroke:#f5a623,stroke-width:2px,stroke-dasharray:4 3
     classDef gatewayNode fill:none,stroke:#f5a623,stroke-width:2px
     classDef consoleNode fill:none,stroke:#3b9eff,stroke-width:2px
     classDef flightNode fill:none,stroke:#2ecc71,stroke-width:1.5px
     classDef heraldNode fill:none,stroke:#a78bfa,stroke-width:1.5px
+    classDef relayNode fill:none,stroke:#8b98a5,stroke-width:1.5px,stroke-dasharray:4 3
 
     style flight fill:none,stroke:#2ecc71,stroke-width:1.5px
     style herald fill:none,stroke:#a78bfa,stroke-width:1.5px
