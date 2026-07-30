@@ -5,6 +5,15 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.1.1]
+
+### Fixed
+
+- Gateway: the disarm RPC issued when removing or stopping a ward had no
+  timeout of its own, so an autopilot that never acknowledged the command
+  could hang the call indefinitely. Now bounded to 5 seconds; a timeout is
+  treated as a failed disarm instead of left to hang.
+
 ## [0.1.0] - first public release
 
 The first public release: gateway milestones M1 to M10, console milestones
