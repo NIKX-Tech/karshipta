@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <future>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -1098,11 +1099,39 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
     }
 }
 
-bool WardManager::disarm_if_armed(const std::string& ward_id, ManagedWard& ward) {
-    if (!ward.telemetry->is_armed()) {
+bool WardManager::disarm_if_armed(const std::string& ward_id,
+                                   const std::shared_ptr<ManagedWard>& ward) {
+    if (!ward->telemetry->is_armed()) {
         return true;
     }
-    const mavsdk::Action::Result result = ward.actions->disarm();
+    // action_->disarm() is a synchronous MAVSDK RPC with no bound of its
+    // own: it blocks the caller (here, remove_ward_impl()/stop(), holding
+    // ward->busy) for however long MAVSDK's internal command-ack retry takes
+    // to give up against an autopilot that never acks (a degraded real
+    // link, or WardManagerTest.HandleRemoveWardRejectsWhileAirborne's fake
+    // one - the CI hang this was written to fix). Run it on its own thread
+    // and cap how long we wait: a timeout here means "assume failed" rather
+    // than "hang the caller".
+    //
+    // Deliberately a detached std::thread + promise/future, not
+    // std::async: a future backed by std::async's own shared state has a
+    // blocking destructor if the task isn't done yet, which would turn a
+    // "give up after 5s" timeout right back into an unbounded hang the
+    // moment this function returns and that future goes out of scope. The
+    // lambda captures `ward` by value (a real shared_ptr copy) so the
+    // ManagedWard, and the WardActions it owns, stay alive for however long
+    // the detached call actually takes, independent of this function's or
+    // the caller's own lifetime.
+    constexpr std::chrono::seconds kDisarmTimeout{5};
+    auto promise = std::make_shared<std::promise<mavsdk::Action::Result>>();
+    std::future<mavsdk::Action::Result> future = promise->get_future();
+    std::thread([ward, promise] { promise->set_value(ward->actions->disarm()); }).detach();
+    if (future.wait_for(kDisarmTimeout) == std::future_status::timeout) {
+        spdlog::warn("disarm timed out after {}s for ward_id '{}'", kDisarmTimeout.count(),
+                     ward_id);
+        return false;
+    }
+    const mavsdk::Action::Result result = future.get();
     if (result == mavsdk::Action::Result::Success) {
         spdlog::info("ward_id '{}' disarmed", ward_id);
         return true;
@@ -1131,10 +1160,10 @@ void WardManager::clear_busy(const std::shared_ptr<ManagedWard>& ward) {
     ward->busy = false;
 }
 
-std::optional<std::string> WardManager::verify_grounded_and_disarm(const std::string& ward_id,
-                                                                   ManagedWard& ward) {
+std::optional<std::string> WardManager::verify_grounded_and_disarm(
+    const std::string& ward_id, const std::shared_ptr<ManagedWard>& ward) {
     // Unlocked: is_in_air()/is_armed()/disarm() are blocking MAVSDK calls.
-    // Safe because ward.busy == true, set by the caller before its own
+    // Safe because ward->busy == true, set by the caller before its own
     // executor-retiring unlock window began.
     //
     // link_state() is checked explicitly here, not inferred from
@@ -1145,15 +1174,15 @@ std::optional<std::string> WardManager::verify_grounded_and_disarm(const std::st
     // airborne right before the drop. Every ground-safety guard in this class
     // must gate on link_state() itself, never trust is_in_air()/is_armed()
     // alone to mean "unavailable therefore safe."
-    const bool link_ok = ward.connection->link_state() != WardConnection::LinkState::kLinkDown;
-    const bool grounded = link_ok && !ward.telemetry->is_in_air();
+    const bool link_ok = ward->connection->link_state() != WardConnection::LinkState::kLinkDown;
+    const bool grounded = link_ok && !ward->telemetry->is_in_air();
     const bool disarmed = grounded && disarm_if_armed(ward_id, ward);
     if (link_ok && grounded && disarmed) {
         return std::nullopt;
     }
 
-    std::lock_guard lock(ward.mutex_);
-    ward.executor = make_executor(ward);
+    std::lock_guard lock(ward->mutex_);
+    ward->executor = make_executor(*ward);
     if (!link_ok) return "link dropped during transition";
     if (!grounded) return "ward took off during transition";
     return "failed to disarm";
@@ -1208,7 +1237,7 @@ bool WardManager::stop(const std::string& ward_id) {
 
     // Re-check now that no command path exists that could have armed or
     // launched the ward between the guard above and the quiesce just now.
-    if (const auto error = verify_grounded_and_disarm(ward_id, *ward)) {
+    if (const auto error = verify_grounded_and_disarm(ward_id, ward)) {
         spdlog::warn("stop rejected: ward_id '{}' {}", ward_id, *error);
         return false;
     }
@@ -1293,7 +1322,7 @@ bool WardManager::force_stop(const std::string& ward_id) {
 
     // Grounded (or confirmed landed): disarm is best-effort here, unlike
     // stop(); taking the ward offline is the whole point of force_stop.
-    (void)disarm_if_armed(ward_id, *ward);
+    (void)disarm_if_armed(ward_id, ward);
 
     std::lock_guard lock(ward->mutex_);
     stop_worker(*ward);
@@ -1385,7 +1414,7 @@ std::optional<std::string> WardManager::remove_ward_impl(const std::string& ward
 
     retired_executor.reset();  // unlocked; see stop()
 
-    if (const auto error = verify_grounded_and_disarm(ward_id, *ward)) {
+    if (const auto error = verify_grounded_and_disarm(ward_id, ward)) {
         return *error;
     }
 
