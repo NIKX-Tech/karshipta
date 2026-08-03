@@ -51,6 +51,10 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/third_party/mavsdk"
     "${CMAKE_SOURCE_DIR}/third_party/spdlog"
     "${CMAKE_SOURCE_DIR}/third_party/protobuf"
+    # mbedTLS: ixwebsocket's default TLS backend on Windows (relay build
+    # only - see the USE_TLS block below), vendored the same way as the
+    # three above, not from vcpkg.json (which does not list it).
+    "${CMAKE_SOURCE_DIR}/third_party/mbedtls"
     "${CMAKE_SOURCE_DIR}/third_party/vcpkg/installed/x64-windows"
   )
 endif()
@@ -69,20 +73,23 @@ endif()
 # relayly: the M4 relay transport's real C++ SDK (gateway/docs/relay-transport.md).
 # Declared before ixwebsocket below because enabling it changes how ixwebsocket
 # itself must be built (see the BUILD_SHARED_LIBS note in that block).
-# OFF by default everywhere, not just Windows: it pulls in a new dependency tree
-# (libsodium via libsodium-cmake, nlohmann/json) on top of relayly itself, and is
-# explicitly optional for v0.1 (ROADMAP.md) - enabling it by default would silently
-# grow CI build time/surface. relayly's C++ SDK v1 does not support Windows at all
-# (sdk/cpp/README.md's Requirements), so forcing it on there is a hard error, not a
-# silent no-op, to avoid a confusing "I turned it on and nothing happened".
+# OFF by default everywhere: it pulls in a new dependency tree (libsodium via
+# libsodium-cmake, nlohmann/json) on top of relayly itself, and is explicitly
+# optional for v0.1 (ROADMAP.md) - enabling it by default would silently grow
+# CI build time/surface.
+#
+# Windows used to be a hard FATAL_ERROR here: relayly's C++ SDK v1 had no
+# Windows support at all. That changed with relayly's Windows SDK release
+# (sdk/cpp/README.md now documents mbedTLS-based TLS support on Windows).
+# mbedTLS itself is not fetched automatically, though: ixwebsocket (this
+# gateway's WebSocket layer) defaults to mbedTLS as its Windows TLS backend
+# (see the USE_TLS block below) via a plain find_package(MbedTLS), which
+# only succeeds because release-gateway.yml's Windows leg now vendors it
+# the same way it already vendors spdlog/protobuf - see this file's own
+# CMAKE_PREFIX_PATH block above for the third_party/mbedtls entry.
 option(KARSHIPTA_GATEWAY_ENABLE_RELAY
   "Build RelayTransport against relayly's real C++ SDK (BRIEF.md M4, optional for v0.1)"
   OFF)
-if(KARSHIPTA_GATEWAY_ENABLE_RELAY AND WIN32)
-  message(FATAL_ERROR
-    "KARSHIPTA_GATEWAY_ENABLE_RELAY=ON is not supported on Windows: relayly's C++ "
-    "SDK v1 does not build there yet (see relayly's sdk/cpp/README.md Requirements).")
-endif()
 
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.
@@ -134,14 +141,40 @@ if(NOT ixwebsocket_FOUND)
     set(_karshipta_prev_build_shared_libs "${BUILD_SHARED_LIBS}")
     set(BUILD_SHARED_LIBS ON)
   endif()
+  # patches/ixwebsocket/ overlays a handful of ixwebsocket's own headers,
+  # adding IXWEBSOCKET_EXPORT to each class with a static const data member
+  # used as a default-argument value somewhere - see that directory's own
+  # README for the full story (a Windows-shared-DLL export gap upstream,
+  # found the hard way across several real CI builds as different call
+  # sites hit different unexported constants one at a time).
   FetchContent_Declare(
     ixwebsocket
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.5.zip
+    PATCH_COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/patches/ixwebsocket" <SOURCE_DIR>/ixwebsocket
   )
   FetchContent_MakeAvailable(ixwebsocket)
+  # IXWEBSOCKET_EXPORT (patches/ixwebsocket/IXWebSocketExport.h) only does
+  # anything when this is both WIN32 and actually built shared - PUBLIC so
+  # it propagates to whatever links ixwebsocket (relayly, this gateway),
+  # not just ixwebsocket's own compilation.
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    target_compile_definitions(ixwebsocket PUBLIC IXWEBSOCKET_SHARED)
+  endif()
   if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     set(BUILD_SHARED_LIBS "${_karshipta_prev_build_shared_libs}")
     unset(_karshipta_prev_build_shared_libs)
+  endif()
+  # mbedTLS's own CMakeLists.txt links ws2_32/bcrypt PUBLIC on its
+  # mbedcrypto target when WIN32 (bcrypt.lib provides BCryptGenRandom,
+  # its entropy source there) - but ixwebsocket's bundled FindMbedTLS.cmake
+  # is a classic find_library-based module, not a real CMake package
+  # config, so that PUBLIC requirement never propagates to whatever links
+  # ixwebsocket. Without this, linking ixwebsocket.dll on Windows fails
+  # with "unresolved external symbol BCryptGenRandom" - found only by an
+  # actual Windows CI run with relay (and therefore mbedTLS) enabled.
+  if(WIN32 AND KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    target_link_libraries(ixwebsocket PRIVATE bcrypt)
   endif()
   if(NOT TARGET ixwebsocket::ixwebsocket)
     add_library(ixwebsocket::ixwebsocket ALIAS ixwebsocket)
