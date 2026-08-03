@@ -67,9 +67,47 @@ export {
 	WardConfigStatus,
 	wardConfigStatusFromJSON,
 	wardConfigStatusToJSON,
+	FleetAckStatus,
+	fleetAckStatusFromJSON,
+	fleetAckStatusToJSON,
+	ZoneType,
+	zoneTypeFromJSON,
+	zoneTypeToJSON,
+	ZoneAckStatus,
+	zoneAckStatusFromJSON,
+	zoneAckStatusToJSON,
+	FleetMissionStatus,
+	fleetMissionStatusFromJSON,
+	fleetMissionStatusToJSON,
+	FleetMissionAckStatus,
+	fleetMissionAckStatusFromJSON,
+	fleetMissionAckStatusToJSON,
+	FleetMissionStopAction,
+	fleetMissionStopActionFromJSON,
+	fleetMissionStopActionToJSON,
 	type AddWard,
 	type RemoveWard,
-	type WardConfigAck
+	type WardConfigAck,
+	type Fleet,
+	type CreateFleet,
+	type RenameFleet,
+	type DeleteFleet,
+	type AddWardToFleet,
+	type RemoveWardFromFleet,
+	type FleetAck,
+	type Zone,
+	type CreateZone,
+	type UpdateZone,
+	type DeleteZone,
+	type ZoneAck,
+	type WardMissionPlan,
+	type WardMissionState,
+	type FleetMission,
+	type CreateFleetMission,
+	type FleetMissionAck,
+	type StopFleetMission,
+	type RemoveFleetMission,
+	type UpdateFleetMissionRoutes
 } from './gen/karshipta/v1/fleet';
 export type { Envelope } from './gen/karshipta/v1/envelope';
 
@@ -103,6 +141,25 @@ export { geozoneStore } from './geozones/geozone-store.svelte';
 export { OpenAipGeozoneSource } from './geozones/openaip';
 export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './geozones/types';
 
+// zones (operator-drawn keep-in/keep-out geofences, sent to the gateway -
+// a different concept from geozoneStore's read-only airspace data above)
+export { zoneStore, isZoneConfigTerminal } from './zones/zone-store.svelte';
+export type { ZoneConfigTracker, ZoneDraft, LatLonPoint } from './zones/zone-store.svelte';
+
+// fleet-groups (named groupings of wards within one session, plus
+// fleet-wide mission assignment - a different concept from this file's own
+// `fleet` store, which is the whole-account ward registry)
+export {
+	fleetGroups,
+	isFleetConfigTerminal,
+	isFleetMissionAckTerminal
+} from './fleet-groups/fleet-groups-store.svelte';
+export type {
+	FleetConfigTracker,
+	FleetMissionRequestTracker,
+	MissionAssignmentDraft
+} from './fleet-groups/fleet-groups-store.svelte';
+
 // display components
 export { default as FleetMap } from './components/fleet-map.svelte';
 export { default as LocationPickerBar } from './components/location-picker-bar.svelte';
@@ -124,3 +181,13 @@ export { default as CommandPanel } from './components/command-panel.svelte';
 export { default as MissionPanel } from './components/mission-panel.svelte';
 export { default as EventsFeed } from './components/events-feed.svelte';
 export { default as ConfirmDialog } from './components/confirm-dialog.svelte';
+// ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
+// self-contained, store-driven content panels, the same category as
+// WardTab/CommandPanel/MissionPanel above - not app-shell chrome. Unlike
+// left-rail.svelte/right-panel.svelte (still unexported, see this file's
+// own doc comment), neither encodes a self-host-vs-hosted opinion.
+export { default as ZonesTab } from './components/zones-tab.svelte';
+export { default as MissionTab } from './components/mission-tab.svelte';
+export { default as FleetMissionWizard } from './components/fleet-mission-wizard.svelte';
+export { default as FleetMissionList } from './components/fleet-mission-list.svelte';
+export { default as FleetMissionRow } from './components/fleet-mission-row.svelte';
