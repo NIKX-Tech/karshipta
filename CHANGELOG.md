@@ -7,12 +7,32 @@ release onward.
 
 ## [0.1.1]
 
+### Added
+
+- console-core: publish the Zones (operator-drawn keep-in/keep-out
+  geofences), Fleet-groups (named ward groupings within a session), and
+  Fleet-mission (per-ward mission wizard, list, live map routes) wire
+  types, stores, and display components from the library's export
+  surface - built earlier but never exposed to a consuming app until now.
+
 ### Fixed
 
 - Gateway: the disarm RPC issued when removing or stopping a ward had no
   timeout of its own, so an autopilot that never acknowledged the command
   could hang the call indefinitely. Now bounded to 5 seconds; a timeout is
   treated as a failed disarm instead of left to hang.
+- Gateway: real Windows relay builds. `KARSHIPTA_GATEWAY_ENABLE_RELAY=ON`
+  was a hard error on Windows since the relay transport landed; once
+  relayly shipped Windows SDK support, three more real problems surfaced
+  the first time this was actually built there - a missing mbedTLS
+  dependency, a missing `bcrypt` link for its entropy source, and a
+  Windows-DLL-export gap in ixwebsocket itself (several `static const`
+  class members used as default-argument values, none exported - MSVC
+  does not auto-export data symbols from a DLL the way it does
+  functions). All three fixed; Windows now builds and links with relay
+  enabled like every other platform. The `herald-only` release flavor no
+  longer links relayly at all, on any platform - Herald ingestion is
+  plain HTTP, it never had the NAT-traversal problem relay solves.
 
 ## [0.1.0] - first public release
 
