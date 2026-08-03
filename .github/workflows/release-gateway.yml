@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: gateway/third_party
-          key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12
+          key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12-mbedtls3.6.7
 
       - name: Vendor MAVSDK (Windows)
         if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
@@ -114,6 +114,28 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/gateway/third_party/spdlog"
           cmake --build spdlog-src/build
           cmake --install spdlog-src/build
+
+      - name: Vendor mbedTLS (Windows)
+        # ixwebsocket defaults to mbedTLS on Windows (no Secure Transport
+        # like macOS, no ubiquitous system OpenSSL like Linux's libssl-dev -
+        # see gateway/CMakeLists.txt's USE_TLS comment), and relay is now ON
+        # for every Windows build, not just non-Windows. Hand-vendored the
+        # same way as spdlog/protobuf above, not via vcpkg.json (which does
+        # not list mbedtls and is not actually installed anywhere in this
+        # workflow today - that vcpkg path in CMakeLists.txt is for anyone
+        # building locally with vcpkg, unused by CI).
+        if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --branch v3.6.7 --depth 1 --recurse-submodules https://github.com/Mbed-TLS/mbedtls.git mbedtls-src
+          cmake -S mbedtls-src -B mbedtls-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PROGRAMS=OFF \
+            -DENABLE_TESTING=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/gateway/third_party/mbedtls"
+          cmake --build mbedtls-src/build
+          cmake --install mbedtls-src/build
 
       - name: Vendor protobuf (Windows)
         if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'

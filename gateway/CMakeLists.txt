@@ -51,6 +51,10 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/third_party/mavsdk"
     "${CMAKE_SOURCE_DIR}/third_party/spdlog"
     "${CMAKE_SOURCE_DIR}/third_party/protobuf"
+    # mbedTLS: ixwebsocket's default TLS backend on Windows (relay build
+    # only - see the USE_TLS block below), vendored the same way as the
+    # three above, not from vcpkg.json (which does not list it).
+    "${CMAKE_SOURCE_DIR}/third_party/mbedtls"
     "${CMAKE_SOURCE_DIR}/third_party/vcpkg/installed/x64-windows"
   )
 endif()
@@ -76,11 +80,13 @@ endif()
 #
 # Windows used to be a hard FATAL_ERROR here: relayly's C++ SDK v1 had no
 # Windows support at all. That changed with relayly's Windows SDK release
-# (sdk/cpp/README.md now documents mbedTLS-based TLS on Windows, fetched
-# automatically the same way this file already consumes relayly via
-# FetchContent below) - this gateway has never actually built with relay ON
-# for Windows before, though, so treat it as newly unblocked and worth
-# watching closely (release-gateway.yml's Windows CI leg), not as proven.
+# (sdk/cpp/README.md now documents mbedTLS-based TLS support on Windows).
+# mbedTLS itself is not fetched automatically, though: ixwebsocket (this
+# gateway's WebSocket layer) defaults to mbedTLS as its Windows TLS backend
+# (see the USE_TLS block below) via a plain find_package(MbedTLS), which
+# only succeeds because release-gateway.yml's Windows leg now vendors it
+# the same way it already vendors spdlog/protobuf - see this file's own
+# CMAKE_PREFIX_PATH block above for the third_party/mbedtls entry.
 option(KARSHIPTA_GATEWAY_ENABLE_RELAY
   "Build RelayTransport against relayly's real C++ SDK (BRIEF.md M4, optional for v0.1)"
   OFF)
