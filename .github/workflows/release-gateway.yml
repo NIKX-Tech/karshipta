@@ -6,12 +6,14 @@
 # -DKARSHIPTA_GATEWAY_ENABLE_MAVLINK=ON -DKARSHIPTA_GATEWAY_ENABLE_RELAY=ON.
 #
 # Two flavors (matching gateway/CMakeLists.txt's KARSHIPTA_GATEWAY_ENABLE_MAVLINK
-# product split): "full" (karshipta_gateway, MAVLink+relay where supported) and
-# "herald-only" (karshipta_herald, no MAVLink, for self-hosters who only want
-# Herald ingestion). Windows builds both without relay:
-# KARSHIPTA_GATEWAY_ENABLE_RELAY=ON is a hard CMake FATAL_ERROR there today -
-# relayly's C++ SDK has no Windows TLS backend yet (its own sdk/cpp/README.md
-# Requirements section), a real upstream gap, not something fixable here.
+# product split): "full" (karshipta_gateway, MAVLink+relay) and "herald-only"
+# (karshipta_herald, no MAVLink, for self-hosters who only want Herald
+# ingestion). Windows now builds relay ON too: relayly's C++ SDK shipped
+# Windows support (mbedTLS-based TLS, see its own sdk/cpp/README.md), and
+# gateway/CMakeLists.txt's Windows guard was removed to match. This is the
+# first time this workflow has actually built Windows-with-relay - watch
+# this job's Windows leg closely; if it fails, that is real, previously
+# untested surface, not a flake to retry past.
 #
 # Unsigned. Code signing (macOS notarization, Windows Authenticode) needs real
 # Apple Developer / Azure Trusted Signing credentials that do not exist yet -
@@ -154,7 +156,6 @@ jobs:
           mavlink_flag="ON"
           [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
           relay_flag="ON"
-          [[ "${{ runner.os }}" == "Windows" ]] && relay_flag="OFF"
           generator=()
           [[ "${{ runner.os }}" == "Windows" ]] && generator=(-G Ninja)
           cmake -S gateway -B gateway/build "${generator[@]}" \
@@ -257,5 +258,5 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             --title "karshipta ${{ github.ref_name }}" \
-            --notes "Unsigned gateway binaries. karshipta_gateway is the full build (MAVLink + relay on macOS/Linux; Windows ships without relay, relayly's C++ SDK has no Windows TLS backend yet - see gateway/docs/relay-transport.md). karshipta_herald is the MAVLink-disabled build for Herald-only ingestion (see gateway/docs/herald-ingest.md). Each archive includes a .sha256 checksum." \
+            --notes "Unsigned gateway binaries. karshipta_gateway is the full build (MAVLink + relay, all platforms including Windows - see gateway/docs/relay-transport.md). karshipta_herald is the MAVLink-disabled build for Herald-only ingestion (see gateway/docs/herald-ingest.md). Each archive includes a .sha256 checksum." \
             dist/*

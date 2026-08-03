@@ -69,20 +69,21 @@ endif()
 # relayly: the M4 relay transport's real C++ SDK (gateway/docs/relay-transport.md).
 # Declared before ixwebsocket below because enabling it changes how ixwebsocket
 # itself must be built (see the BUILD_SHARED_LIBS note in that block).
-# OFF by default everywhere, not just Windows: it pulls in a new dependency tree
-# (libsodium via libsodium-cmake, nlohmann/json) on top of relayly itself, and is
-# explicitly optional for v0.1 (ROADMAP.md) - enabling it by default would silently
-# grow CI build time/surface. relayly's C++ SDK v1 does not support Windows at all
-# (sdk/cpp/README.md's Requirements), so forcing it on there is a hard error, not a
-# silent no-op, to avoid a confusing "I turned it on and nothing happened".
+# OFF by default everywhere: it pulls in a new dependency tree (libsodium via
+# libsodium-cmake, nlohmann/json) on top of relayly itself, and is explicitly
+# optional for v0.1 (ROADMAP.md) - enabling it by default would silently grow
+# CI build time/surface.
+#
+# Windows used to be a hard FATAL_ERROR here: relayly's C++ SDK v1 had no
+# Windows support at all. That changed with relayly's Windows SDK release
+# (sdk/cpp/README.md now documents mbedTLS-based TLS on Windows, fetched
+# automatically the same way this file already consumes relayly via
+# FetchContent below) - this gateway has never actually built with relay ON
+# for Windows before, though, so treat it as newly unblocked and worth
+# watching closely (release-gateway.yml's Windows CI leg), not as proven.
 option(KARSHIPTA_GATEWAY_ENABLE_RELAY
   "Build RelayTransport against relayly's real C++ SDK (BRIEF.md M4, optional for v0.1)"
   OFF)
-if(KARSHIPTA_GATEWAY_ENABLE_RELAY AND WIN32)
-  message(FATAL_ERROR
-    "KARSHIPTA_GATEWAY_ENABLE_RELAY=ON is not supported on Windows: relayly's C++ "
-    "SDK v1 does not build there yet (see relayly's sdk/cpp/README.md Requirements).")
-endif()
 
 # IXWebSocket: vcpkg/Homebrew installs provide a CMake config; when absent
 # (Linux CI, bare dev machines) fall back to a pinned FetchContent build.

@@ -14,8 +14,8 @@ connects outward to a relay service, wrapping
 implementation is active.
 
 Only built when `KARSHIPTA_GATEWAY_ENABLE_RELAY` is `ON` (root
-`gateway/CMakeLists.txt`; `OFF` by default everywhere, and a hard CMake error
-on Windows) - see "Build gating" below.
+`gateway/CMakeLists.txt`; `OFF` by default everywhere) - see "Build gating"
+below.
 
 ## What relayly handles internally
 
@@ -44,7 +44,7 @@ reconnection; `RelayTransport` never touches wire bytes or crypto itself:
 ## Build gating
 
 `KARSHIPTA_GATEWAY_ENABLE_RELAY` (root `gateway/CMakeLists.txt`) defaults to
-`OFF` everywhere, not just on Windows:
+`OFF` everywhere:
 
 - relayly's C++ SDK is a new dependency tree on top of `ixwebsocket` (already
   used elsewhere in this repo): libsodium (via libsodium-cmake) and
@@ -52,11 +52,15 @@ reconnection; `RelayTransport` never touches wire bytes or crypto itself:
   this on would silently grow every build's (and CI's) dependency footprint
   and build time for a transport the M4 milestone explicitly marks optional
   for v0.1 (`ROADMAP.md`).
-- relayly's C++ SDK v1 does not support Windows at all (its own
-  `sdk/cpp/README.md` Requirements section). Setting
-  `KARSHIPTA_GATEWAY_ENABLE_RELAY=ON` on Windows is a CMake `FATAL_ERROR`,
-  not a silent no-op, so a Windows developer who tries to turn it on gets a
-  clear reason instead of a confusing missing target.
+
+Windows used to be a hard `FATAL_ERROR` here too (relayly's C++ SDK v1 had no
+Windows support at all). relayly has since shipped Windows support
+(mbedTLS-based TLS, fetched automatically the same way this repo already
+consumes relayly via `FetchContent`), so the guard was removed and
+`release-gateway.yml` now builds Windows with relay `ON` like every other
+platform. This gateway had never actually built with relay on Windows
+before that change - treat it as newly unblocked, not as long-proven,
+until a few real release runs confirm it.
 
 When off, `libs/transport/src/relay_transport.cpp` is not compiled into the
 `transport` library and `tests/transport/relay_transport_test.cpp` is not
