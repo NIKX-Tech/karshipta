@@ -8,12 +8,15 @@
 # Two flavors (matching gateway/CMakeLists.txt's KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 # product split): "full" (karshipta_gateway, MAVLink+relay) and "herald-only"
 # (karshipta_herald, no MAVLink, for self-hosters who only want Herald
-# ingestion). Windows now builds relay ON too: relayly's C++ SDK shipped
-# Windows support (mbedTLS-based TLS, see its own sdk/cpp/README.md), and
-# gateway/CMakeLists.txt's Windows guard was removed to match. This is the
-# first time this workflow has actually built Windows-with-relay - watch
-# this job's Windows leg closely; if it fails, that is real, previously
-# untested surface, not a flake to retry past.
+# ingestion). Only "full" builds with relay - Herald ingestion is plain
+# HTTP (gateway/docs/herald-ingest.md), it never has the NAT-traversal
+# problem relay solves, so herald-only has no reason to link relayly at
+# all, on any platform. Windows' "full" flavor now builds relay ON too:
+# relayly's C++ SDK shipped Windows support (mbedTLS-based TLS, see its own
+# sdk/cpp/README.md), and gateway/CMakeLists.txt's Windows guard was
+# removed to match. This is the first time this workflow has actually
+# built Windows-with-relay - watch that job's leg closely; if it fails,
+# that is real, previously untested surface, not a flake to retry past.
 #
 # Unsigned. Code signing (macOS notarization, Windows Authenticode) needs real
 # Apple Developer / Azure Trusted Signing credentials that do not exist yet -
@@ -177,7 +180,10 @@ jobs:
           export LDFLAGS="$ldflags"
           mavlink_flag="ON"
           [[ "${{ matrix.flavor }}" == "herald-only" ]] && mavlink_flag="OFF"
+          # herald-only never needs relay: Herald ingestion is plain HTTP,
+          # not the MAVLink-over-untrusted-network problem relay solves.
           relay_flag="ON"
+          [[ "${{ matrix.flavor }}" == "herald-only" ]] && relay_flag="OFF"
           generator=()
           [[ "${{ runner.os }}" == "Windows" ]] && generator=(-G Ninja)
           cmake -S gateway -B gateway/build "${generator[@]}" \
