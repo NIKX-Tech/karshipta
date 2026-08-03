@@ -186,7 +186,7 @@ if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
   FetchContent_Declare(
     relayly
     GIT_REPOSITORY https://github.com/NIKX-Tech/relayly.git
-    GIT_TAG fix/windows-dll-export-close-constants  # TEMP: verifying relayly PR #108 before revert to main
+    GIT_TAG main
     SOURCE_SUBDIR sdk/cpp
   )
   # Don't build relayly's own unit/integration test suite as part of ours.
