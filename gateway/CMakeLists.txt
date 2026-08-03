@@ -150,6 +150,17 @@ if(NOT ixwebsocket_FOUND)
     set(BUILD_SHARED_LIBS "${_karshipta_prev_build_shared_libs}")
     unset(_karshipta_prev_build_shared_libs)
   endif()
+  # mbedTLS's own CMakeLists.txt links ws2_32/bcrypt PUBLIC on its
+  # mbedcrypto target when WIN32 (bcrypt.lib provides BCryptGenRandom,
+  # its entropy source there) - but ixwebsocket's bundled FindMbedTLS.cmake
+  # is a classic find_library-based module, not a real CMake package
+  # config, so that PUBLIC requirement never propagates to whatever links
+  # ixwebsocket. Without this, linking ixwebsocket.dll on Windows fails
+  # with "unresolved external symbol BCryptGenRandom" - found only by an
+  # actual Windows CI run with relay (and therefore mbedTLS) enabled.
+  if(WIN32 AND KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    target_link_libraries(ixwebsocket PRIVATE bcrypt)
+  endif()
   if(NOT TARGET ixwebsocket::ixwebsocket)
     add_library(ixwebsocket::ixwebsocket ALIAS ixwebsocket)
   endif()
