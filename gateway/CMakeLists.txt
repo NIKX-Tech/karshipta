@@ -141,11 +141,26 @@ if(NOT ixwebsocket_FOUND)
     set(_karshipta_prev_build_shared_libs "${BUILD_SHARED_LIBS}")
     set(BUILD_SHARED_LIBS ON)
   endif()
+  # patches/ixwebsocket/ overlays a handful of ixwebsocket's own headers,
+  # adding IXWEBSOCKET_EXPORT to each class with a static const data member
+  # used as a default-argument value somewhere - see that directory's own
+  # README for the full story (a Windows-shared-DLL export gap upstream,
+  # found the hard way across several real CI builds as different call
+  # sites hit different unexported constants one at a time).
   FetchContent_Declare(
     ixwebsocket
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.5.zip
+    PATCH_COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/patches/ixwebsocket" <SOURCE_DIR>/ixwebsocket
   )
   FetchContent_MakeAvailable(ixwebsocket)
+  # IXWEBSOCKET_EXPORT (patches/ixwebsocket/IXWebSocketExport.h) only does
+  # anything when this is both WIN32 and actually built shared - PUBLIC so
+  # it propagates to whatever links ixwebsocket (relayly, this gateway),
+  # not just ixwebsocket's own compilation.
+  if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
+    target_compile_definitions(ixwebsocket PUBLIC IXWEBSOCKET_SHARED)
+  endif()
   if(KARSHIPTA_GATEWAY_ENABLE_RELAY)
     set(BUILD_SHARED_LIBS "${_karshipta_prev_build_shared_libs}")
     unset(_karshipta_prev_build_shared_libs)
