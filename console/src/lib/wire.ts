@@ -19,7 +19,38 @@ export {
 	WardOrigin
 } from './gen/karshipta/v1/common';
 export { Envelope } from './gen/karshipta/v1/envelope';
-export { AddWard, RemoveWard, WardConfigAck, WardConfigStatus } from './gen/karshipta/v1/fleet';
+export {
+	AddWard,
+	RemoveWard,
+	WardConfigAck,
+	WardConfigStatus,
+	Fleet,
+	CreateFleet,
+	RenameFleet,
+	DeleteFleet,
+	AddWardToFleet,
+	RemoveWardFromFleet,
+	FleetAck,
+	FleetAckStatus,
+	Zone,
+	ZoneType,
+	CreateZone,
+	UpdateZone,
+	DeleteZone,
+	ZoneAck,
+	ZoneAckStatus,
+	WardMissionPlan,
+	WardMissionState,
+	FleetMission,
+	CreateFleetMission,
+	FleetMissionAck,
+	FleetMissionAckStatus,
+	StopFleetMission,
+	RemoveFleetMission,
+	UpdateFleetMissionRoutes,
+	FleetMissionStatus,
+	FleetMissionStopAction
+} from './gen/karshipta/v1/fleet';
 export {
 	ArmCommand,
 	DisarmCommand,
