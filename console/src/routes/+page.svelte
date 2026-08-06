@@ -4,7 +4,8 @@
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
-	import { themeStore } from '$lib/theme.svelte';
+	import { obstacleStore } from '$lib/obstacles/obstacle-store.svelte';
+	import { airportStore } from '$lib/airports/airport-store.svelte';
 	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
 	import { FakeGateway } from '$lib/fake/fleet-sim';
@@ -97,10 +98,11 @@
 	// console shows by default. onMount, not $effect: feeding the store must
 	// not make this block depend on it.
 	onMount(() => {
-		themeStore.init();
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
 		fleetLabel = env.PUBLIC_FLEET_LABEL || DEFAULT_FLEET_LABEL;
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
+		obstacleStore.configure(env.PUBLIC_OPENAIP_KEY);
+		airportStore.configure(env.PUBLIC_OPENAIP_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
 		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {
@@ -132,34 +134,6 @@
 					VIEWER
 				</span>
 			{/if}
-			<button
-				class="flex h-6 w-6 items-center justify-center rounded text-fg-muted hover:bg-white/5 hover:text-fg"
-				onclick={() => themeStore.toggle()}
-				aria-label="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
-				title="Switch to {themeStore.current === 'dark' ? 'light' : 'dark'} theme"
-			>
-				{#if themeStore.current === 'dark'}
-					<svg
-						width="14"
-						height="14"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.75"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					>
-						<circle cx="12" cy="12" r="4" />
-						<path
-							d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
-						/>
-					</svg>
-				{:else}
-					<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-						<path d="M20.5 14.5a8.5 8.5 0 1 1-9-13 7 7 0 0 0 9 13Z" />
-					</svg>
-				{/if}
-			</button>
 		</div>
 	</header>
 

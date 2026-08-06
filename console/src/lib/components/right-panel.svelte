@@ -5,6 +5,7 @@
 	import WardTab from '$lib/components/ward-tab.svelte';
 	import MissionTab from '$lib/components/mission-tab.svelte';
 	import ZonesTab from '$lib/components/zones-tab.svelte';
+	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -212,5 +213,8 @@
 				{/if}
 			{/snippet}
 		</Tabs>
+
+		<div class="flex-1"></div>
+		<ThemeToggle />
 	</div>
 </div>

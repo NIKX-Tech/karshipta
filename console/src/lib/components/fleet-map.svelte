@@ -27,6 +27,8 @@
 	import { fleet, type DraftWaypoint } from '$lib/fleet-store.svelte';
 	import { fleetGroups } from '$lib/fleet-groups/fleet-groups-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
+	import { obstacleStore } from '$lib/obstacles/obstacle-store.svelte';
+	import { airportStore } from '$lib/airports/airport-store.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
 	import type { ViewportBounds } from '$lib/geozones/types';
@@ -98,6 +100,22 @@
 	// z/y/x, not the usual z/x/y - easy to get backwards.
 	const DARK_TILES = ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'];
 	const LIGHT_TILES = ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'];
+	// CARTO Voyager: a colorful roadmap style, free/no-key like dark_all and
+	// light_all above (same CDN, same terms) - offered only alongside the
+	// light theme (see mapStyle's own comment), since its light background
+	// would reintroduce the exact light-map-under-dark-chrome mismatch
+	// DARK_TILES/LIGHT_TILES already exist to avoid.
+	const ROADMAP_TILES = ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'];
+	// OpenTopoMap: free/no-key elevation-shaded terrain tiles, community-run
+	// (not CARTO/Esri) - three round-robin subdomains, matching their own
+	// published usage guidance for spreading load. Its shading has no real
+	// dark variant, so - like satellite below - it's offered regardless of
+	// the app's current theme rather than paired with just one.
+	const TERRAIN_TILES = [
+		'https://a.tile.opentopomap.org/{z}/{x}/{y}.png',
+		'https://b.tile.opentopomap.org/{z}/{x}/{y}.png',
+		'https://c.tile.opentopomap.org/{z}/{x}/{y}.png'
+	];
 	const SATELLITE_TILES = [
 		'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
 	];
@@ -114,23 +132,56 @@
 	// switch to, set once at source creation: MapLibre's RasterTileSource
 	// has no setAttribution() to go with setTiles(), and rewriting it on
 	// every switch isn't worth the complexity this saves - showing all
-	// three credits regardless of which is currently active is a common,
+	// credits regardless of which is currently active is a common,
 	// acceptable tradeoff other map apps make too.
 	const BASEMAP_ATTRIBUTION =
-		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics';
-	const SATELLITE_STORAGE_KEY = 'karshipta:satellite';
-	function readStoredSatellite(): boolean {
-		if (typeof localStorage === 'undefined') return false;
-		return localStorage.getItem(SATELLITE_STORAGE_KEY) === 'true';
+		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA)';
+
+	// 'default' follows the app theme (DARK_TILES/LIGHT_TILES, unchanged
+	// behavior); 'roadmap' is light-only (see ROADMAP_TILES's own comment) -
+	// picking it while on the dark theme isn't offered in the menu below,
+	// and the effect further down falls back to 'default' if the theme
+	// flips to dark while it's active. 'terrain'/'satellite' are themeless,
+	// same as satellite always was.
+	type MapStyle = 'default' | 'roadmap' | 'terrain' | 'satellite';
+	const MAP_STYLE_OPTIONS: { id: MapStyle; label: string }[] = [
+		{ id: 'default', label: 'Map' },
+		{ id: 'roadmap', label: 'Roadmap' },
+		{ id: 'terrain', label: 'Terrain' },
+		{ id: 'satellite', label: 'Satellite' }
+	];
+	const MAP_STYLE_STORAGE_KEY = 'karshipta:mapStyle';
+	function readStoredMapStyle(): MapStyle {
+		if (typeof localStorage === 'undefined') return 'default';
+		const stored = localStorage.getItem(MAP_STYLE_STORAGE_KEY);
+		if (stored === 'roadmap' || stored === 'terrain' || stored === 'satellite') return stored;
+		// Migrates the old boolean satellite flag transparently, so a
+		// returning operator's prior choice carries over.
+		return localStorage.getItem('karshipta:satellite') === 'true' ? 'satellite' : 'default';
 	}
-	let satellite = $state(readStoredSatellite());
-	function setSatellite(value: boolean): void {
-		satellite = value;
+	let mapStyle = $state(readStoredMapStyle());
+	function setMapStyle(value: MapStyle): void {
+		mapStyle = value;
 		if (typeof localStorage === 'undefined') return;
-		localStorage.setItem(SATELLITE_STORAGE_KEY, String(value));
+		localStorage.setItem(MAP_STYLE_STORAGE_KEY, value);
 	}
+	// Roadmap only exists alongside the light theme (see MapStyle's own
+	// comment) - if the theme changes out from under an active roadmap
+	// selection, fall back rather than silently keep a light-styled map
+	// under dark chrome.
+	$effect(() => {
+		if (mapStyle === 'roadmap' && themeStore.current !== 'light') setMapStyle('default');
+	});
 	const basemapTiles = $derived(
-		satellite ? SATELLITE_TILES : themeStore.current === 'light' ? LIGHT_TILES : DARK_TILES
+		mapStyle === 'satellite'
+			? SATELLITE_TILES
+			: mapStyle === 'terrain'
+				? TERRAIN_TILES
+				: mapStyle === 'roadmap'
+					? ROADMAP_TILES
+					: themeStore.current === 'light'
+						? LIGHT_TILES
+						: DARK_TILES
 	);
 
 	// Off by default: an operator who configures PUBLIC_OPENAIP_KEY opts
@@ -139,6 +190,9 @@
 	// on being the operator's OWN drawn geometry, a different trust level
 	// than a third-party overlay.
 	let showGeozones = $state(false);
+	// Same off-by-default reasoning as showGeozones above.
+	let showObstacles = $state(false);
+	let showAirports = $state(false);
 	let showZones = $state(true);
 	let layersMenuOpen = $state(false);
 	let layersMenuEl: HTMLDivElement | undefined;
@@ -170,6 +224,12 @@
 	const GEOZONE_SOURCE = 'geozones';
 	const GEOZONE_FILL_LAYER = 'geozones-fill';
 	const GEOZONE_LINE_LAYER = 'geozones-line';
+	const OBSTACLE_SOURCE = 'obstacles';
+	const OBSTACLE_LAYER = 'obstacles-points';
+	const AIRPORT_SOURCE = 'airports';
+	const AIRPORT_LAYER = 'airports-points';
+	const OBSTACLE_COLOR = '#f5a623';
+	const AIRPORT_COLOR = '#3b9eff';
 	const ZONE_SOURCE = 'zones';
 	const ZONE_FILL_LAYER = 'zones-fill';
 	const ZONE_LINE_LAYER = 'zones-line';
@@ -475,12 +535,17 @@
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
 		});
-		// Safe to call unconditionally on every moveend: geozoneStore.requestViewport()
-		// itself no-ops while inactive (no key configured) or not visible
-		// (the "No-fly zones" checkbox, see the setVisible() effect below) -
-		// this function only adds the zoom-level check on top, since the
-		// store has no opinion on zoom, only on bbox size.
-		const requestGeozones = () => {
+		// Safe to call unconditionally on every moveend: each store's own
+		// requestViewport() no-ops while inactive (no key configured) or not
+		// visible (its own checkbox in the layers menu, see the setVisible()
+		// effects below) - this function only adds the zoom-level check on
+		// top, since none of the three stores has an opinion on zoom, only on
+		// bbox size. All three requests for one moveend still end up
+		// serialized through the same openAipRequestGate (see that module's
+		// own header comment), so adding obstacles/airports here does not
+		// multiply the actual request rate the way three independent
+		// per-layer schedules would.
+		const requestOpenAipLayers = () => {
 			if (created.getZoom() < MIN_GEOZONE_ZOOM) return;
 			const bounds = created.getBounds();
 			const viewport: ViewportBounds = [
@@ -490,8 +555,10 @@
 				bounds.getNorth()
 			];
 			geozoneStore.requestViewport(viewport);
+			obstacleStore.requestViewport(viewport);
+			airportStore.requestViewport(viewport);
 		};
-		created.on('moveend', requestGeozones);
+		created.on('moveend', requestOpenAipLayers);
 		created.on('load', () => {
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
@@ -569,6 +636,44 @@
 						],
 						'line-width': 1.5,
 						'line-opacity': 0.6
+					}
+				},
+				ROUTE_SOURCE
+			);
+			// obstacles/airports: same reference-data tier as geozones above,
+			// point features so a circle layer (not fill/line) is enough.
+			created.addSource(OBSTACLE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: OBSTACLE_LAYER,
+					type: 'circle',
+					source: OBSTACLE_SOURCE,
+					paint: {
+						'circle-radius': 4,
+						'circle-color': OBSTACLE_COLOR,
+						'circle-stroke-width': 1.5,
+						'circle-stroke-color': '#0a0e12'
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addSource(AIRPORT_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: AIRPORT_LAYER,
+					type: 'circle',
+					source: AIRPORT_SOURCE,
+					paint: {
+						'circle-radius': 4,
+						'circle-color': AIRPORT_COLOR,
+						'circle-stroke-width': 1.5,
+						'circle-stroke-color': '#0a0e12'
 					}
 				},
 				ROUTE_SOURCE
@@ -690,7 +795,7 @@
 				.querySelector('.maplibregl-ctrl-attrib')
 				?.classList.remove('maplibregl-compact-show');
 			mapLoaded = true;
-			requestGeozones();
+			requestOpenAipLayers();
 		});
 		map = created;
 		return () => {
@@ -757,7 +862,7 @@
 	$effect(() => {
 		const activeMap = map;
 		const tiles = basemapTiles;
-		const showLabels = satellite;
+		const showLabels = mapStyle === 'satellite';
 		if (!activeMap || !mapLoaded) return;
 		const source = activeMap.getSource<maplibregl.RasterTileSource>('basemap');
 		source?.setTiles(tiles);
@@ -773,12 +878,18 @@
 	// and its own failure-retry loop both gate on this internally now.
 	// Previously this effect only ever touched the map layer's CSS
 	// visibility, so unchecking "No-fly zones" hid already-fetched data but
-	// left requestGeozones() (called on every moveend, unconditionally)
+	// left requestOpenAipLayers() (called on every moveend, unconditionally)
 	// still firing real network requests in the background indefinitely -
 	// a real bug, not a feature: burning through OpenAIP's rate limit even
 	// with the layer explicitly turned off.
 	$effect(() => {
 		geozoneStore.setVisible(showGeozones);
+	});
+	$effect(() => {
+		obstacleStore.setVisible(showObstacles);
+	});
+	$effect(() => {
+		airportStore.setVisible(showAirports);
 	});
 
 	// no-fly-zone layer's own paint visibility, independent of whether
@@ -791,6 +902,20 @@
 		const visibility = visible ? 'visible' : 'none';
 		activeMap.setLayoutProperty(GEOZONE_FILL_LAYER, 'visibility', visibility);
 		activeMap.setLayoutProperty(GEOZONE_LINE_LAYER, 'visibility', visibility);
+	});
+
+	// obstacle/airport layer visibility - same shape as the geozone effect above.
+	$effect(() => {
+		const activeMap = map;
+		const visible = showObstacles;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(OBSTACLE_LAYER, 'visibility', visible ? 'visible' : 'none');
+	});
+	$effect(() => {
+		const activeMap = map;
+		const visible = showAirports;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(AIRPORT_LAYER, 'visibility', visible ? 'visible' : 'none');
 	});
 
 	// Operator-drawn zone layer visibility - same shape as the geozone
@@ -835,6 +960,42 @@
 			features: geozoneStore.zones.map((zone) => ({
 				...zone.polygon,
 				properties: { category: zone.category, name: zone.name }
+			}))
+		});
+	});
+
+	// push loaded obstacles/airports into their sources whenever either
+	// store updates - same shape as the geozone effect above, points
+	// instead of polygons.
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(OBSTACLE_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: obstacleStore.obstacles.map((obstacle) => ({
+				type: 'Feature',
+				properties: { category: obstacle.category, name: obstacle.name },
+				geometry: {
+					type: 'Point',
+					coordinates: [obstacle.longitudeDeg, obstacle.latitudeDeg]
+				}
+			}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(AIRPORT_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: airportStore.airports.map((airport) => ({
+				type: 'Feature',
+				properties: { category: airport.category, name: airport.name },
+				geometry: {
+					type: 'Point',
+					coordinates: [airport.longitudeDeg, airport.latitudeDeg]
+				}
 			}))
 		});
 	});
@@ -1284,16 +1445,19 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
-	{#if geozoneStore.active && geozoneStore.loadError}
+	{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError)}
 		<!-- Reassuring, not alarming: this is almost always OpenAIP's own
-		     rate limit (see geozone-store.svelte.ts), which clears on its own
-		     within FAILURE_COOLDOWN_MS - not a real, ongoing failure the
-		     operator needs to act on. The raw error still goes to
-		     console.error and sits in the title attribute for anyone who
-		     wants it. -->
+		     rate limit (see openaip/request-gate.ts, shared across all three
+		     layers), which clears on its own within its cooldown window - not
+		     a real, ongoing failure the operator needs to act on. One
+		     combined banner rather than up to three stacked ones, since all
+		     three layers share the same rate-limited key and so tend to fail
+		     together, not independently. Each store's own raw error still
+		     goes to console.error and sits in its own title attribute for
+		     anyone who wants it. -->
 		<p
 			role="status"
-			title={geozoneStore.loadError}
+			title={geozoneStore.loadError ?? obstacleStore.loadError ?? airportStore.loadError}
 			class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2 rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
 		>
 			Loading airspace data - this can take a few seconds.
@@ -1363,39 +1527,52 @@
 						<p class="mb-1.5 text-[9px] font-medium tracking-widest text-fg-muted">MAP STYLE</p>
 						<!-- A choice, not an on/off switch - checkmarks against the
 					     selected option, not a checkbox, since exactly one is always
-					     active. Light/dark isn't offered here: it follows the
-					     app-wide theme toggle (themeStore), same as everything else. -->
+					     active. Plain light/dark isn't offered here as its own pair:
+					     "Map" follows the app-wide theme toggle (themeStore) rather
+					     than exposing a second, independent choice - see basemapTiles's
+					     own comment. Roadmap only appears next to the light theme, for
+					     the same reason. -->
 						<div class="flex flex-col gap-0.5">
-							<button
-								type="button"
-								onclick={() => setSatellite(false)}
-								aria-pressed={!satellite}
-								class="flex items-center justify-between rounded px-2 py-1 text-left text-[11px] {!satellite
-									? 'bg-accent/15 text-accent'
-									: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
-							>
-								Map
-								{#if !satellite}<span aria-hidden="true">&check;</span>{/if}
-							</button>
-							<button
-								type="button"
-								onclick={() => setSatellite(true)}
-								aria-pressed={satellite}
-								class="flex items-center justify-between rounded px-2 py-1 text-left text-[11px] {satellite
-									? 'bg-accent/15 text-accent'
-									: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
-							>
-								Satellite
-								{#if satellite}<span aria-hidden="true">&check;</span>{/if}
-							</button>
+							{#each MAP_STYLE_OPTIONS as option (option.id)}
+								{#if option.id !== 'roadmap' || themeStore.current === 'light'}
+									<button
+										type="button"
+										onclick={() => setMapStyle(option.id)}
+										aria-pressed={mapStyle === option.id}
+										class="flex items-center justify-between rounded px-2 py-1 text-left text-[11px] {mapStyle ===
+										option.id
+											? 'bg-accent/15 text-accent'
+											: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
+									>
+										{option.label}
+										{#if mapStyle === option.id}<span aria-hidden="true">&check;</span>{/if}
+									</button>
+								{/if}
+							{/each}
 						</div>
 					</div>
-					{#if geozoneStore.active}
+					{#if geozoneStore.active || obstacleStore.active || airportStore.active}
 						<div class="border-t border-edge pt-2">
-							<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
-								<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
-								No-fly zones
-							</label>
+							<div class="flex flex-col gap-0.5">
+								{#if geozoneStore.active}
+									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+										<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
+										No-fly zones
+									</label>
+								{/if}
+								{#if obstacleStore.active}
+									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+										<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
+										Obstacles
+									</label>
+								{/if}
+								{#if airportStore.active}
+									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+										<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
+										Airports
+									</label>
+								{/if}
+							</div>
 						</div>
 					{/if}
 					<div class="border-t border-edge pt-2">
@@ -1409,9 +1586,11 @@
 		</div>
 	</div>
 
-	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones)}
+	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones) || (obstacleStore.active && showObstacles) || (airportStore.active && showAirports)}
 		{@const showZoneRow = zoneStore.zoneIds.length > 0 && showZones}
 		{@const showGeozoneRow = geozoneStore.active && showGeozones}
+		{@const showObstacleRow = obstacleStore.active && showObstacles}
+		{@const showAirportRow = airportStore.active && showAirports}
 		<!-- One panel, not two separately-floating boxes: they used to sit at
 		     different bottom offsets that had to be kept in sync by hand, and
 		     read as visually disconnected even when both were showing. -->
@@ -1448,6 +1627,30 @@
 					<li class="flex items-center gap-1 text-[10px]">
 						<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
 						Other airspace
+					</li>
+				</ul>
+			{/if}
+			{#if showObstacleRow}
+				<ul
+					class="flex gap-3 {showZoneRow || showGeozoneRow ? 'border-t border-edge pt-1.5' : ''}"
+					aria-label="Obstacle legend"
+				>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
+						Obstacles
+					</li>
+				</ul>
+			{/if}
+			{#if showAirportRow}
+				<ul
+					class="flex gap-3 {showZoneRow || showGeozoneRow || showObstacleRow
+						? 'border-t border-edge pt-1.5'
+						: ''}"
+					aria-label="Airport legend"
+				>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
+						Airports
 					</li>
 				</ul>
 			{/if}

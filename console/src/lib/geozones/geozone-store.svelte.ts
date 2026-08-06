@@ -2,6 +2,7 @@ import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
 import { point } from '@turf/helpers';
 import type { Geozone, GeozoneSource, ViewportBounds } from './types';
 import { OpenAipGeozoneSource } from './openaip';
+import { openAipRequestGate } from '../openaip/request-gate';
 
 // 1500ms, not a snappier value: OpenAIP's free-tier key is rate-limited
 // (confirmed directly - 4 requests inside ~6s starts returning 429s), and
@@ -10,14 +11,16 @@ import { OpenAipGeozoneSource } from './openaip';
 // to fetch" TypeError, indistinguishable from a real network failure. A
 // snappier debounce (600ms, the original value) fires a fetch on nearly
 // every pan/zoom step during continuous interaction, burning through that
-// budget in seconds.
+// budget in seconds. This is this store's own moveend debounce, separate
+// from - and in addition to - the cross-layer spacing openAipRequestGate
+// enforces once a fetch actually gets enqueued (see that module's own
+// header comment on why one alone isn't enough with obstacles/airports
+// sharing the same rate-limited key).
 const FETCH_DEBOUNCE_MS = 1500;
-// After ANY failure (rate limit or otherwise - the two are indistinguishable
-// from here, see above), stop firing new requests for a while rather than
-// retrying on the very next moveend, which would almost certainly hit the
-// same limit again. 10s, not longer: confirmed directly that OpenAIP's
-// rate-limit window clears in roughly 5-10s, so this is calibrated to that,
-// not an arbitrary guess.
+// After a failure, this store's own self-heal retry (see fetchViewport's
+// catch block) waits this long before trying the last known viewport again.
+// Matches openAipRequestGate's own cooldown value so the retry lands right
+// as the gate becomes willing to run it, not sooner.
 const FAILURE_COOLDOWN_MS = 10_000;
 // Successful responses are cached this long, keyed by a coarse rounding of
 // the requested bbox (see cacheKeyFor) - panning back and forth within
@@ -66,9 +69,6 @@ class GeozoneStore {
 	private visible = false;
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastRequestId = 0;
-	// Set past Date.now() after any failed fetch; requestViewport() ignores
-	// calls until this passes instead of arming a new debounce timer.
-	private cooldownUntilMs = 0;
 	// Most recent viewport requestViewport() was given, tracked regardless
 	// of visibility (a call while hidden still updates this) - both the
 	// failure auto-retry below and setVisible(true) need the freshest
@@ -110,12 +110,14 @@ class GeozoneStore {
 	}
 
 	/** debounced viewport fetch; safe to call on every map moveend regardless
-	 * of visibility - a no-op while hidden or inactive, or during a
-	 * post-failure cooldown (see FAILURE_COOLDOWN_MS). Caller is expected to
-	 * have already decided the viewport is worth fetching at all (e.g. not
-	 * zoomed out past whatever floor makes airspace data meaningful) -
-	 * this store has no opinion on zoom level, only on bbox size (see
-	 * openaip.ts's own 5-degree clamp). */
+	 * of visibility - a no-op while hidden or inactive. Post-failure backoff
+	 * is openAipRequestGate's job now (shared across every OpenAIP layer,
+	 * not just this one) - this always arms the debounce and lets the gate
+	 * decide when the resulting fetch is actually allowed to run. Caller is
+	 * expected to have already decided the viewport is worth fetching at
+	 * all (e.g. not zoomed out past whatever floor makes airspace data
+	 * meaningful) - this store has no opinion on zoom level, only on bbox
+	 * size (see openaip.ts's own 5-degree clamp). */
 	requestViewport(bounds: ViewportBounds): void {
 		if (!this.source) return;
 		// Tracked even while hidden, deliberately before the visibility
@@ -124,7 +126,6 @@ class GeozoneStore {
 		// to be visible.
 		this.lastBounds = bounds;
 		if (!this.visible) return;
-		if (Date.now() < this.cooldownUntilMs) return;
 		if (this.debounceTimer) clearTimeout(this.debounceTimer);
 		this.debounceTimer = setTimeout(() => void this.fetchViewport(bounds), FETCH_DEBOUNCE_MS);
 	}
@@ -141,7 +142,6 @@ class GeozoneStore {
 		if (this.retryTimer) clearTimeout(this.retryTimer);
 		this.debounceTimer = undefined;
 		this.retryTimer = undefined;
-		this.cooldownUntilMs = 0;
 	}
 
 	private async fetchViewport(bounds: ViewportBounds): Promise<void> {
@@ -157,29 +157,35 @@ class GeozoneStore {
 		}
 
 		const requestId = ++this.lastRequestId;
-		try {
-			const zones = await source.fetchViewport(bounds);
-			if (requestId !== this.lastRequestId) return; // superseded by a newer viewport
-			this.zones = zones;
-			this.loadError = undefined;
-			this.cache.set(cacheKey, { zones, fetchedAtMs: Date.now() });
-		} catch (error) {
-			if (requestId !== this.lastRequestId) return;
-			this.loadError = error instanceof Error ? error.message : String(error);
-			this.cooldownUntilMs = Date.now() + FAILURE_COOLDOWN_MS;
-			console.error('geozones: failed to load viewport', error);
-			// Self-heal: retry the latest known viewport once the cooldown
-			// lifts, instead of only ever retrying on the next moveend - an
-			// operator who stops touching the map right after a failure would
-			// otherwise see loadError sit there indefinitely. Still gated on
-			// `visible` inside fetchViewport() itself, so turning the layer
-			// off cancels this via stopTimers() and it will not silently
-			// fire again in the background.
-			if (this.retryTimer) clearTimeout(this.retryTimer);
-			this.retryTimer = setTimeout(() => {
-				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
-			}, FAILURE_COOLDOWN_MS);
-		}
+		// Enqueued, not called directly: openAipRequestGate is the one place
+		// that decides when this is actually safe to run relative to every
+		// other OpenAIP layer's own requests (see that module's own header
+		// comment).
+		await openAipRequestGate.enqueue(async () => {
+			try {
+				const zones = await source.fetchViewport(bounds);
+				if (requestId !== this.lastRequestId) return; // superseded by a newer viewport
+				this.zones = zones;
+				this.loadError = undefined;
+				this.cache.set(cacheKey, { zones, fetchedAtMs: Date.now() });
+			} catch (error) {
+				if (requestId !== this.lastRequestId) return;
+				this.loadError = error instanceof Error ? error.message : String(error);
+				openAipRequestGate.noteFailure();
+				console.error('geozones: failed to load viewport', error);
+				// Self-heal: retry the latest known viewport once the cooldown
+				// lifts, instead of only ever retrying on the next moveend - an
+				// operator who stops touching the map right after a failure would
+				// otherwise see loadError sit there indefinitely. Still gated on
+				// `visible` inside fetchViewport() itself, so turning the layer
+				// off cancels this via stopTimers() and it will not silently
+				// fire again in the background.
+				if (this.retryTimer) clearTimeout(this.retryTimer);
+				this.retryTimer = setTimeout(() => {
+					if (this.lastBounds) void this.fetchViewport(this.lastBounds);
+				}, FAILURE_COOLDOWN_MS);
+			}
+		});
 	}
 }
 

@@ -133,8 +133,13 @@ export {
 // demo engine: a self-contained fake fleet, useful for any app's dev/demo mode
 export { FakeGateway, FAKE_FLEET_CENTER, type DemoEngine } from './fake/fleet-sim';
 
-// theme (light/dark, shared with any consuming app - see theme.css)
+// theme (light/dark, shared with any consuming app - see theme.css).
+// ThemeToggle is a generic UI control over that shared store, not a
+// self-host-vs-hosted opinion (same reasoning as LocationPickerBar above),
+// so both this app's own right-panel.svelte and a consuming app's can place
+// it themselves rather than each hand-rolling their own toggle.
 export { themeStore, type Theme } from './theme.svelte';
+export { default as ThemeToggle } from './components/theme-toggle.svelte';
 
 // browser geolocation (shared by initial map centering and demo-ward placement)
 export { locateOrFallback, type LatLon } from './geolocation';
@@ -143,6 +148,17 @@ export { locateOrFallback, type LatLon } from './geolocation';
 export { geozoneStore } from './geozones/geozone-store.svelte';
 export { OpenAipGeozoneSource } from './geozones/openaip';
 export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './geozones/types';
+
+// obstacles/airports (optional OpenAIP point layers, same opt-in-by-key
+// shape as geozones above - all three share the request coordination in
+// openaip/request-gate.ts, not exported since it's an internal detail no
+// consuming app needs to reach directly).
+export { obstacleStore } from './obstacles/obstacle-store.svelte';
+export { OpenAipObstacleSource } from './obstacles/openaip';
+export type { Obstacle, ObstacleCategory, ObstacleSource } from './obstacles/types';
+export { airportStore } from './airports/airport-store.svelte';
+export { OpenAipAirportSource } from './airports/openaip';
+export type { Airport, AirportCategory, AirportSource } from './airports/types';
 
 // zones (operator-drawn keep-in/keep-out geofences, sent to the gateway -
 // a different concept from geozoneStore's read-only airspace data above)
