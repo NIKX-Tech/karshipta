@@ -36,6 +36,15 @@ function isPointGeometry(geometry: unknown): geometry is GeoJSON.Point {
 	return (geometry as Record<string, unknown>).type === 'Point';
 }
 
+/** Same { value, unit } shape confirmed live on obstacles' own elevation
+ * field - see airports/types.ts's own comment on this being inferred, not
+ * independently confirmed for this endpoint. */
+function numericValueOf(field: unknown): number | undefined {
+	if (typeof field !== 'object' || field === null) return undefined;
+	const value = (field as Record<string, unknown>).value;
+	return typeof value === 'number' ? value : undefined;
+}
+
 /** Defensive parse: unexpected shapes are skipped, never thrown - same
  * philosophy as geozones/openaip.ts's own parseAirspace. */
 function parseAirport(raw: unknown): Airport | undefined {
@@ -55,6 +64,8 @@ function parseAirport(raw: unknown): Airport | undefined {
 		name,
 		category: categoryFor(item.type),
 		icaoCode: typeof icaoCode === 'string' && icaoCode ? icaoCode : undefined,
+		countryCode: typeof item.country === 'string' ? item.country : undefined,
+		elevationM: numericValueOf(item.elevation),
 		latitudeDeg,
 		longitudeDeg
 	};

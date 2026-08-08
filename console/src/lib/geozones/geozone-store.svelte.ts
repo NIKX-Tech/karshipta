@@ -3,6 +3,7 @@ import { point } from '@turf/helpers';
 import type { Geozone, GeozoneSource, ViewportBounds } from './types';
 import { OpenAipGeozoneSource } from './openaip';
 import { openAipRequestGate } from '../openaip/request-gate';
+import { tileOpenAipBounds } from '../openaip/tile-bounds';
 
 // 1500ms, not a snappier value: OpenAIP's free-tier key is rate-limited
 // (confirmed directly - 4 requests inside ~6s starts returning 429s), and
@@ -157,35 +158,52 @@ class GeozoneStore {
 		}
 
 		const requestId = ++this.lastRequestId;
-		// Enqueued, not called directly: openAipRequestGate is the one place
-		// that decides when this is actually safe to run relative to every
-		// other OpenAIP layer's own requests (see that module's own header
-		// comment).
-		await openAipRequestGate.enqueue(async () => {
-			try {
-				const zones = await source.fetchViewport(bounds);
-				if (requestId !== this.lastRequestId) return; // superseded by a newer viewport
-				this.zones = zones;
-				this.loadError = undefined;
-				this.cache.set(cacheKey, { zones, fetchedAtMs: Date.now() });
-			} catch (error) {
-				if (requestId !== this.lastRequestId) return;
-				this.loadError = error instanceof Error ? error.message : String(error);
-				openAipRequestGate.noteFailure();
-				console.error('geozones: failed to load viewport', error);
-				// Self-heal: retry the latest known viewport once the cooldown
-				// lifts, instead of only ever retrying on the next moveend - an
-				// operator who stops touching the map right after a failure would
-				// otherwise see loadError sit there indefinitely. Still gated on
-				// `visible` inside fetchViewport() itself, so turning the layer
-				// off cancels this via stopTimers() and it will not silently
-				// fire again in the background.
-				if (this.retryTimer) clearTimeout(this.retryTimer);
-				this.retryTimer = setTimeout(() => {
-					if (this.lastBounds) void this.fetchViewport(this.lastBounds);
-				}, FAILURE_COOLDOWN_MS);
-			}
-		});
+		// Split into up to 2 side-by-side queries when the viewport is wide
+		// enough that one 5-degree-clamped window would only cover a small,
+		// misleadingly dense fraction of what's visible (see tile-bounds.ts).
+		// Each tile is still enqueued individually - not called directly -
+		// so openAipRequestGate keeps deciding when each one is actually safe
+		// to run relative to every other OpenAIP layer's own requests (see
+		// that module's own header comment); a 2-tile batch just means twice
+		// as many enqueue calls, not a second pacing mechanism.
+		const tiles = tileOpenAipBounds(bounds);
+		const tileResults: Geozone[][] = [];
+		let tileError: unknown;
+		await Promise.all(
+			tiles.map((tile, index) =>
+				openAipRequestGate.enqueue(async () => {
+					try {
+						tileResults[index] = await source.fetchViewport(tile);
+					} catch (error) {
+						tileError = error;
+					}
+				})
+			)
+		);
+		if (requestId !== this.lastRequestId) return; // superseded by a newer viewport
+		if (tileError !== undefined) {
+			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
+			openAipRequestGate.noteFailure();
+			console.error('geozones: failed to load viewport', tileError);
+			// Self-heal: retry the latest known viewport once the cooldown
+			// lifts, instead of only ever retrying on the next moveend - an
+			// operator who stops touching the map right after a failure would
+			// otherwise see loadError sit there indefinitely. Still gated on
+			// `visible` inside fetchViewport() itself, so turning the layer
+			// off cancels this via stopTimers() and it will not silently
+			// fire again in the background.
+			if (this.retryTimer) clearTimeout(this.retryTimer);
+			this.retryTimer = setTimeout(() => {
+				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
+			}, FAILURE_COOLDOWN_MS);
+			return;
+		}
+		// Deduped by id: adjacent tiles can both legitimately return a zone
+		// that straddles the split line.
+		const zones = [...new Map(tileResults.flat().map((zone) => [zone.id, zone])).values()];
+		this.zones = zones;
+		this.loadError = undefined;
+		this.cache.set(cacheKey, { zones, fetchedAtMs: Date.now() });
 	}
 }
 

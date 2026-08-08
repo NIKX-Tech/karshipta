@@ -160,6 +160,59 @@ export { airportStore } from './airports/airport-store.svelte';
 export { OpenAipAirportSource } from './airports/openaip';
 export type { Airport, AirportCategory, AirportSource } from './airports/types';
 
+// cities (bundled reference data, not an OpenAIP layer - see
+// cities/city-data.ts's own comment on why there's no key/rate-limit
+// concern here, unlike the three layers above).
+export { cityStore } from './cities/city-store.svelte';
+export type { City } from './cities/types';
+
+// aircraft (airplanes.live, no key/signup - see aircraft-store.svelte.ts
+// and airplaneslive.ts's own comment on why this replaced an earlier
+// OpenSky-based version: OpenSky's anonymous REST API sends a fixed CORS
+// header that blocks every browser origin but its own, so it could never
+// actually work client-side).
+export { aircraftStore } from './aircraft/aircraft-store.svelte';
+export { AirplanesLiveAircraftSource } from './aircraft/airplaneslive';
+export { isAircraftEmergency } from './aircraft/types';
+export type { Aircraft, AircraftCategory, AircraftSource } from './aircraft/types';
+
+// earthquakes (USGS, fully open feed - see earthquake-store.svelte.ts).
+export { earthquakeStore } from './earthquakes/earthquake-store.svelte';
+export { UsgsEarthquakeSource } from './earthquakes/usgs';
+export type { Earthquake, EarthquakeSource } from './earthquakes/types';
+
+// wildfires (NASA FIRMS - needs its own MAP_KEY, same configure()/active
+// shape as the OpenAIP layers, but an independent key/budget from theirs).
+export { wildfireStore } from './wildfires/wildfire-store.svelte';
+export { FirmsFireHotspotSource } from './wildfires/firms';
+export type { FireHotspot, FireHotspotSource } from './wildfires/types';
+
+// weather (Open-Meteo, fully open - see weather-store.svelte.ts on why
+// this tracks the map center rather than a viewport like every layer
+// above).
+export { weatherStore } from './weather/weather-store.svelte';
+export { OpenMeteoWeatherSource } from './weather/open-meteo';
+export type { WeatherConditions, WeatherSource } from './weather/types';
+export { weatherIconShape, weatherConditionLabel } from './weather/condition';
+export type { WeatherIconShape } from './weather/condition';
+export { default as WeatherIcon } from './components/weather-icon.svelte';
+
+// units (Metric/Imperial display preference - see units-store.svelte.ts's
+// own comment on this affecting read-only formatting only, never command
+// inputs or the wire protocol). UnitsToggle is the same category of
+// generic, no-self-host-opinion UI control as ThemeToggle above.
+export { unitsStore, type UnitSystem } from './units/units-store.svelte';
+export {
+	formatAltitude,
+	formatDistance,
+	formatSpeed,
+	formatVehicleSpeed,
+	formatTemperature,
+	formatPrecipitation,
+	formatPressure
+} from './units/format';
+export { default as UnitsToggle } from './components/units-toggle.svelte';
+
 // zones (operator-drawn keep-in/keep-out geofences, sent to the gateway -
 // a different concept from geozoneStore's read-only airspace data above)
 export { zoneStore, isZoneConfigTerminal } from './zones/zone-store.svelte';

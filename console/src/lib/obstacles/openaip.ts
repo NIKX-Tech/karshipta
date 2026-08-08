@@ -45,6 +45,28 @@ function isPointGeometry(geometry: unknown): geometry is GeoJSON.Point {
 	return (geometry as Record<string, unknown>).type === 'Point';
 }
 
+/** OpenAIP nests both height and elevation as { value, unit, referenceDatum }
+ * - confirmed live (Schiphol's control tower reports height.value=101,
+ * matching its real ~101m height, so unit 0 reads as meters; not
+ * independently confirmed against OpenAIP's own unit enum docs). */
+function numericValueOf(field: unknown): number | undefined {
+	if (typeof field !== 'object' || field === null) return undefined;
+	const value = (field as Record<string, unknown>).value;
+	return typeof value === 'number' ? value : undefined;
+}
+
+/** osmTags.wikipedia (when present) is an OSM-style "lang:Title" reference,
+ * not a URL - "nl:Schipholtoren" becomes https://nl.wikipedia.org/wiki/Schipholtoren. */
+function wikipediaUrlFrom(osmTags: unknown): string | undefined {
+	if (typeof osmTags !== 'object' || osmTags === null) return undefined;
+	const wiki = (osmTags as Record<string, unknown>).wikipedia;
+	if (typeof wiki !== 'string') return undefined;
+	const [lang, ...titleParts] = wiki.split(':');
+	const title = titleParts.join(':');
+	if (!lang || !title) return undefined;
+	return `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title)}`;
+}
+
 /** Defensive parse: unexpected shapes are skipped, never thrown - same
  * philosophy as geozones/openaip.ts's own parseAirspace. */
 function parseObstacle(raw: unknown): Obstacle | undefined {
@@ -55,13 +77,16 @@ function parseObstacle(raw: unknown): Obstacle | undefined {
 	if (typeof id !== 'string' || !isPointGeometry(geometry)) return undefined;
 	const [longitudeDeg, latitudeDeg] = geometry.coordinates;
 	if (typeof latitudeDeg !== 'number' || typeof longitudeDeg !== 'number') return undefined;
-	const heightAgl = item.heightAgl;
 	const name = typeof item.name === 'string' && item.name ? item.name : 'Obstacle';
+	const countryCode = typeof item.country === 'string' ? item.country : undefined;
 	return {
 		id,
 		name,
 		category: categoryFor(item.type),
-		heightAglM: typeof heightAgl === 'number' ? heightAgl : undefined,
+		countryCode,
+		heightM: numericValueOf(item.height),
+		elevationM: numericValueOf(item.elevation),
+		wikipediaUrl: wikipediaUrlFrom(item.osmTags),
 		latitudeDeg,
 		longitudeDeg
 	};

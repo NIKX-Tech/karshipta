@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { flightModeToJSON, WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { fleet, isConfigTerminal, type Ward } from '$lib/fleet-store.svelte';
+	import { unitsStore } from '$lib/units/units-store.svelte';
+	import { formatAltitude } from '$lib/units/format';
 
 	interface Props {
 		wardId: string;
@@ -112,8 +114,9 @@
 	{#if state}
 		<p class="mt-1 truncate font-mono text-[10px] text-fg-muted tabular-nums">
 			{#if modeLabel}{modeLabel} &middot;
-			{/if}{state.position?.altitudeRelM.toFixed(0) ?? '?'} m &middot; {batteryPct === undefined ||
-			batteryPct < 0
+			{/if}{state.position !== undefined
+				? formatAltitude(state.position.altitudeRelM, unitsStore.current)
+				: '?'} &middot; {batteryPct === undefined || batteryPct < 0
 				? '?'
 				: `${batteryPct.toFixed(0)}%`}
 		</p>

@@ -1,6 +1,7 @@
 import type { Obstacle, ObstacleSource, ViewportBounds } from './types';
 import { OpenAipObstacleSource } from './openaip';
 import { openAipRequestGate } from '../openaip/request-gate';
+import { tileOpenAipBounds } from '../openaip/tile-bounds';
 
 // Same tuning as geozones/geozone-store.svelte.ts - both share the same
 // rate-limited OpenAIP key via openAipRequestGate, see that module's own
@@ -95,24 +96,42 @@ class ObstacleStore {
 		}
 
 		const requestId = ++this.lastRequestId;
-		await openAipRequestGate.enqueue(async () => {
-			try {
-				const obstacles = await source.fetchViewport(bounds);
-				if (requestId !== this.lastRequestId) return;
-				this.obstacles = obstacles;
-				this.loadError = undefined;
-				this.cache.set(cacheKey, { obstacles, fetchedAtMs: Date.now() });
-			} catch (error) {
-				if (requestId !== this.lastRequestId) return;
-				this.loadError = error instanceof Error ? error.message : String(error);
-				openAipRequestGate.noteFailure();
-				console.error('obstacles: failed to load viewport', error);
-				if (this.retryTimer) clearTimeout(this.retryTimer);
-				this.retryTimer = setTimeout(() => {
-					if (this.lastBounds) void this.fetchViewport(this.lastBounds);
-				}, FAILURE_COOLDOWN_MS);
-			}
-		});
+		// Split into up to 2 side-by-side queries when the viewport is wide
+		// enough that one 5-degree-clamped window would only cover a small,
+		// misleadingly dense fraction of what's visible - see
+		// openaip/tile-bounds.ts and geozone-store.svelte.ts's own identical
+		// comment on this.
+		const tiles = tileOpenAipBounds(bounds);
+		const tileResults: Obstacle[][] = [];
+		let tileError: unknown;
+		await Promise.all(
+			tiles.map((tile, index) =>
+				openAipRequestGate.enqueue(async () => {
+					try {
+						tileResults[index] = await source.fetchViewport(tile);
+					} catch (error) {
+						tileError = error;
+					}
+				})
+			)
+		);
+		if (requestId !== this.lastRequestId) return;
+		if (tileError !== undefined) {
+			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
+			openAipRequestGate.noteFailure();
+			console.error('obstacles: failed to load viewport', tileError);
+			if (this.retryTimer) clearTimeout(this.retryTimer);
+			this.retryTimer = setTimeout(() => {
+				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
+			}, FAILURE_COOLDOWN_MS);
+			return;
+		}
+		// Deduped by id: adjacent tiles can both legitimately return an
+		// obstacle that straddles the split line.
+		const obstacles = [...new Map(tileResults.flat().map((o) => [o.id, o])).values()];
+		this.obstacles = obstacles;
+		this.loadError = undefined;
+		this.cache.set(cacheKey, { obstacles, fetchedAtMs: Date.now() });
 	}
 }
 

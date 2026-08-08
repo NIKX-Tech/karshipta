@@ -15,7 +15,7 @@
 		{ id: 'system', label: 'System' }
 	];
 
-	let preference = $state<Preference>('dark');
+	let preference = $state<Preference>('system');
 	let open = $state(false);
 	let menuEl: HTMLDivElement | undefined = $state();
 
@@ -61,9 +61,11 @@
 			// old binary toggle (removed from this app's own topbar, see
 			// index.ts's comment on ThemeToggle) already saved under
 			// theme.svelte.ts's own key, so a returning user's prior light/dark
-			// pick carries over instead of silently resetting to dark.
+			// pick carries over instead of being silently overridden. Only a
+			// genuinely first-ever visit (no key at all, either storage key)
+			// defaults to 'system' rather than a hardcoded 'dark'.
 			const legacy = window.localStorage.getItem('karshipta:theme');
-			preference = legacy === 'light' ? 'light' : 'dark';
+			preference = legacy === 'light' ? 'light' : legacy === 'dark' ? 'dark' : 'system';
 		}
 		apply(preference);
 
@@ -118,6 +120,12 @@
 				<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z" />
 			</svg>
 		{:else}
+			<!-- Sun-with-a-moon-notch, not a monitor glyph (reads as "your OS",
+			     not "light and dark at once") or the earlier abstract
+			     half-circle (unclear at 16px). Geometry adapted from
+			     Streamline's "Light Dark Mode" icon (rays + circle + crescent
+			     overlap), recolored to this icon set's own single-currentColor
+			     stroke convention instead of its original two-tone fill. -->
 			<svg
 				width="16"
 				height="16"
@@ -129,8 +137,13 @@
 				stroke-linejoin="round"
 				aria-hidden="true"
 			>
-				<rect x="2.5" y="4.5" width="19" height="12" rx="1.5" />
-				<path d="M8 20h8M12 16.5V20" />
+				<circle cx="12" cy="12" r="6.3" />
+				<path
+					d="M17.97 14.03c-.64.22-1.32.33-2.03.33-3.48 0-6.31-2.82-6.31-6.31 0-.71.12-1.39.34-2.03-2.49.85-4.28 3.2-4.28 5.97 0 3.48 2.82 6.31 6.31 6.31 2.77 0 5.13-1.79 5.97-4.27Z"
+				/>
+				<path
+					d="M18.31 12h3.94M19.25 4.75l-2.79 2.79M12 1.75v3.94M7.54 7.54 4.75 4.75M5.69 12H1.75M7.54 16.46l-2.79 2.79M12 18.31v3.94M16.46 16.46l2.79 2.79"
+				/>
 			</svg>
 		{/if}
 	</button>

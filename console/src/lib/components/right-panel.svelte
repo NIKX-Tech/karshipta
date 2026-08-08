@@ -6,6 +6,7 @@
 	import MissionTab from '$lib/components/mission-tab.svelte';
 	import ZonesTab from '$lib/components/zones-tab.svelte';
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
+	import UnitsToggle from '$lib/components/units-toggle.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -215,6 +216,7 @@
 		</Tabs>
 
 		<div class="flex-1"></div>
+		<UnitsToggle />
 		<ThemeToggle />
 	</div>
 </div>

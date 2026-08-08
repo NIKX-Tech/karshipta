@@ -9,6 +9,8 @@
 		formatModeLabel,
 		linkDotState
 	} from '$lib/ward-format';
+	import { unitsStore } from '$lib/units/units-store.svelte';
+	import { formatAltitude, formatSpeed } from '$lib/units/format';
 
 	interface Props {
 		wardId: string;
@@ -66,13 +68,21 @@
 	const headingLabel = $derived(formatHeadingCompass(state?.headingDeg));
 	const headingDegValue = $derived(state?.headingDeg);
 	const altLabel = $derived(
-		state?.position ? `${state.position.altitudeRelM.toFixed(1)} m` : '? m'
+		state?.position
+			? formatAltitude(state.position.altitudeRelM, unitsStore.current)
+			: unitsStore.current === 'metric'
+				? '? m'
+				: '? ft'
 	);
 	const groundSpeed = $derived(
 		state?.velocity ? Math.hypot(state.velocity.northMS, state.velocity.eastMS) : undefined
 	);
 	const speedLabel = $derived(
-		groundSpeed === undefined ? '? m/s' : `${groundSpeed.toFixed(1)} m/s`
+		groundSpeed === undefined
+			? unitsStore.current === 'metric'
+				? '? m/s'
+				: '? mph'
+			: formatSpeed(groundSpeed, unitsStore.current)
 	);
 </script>
 

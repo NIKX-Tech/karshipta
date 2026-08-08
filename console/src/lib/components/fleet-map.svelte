@@ -29,8 +29,39 @@
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { obstacleStore } from '$lib/obstacles/obstacle-store.svelte';
 	import { airportStore } from '$lib/airports/airport-store.svelte';
+	import { cityStore } from '$lib/cities/city-store.svelte';
+	import { aircraftStore } from '$lib/aircraft/aircraft-store.svelte';
+	import { isAircraftEmergency, type AircraftCategory } from '$lib/aircraft/types';
+	import {
+		AIRCRAFT_ICON_SHAPES,
+		ICON_PIXEL_RATIO,
+		buildAircraftIconImageData,
+		iconIdFor,
+		iconShapeForCategory
+	} from '$lib/aircraft/icons';
+	import { earthquakeStore } from '$lib/earthquakes/earthquake-store.svelte';
+	import { wildfireStore } from '$lib/wildfires/wildfire-store.svelte';
+	import { weatherStore } from '$lib/weather/weather-store.svelte';
+	import { weatherIconShape, weatherConditionLabel } from '$lib/weather/condition';
+	import WeatherIcon from '$lib/components/weather-icon.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
+	import defaultStyleLightPreview from '$lib/assets/map-style-previews/default-light.jpg';
+	import defaultStyleDarkPreview from '$lib/assets/map-style-previews/default-dark.jpg';
+	import roadmapStylePreview from '$lib/assets/map-style-previews/roadmap.jpg';
+	import terrainStylePreview from '$lib/assets/map-style-previews/terrain.jpg';
+	import satelliteStylePreview from '$lib/assets/map-style-previews/satellite.jpg';
+	import bathymetryStylePreview from '$lib/assets/map-style-previews/bathymetry.jpg';
+	import { unitsStore } from '$lib/units/units-store.svelte';
+	import {
+		formatAltitude,
+		formatDistance as formatDistanceUnits,
+		formatSpeed,
+		formatVehicleSpeed,
+		formatTemperature,
+		formatPrecipitation,
+		formatPressure
+	} from '$lib/units/format';
 	import type { ViewportBounds } from '$lib/geozones/types';
 
 	interface Props {
@@ -116,6 +147,17 @@
 		'https://b.tile.opentopomap.org/{z}/{x}/{y}.png',
 		'https://c.tile.opentopomap.org/{z}/{x}/{y}.png'
 	];
+	// GEBCO's WMS, not an XYZ tile server like every other basemap here -
+	// {bbox-epsg-3857} is MapLibre's own documented substitution for exactly
+	// this case, resolving to each tile's real Web Mercator bbox at request
+	// time so a plain WMS GetMap request can stand in for a raster source's
+	// usual z/x/y template. Confirmed live with a real bbox. GEBCO_LATEST is
+	// shaded relief covering the whole globe (ocean depth and land
+	// elevation together), not an ocean-only overlay, so - like Terrain -
+	// it works as its own full basemap rather than a layer on top of one.
+	const BATHYMETRY_TILES = [
+		'https://wms.gebco.net/mapserv?service=WMS&version=1.1.1&request=GetMap&layers=GEBCO_LATEST&styles=&format=image/png&transparent=false&srs=EPSG:3857&bbox={bbox-epsg-3857}&width=256&height=256'
+	];
 	const SATELLITE_TILES = [
 		'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
 	];
@@ -135,7 +177,7 @@
 	// credits regardless of which is currently active is a common,
 	// acceptable tradeoff other map apps make too.
 	const BASEMAP_ATTRIBUTION =
-		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA)';
+		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
 
 	// 'default' follows the app theme (DARK_TILES/LIGHT_TILES, unchanged
 	// behavior); 'roadmap' is light-only (see ROADMAP_TILES's own comment) -
@@ -143,18 +185,37 @@
 	// and the effect further down falls back to 'default' if the theme
 	// flips to dark while it's active. 'terrain'/'satellite' are themeless,
 	// same as satellite always was.
-	type MapStyle = 'default' | 'roadmap' | 'terrain' | 'satellite';
-	const MAP_STYLE_OPTIONS: { id: MapStyle; label: string }[] = [
-		{ id: 'default', label: 'Map' },
-		{ id: 'roadmap', label: 'Roadmap' },
-		{ id: 'terrain', label: 'Terrain' },
-		{ id: 'satellite', label: 'Satellite' }
+	type MapStyle = 'default' | 'roadmap' | 'terrain' | 'satellite' | 'bathymetry';
+	const MAP_STYLE_OPTIONS: { id: MapStyle; label: string; preview: string }[] = [
+		{ id: 'default', label: 'Map', preview: defaultStyleLightPreview },
+		{ id: 'roadmap', label: 'Roadmap', preview: roadmapStylePreview },
+		{ id: 'terrain', label: 'Terrain', preview: terrainStylePreview },
+		{ id: 'satellite', label: 'Satellite', preview: satelliteStylePreview },
+		{ id: 'bathymetry', label: 'Bathymetry', preview: bathymetryStylePreview }
 	];
+	// 'default' is the one style option that itself follows the app theme
+	// (DARK_TILES/LIGHT_TILES - see MapStyle's own comment above), so its
+	// preview can't be a single static image like the themeless/light-only
+	// options above: showing the light-mode capture while dark theme is
+	// active would misrepresent what picking "Map" actually does.
+	function stylePreviewFor(option: (typeof MAP_STYLE_OPTIONS)[number]): string {
+		if (option.id === 'default') {
+			return themeStore.current === 'dark' ? defaultStyleDarkPreview : defaultStyleLightPreview;
+		}
+		return option.preview;
+	}
 	const MAP_STYLE_STORAGE_KEY = 'karshipta:mapStyle';
 	function readStoredMapStyle(): MapStyle {
 		if (typeof localStorage === 'undefined') return 'default';
 		const stored = localStorage.getItem(MAP_STYLE_STORAGE_KEY);
-		if (stored === 'roadmap' || stored === 'terrain' || stored === 'satellite') return stored;
+		if (
+			stored === 'roadmap' ||
+			stored === 'terrain' ||
+			stored === 'satellite' ||
+			stored === 'bathymetry'
+		) {
+			return stored;
+		}
 		// Migrates the old boolean satellite flag transparently, so a
 		// returning operator's prior choice carries over.
 		return localStorage.getItem('karshipta:satellite') === 'true' ? 'satellite' : 'default';
@@ -177,11 +238,13 @@
 			? SATELLITE_TILES
 			: mapStyle === 'terrain'
 				? TERRAIN_TILES
-				: mapStyle === 'roadmap'
-					? ROADMAP_TILES
-					: themeStore.current === 'light'
-						? LIGHT_TILES
-						: DARK_TILES
+				: mapStyle === 'bathymetry'
+					? BATHYMETRY_TILES
+					: mapStyle === 'roadmap'
+						? ROADMAP_TILES
+						: themeStore.current === 'light'
+							? LIGHT_TILES
+							: DARK_TILES
 	);
 
 	// Off by default: an operator who configures PUBLIC_OPENAIP_KEY opts
@@ -193,6 +256,39 @@
 	// Same off-by-default reasoning as showGeozones above.
 	let showObstacles = $state(false);
 	let showAirports = $state(false);
+	// Cities default on, unlike the three OpenAIP layers above: it's a
+	// bundled dataset with no key/trust/rate-limit concern (see
+	// city-store.svelte.ts's own comment), so there's no reason to make an
+	// operator opt in just to see it.
+	let showCities = $state(true);
+	// Aircraft/earthquakes/wildfires default off like the OpenAIP layers,
+	// not on like Cities: real-time third-party traffic and hazard data,
+	// same trust-level reasoning as showGeozones/showObstacles/showAirports
+	// above, not a static reference dataset.
+	let showAircraft = $state(false);
+	let showEarthquakes = $state(false);
+	let showWildfires = $state(false);
+	// Weather defaults on for the same reason as Cities above: Open-Meteo
+	// needs no key and carries no rate-limit/trust concern an operator
+	// should have to opt into.
+	let showWeather = $state(true);
+	// Name of the bundled city nearest the map center, for the weather
+	// widget's own label - see cityStore.nearestTo. Undefined until the
+	// cities dataset has loaded and a location has actually been requested.
+	let weatherLocationLabel = $state<string | undefined>(undefined);
+	/** Loads the (shared, cached) cities dataset if needed - independent of
+	 * whether the Cities layer checkbox itself is on, since the weather
+	 * widget's label needs it regardless - then resolves to the nearest
+	 * bundled city, falling back to raw coordinates so the widget never
+	 * shows a temperature with no indication of where it's for. */
+	function updateWeatherLocationLabel(latitudeDeg: number, longitudeDeg: number): void {
+		void cityStore.ensureLoaded().then(() => {
+			const nearest = cityStore.nearestTo(latitudeDeg, longitudeDeg);
+			weatherLocationLabel = nearest
+				? nearest.name
+				: `${latitudeDeg.toFixed(1)}, ${longitudeDeg.toFixed(1)}`;
+		});
+	}
 	let showZones = $state(true);
 	let layersMenuOpen = $state(false);
 	let layersMenuEl: HTMLDivElement | undefined;
@@ -228,8 +324,63 @@
 	const OBSTACLE_LAYER = 'obstacles-points';
 	const AIRPORT_SOURCE = 'airports';
 	const AIRPORT_LAYER = 'airports-points';
-	const OBSTACLE_COLOR = '#f5a623';
+	// Not --color-accent (#f5a623): that's the app's primary/CTA color, used
+	// throughout the UI for buttons and active states - reusing it here
+	// would make an obstacle marker read as "the same thing" as a primary
+	// button. #f97316 is the same orange already in ROUTE_COLORS below,
+	// close enough in hue to still land as "caution" without the collision.
+	const OBSTACLE_COLOR = '#f97316';
 	const AIRPORT_COLOR = '#3b9eff';
+	const CITY_SOURCE = 'cities';
+	const CITY_LAYER = 'cities-points';
+	const CITY_COLOR = '#8b98a5';
+	const AIRCRAFT_SOURCE = 'aircraft';
+	const AIRCRAFT_LAYER = 'aircraft-points';
+	const AIRCRAFT_TRAIL_SOURCE = 'aircraft-trails';
+	const AIRCRAFT_TRAIL_LAYER = 'aircraft-trails-line';
+	const AIRCRAFT_COLOR = '#14b8a6';
+	// Reuses --color-critical's hue rather than reading the CSS custom
+	// property directly - MapLibre paint values are plain style-spec
+	// values, not CSS, same reasoning as every other *_COLOR constant here
+	// being a literal hex instead of var(...).
+	const AIRCRAFT_EMERGENCY_COLOR = '#ef4444';
+	// Deliberately not reusing any existing semantic token (armed=green,
+	// critical=red, synthetic=violet, selected=blue all mean something
+	// else already) - a muted slate reads as "notable/distinct" without
+	// implying one of those other states.
+	const AIRCRAFT_MILITARY_COLOR = '#64748b';
+	// Heavier/larger categories render bigger, same "size communicates
+	// scale" reasoning as EARTHQUAKE_LAYER's magnitude-interpolated radius
+	// below - a 747 and a Cessna reading as the same size marker would
+	// hide a real, useful distinction.
+	function aircraftIconSize(category: AircraftCategory): number {
+		switch (category) {
+			case 'heavy':
+				return 0.75;
+			case 'rotorcraft':
+			case 'glider':
+				return 0.55;
+			case 'light':
+				return 0.5;
+			case 'uav':
+				return 0.46;
+			case 'ground':
+				return 0.4;
+			default:
+				return 0.45;
+		}
+	}
+	const EARTHQUAKE_SOURCE = 'earthquakes';
+	const EARTHQUAKE_LAYER = 'earthquakes-points';
+	const EARTHQUAKE_COLOR = '#ec4899';
+	const WILDFIRE_SOURCE = 'wildfires';
+	const WILDFIRE_LAYER = 'wildfires-points';
+	// Deliberately close to --color-critical (#e74c3c), unlike the other new
+	// layers' colors, which were all picked specifically to avoid semantic
+	// collisions with existing tokens - fire reading as "red" is such a
+	// strong, universal convention that keeping it in the same family is
+	// more correct here than avoiding the overlap.
+	const WILDFIRE_COLOR = '#dc2626';
 	const ZONE_SOURCE = 'zones';
 	const ZONE_FILL_LAYER = 'zones-fill';
 	const ZONE_LINE_LAYER = 'zones-line';
@@ -287,7 +438,402 @@
 		return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
 	}
 	function formatDistance(meters: number): string {
-		return meters < 1000 ? `${meters.toFixed(0)} m` : `${(meters / 1000).toFixed(2)} km`;
+		return formatDistanceUnits(meters, unitsStore.current);
+	}
+
+	// Obstacle/airport names and codes come from OpenAIP, third-party data -
+	// escaped before going into Popup.setHTML() (which sets raw innerHTML)
+	// the same way any other untrusted string would need to be.
+	const HTML_ESCAPES: Record<string, string> = {
+		'&': '&amp;',
+		'<': '&lt;',
+		'>': '&gt;',
+		'"': '&quot;',
+		"'": '&#39;'
+	};
+	function escapeHtml(value: string): string {
+		return value.replace(/[&<>"']/g, (char) => HTML_ESCAPES[char]);
+	}
+
+	function popupRow(label: string, value: string): string {
+		return `<div class="flex justify-between gap-3"><span class="text-fg-muted">${label}</span><span>${value}</span></div>`;
+	}
+
+	function buildObstaclePopupHtml(properties: Record<string, unknown>): string {
+		const name = typeof properties.name === 'string' ? properties.name : 'Obstacle';
+		const rows: string[] = [];
+		if (typeof properties.heightM === 'number') {
+			rows.push(popupRow('Height', formatAltitude(properties.heightM, unitsStore.current)));
+		}
+		if (typeof properties.elevationM === 'number') {
+			rows.push(
+				popupRow('Elevation', `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`)
+			);
+		}
+		if (typeof properties.countryCode === 'string') {
+			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
+		}
+		let wikiLink = '';
+		if (typeof properties.wikipediaUrl === 'string') {
+			const href = escapeHtml(properties.wikipediaUrl);
+			wikiLink = `<a href="${href}" target="_blank" rel="noreferrer" class="text-accent hover:underline">Wikipedia &#8599;</a>`;
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}${wikiLink}</div>`;
+	}
+
+	function buildAirportPopupHtml(properties: Record<string, unknown>): string {
+		const name = typeof properties.name === 'string' ? properties.name : 'Airport';
+		const rows: string[] = [];
+		if (typeof properties.icaoCode === 'string') {
+			rows.push(popupRow('ICAO', escapeHtml(properties.icaoCode)));
+		}
+		if (typeof properties.elevationM === 'number') {
+			rows.push(
+				popupRow('Elevation', `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`)
+			);
+		}
+		if (typeof properties.countryCode === 'string') {
+			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}</div>`;
+	}
+
+	const KNOTS_TO_MS = 0.514444;
+
+	// Live METAR for the airport popup - confirmed live against a real ICAO
+	// code, free, no key. Fetched on demand per popup open, not a viewport
+	// layer of its own the way Aircraft/Earthquakes/Wildfires are: METAR is
+	// inherently per-airport, and the Airport layer already has exactly one
+	// point per airport to hang it off of. wspd/wdir/temp/visib field names
+	// and units (wspd in knots, temp in Celsius) confirmed against a real
+	// Schiphol report.
+	async function fetchMetarHtml(properties: Record<string, unknown>): Promise<string | undefined> {
+		const icaoCode = properties.icaoCode;
+		if (typeof icaoCode !== 'string') return undefined;
+		try {
+			const response = await fetch(
+				`https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(icaoCode)}&format=json`
+			);
+			if (!response.ok) return undefined;
+			const body: unknown = await response.json();
+			const report = Array.isArray(body) ? body[0] : undefined;
+			if (typeof report !== 'object' || report === null) return undefined;
+			const data = report as Record<string, unknown>;
+			const rows: string[] = [];
+			if (typeof data.wdir === 'number' && typeof data.wspd === 'number') {
+				rows.push(
+					popupRow(
+						'Wind',
+						`${data.wdir}&deg; ${formatVehicleSpeed(data.wspd * KNOTS_TO_MS, unitsStore.current)}`
+					)
+				);
+			}
+			if (typeof data.temp === 'number') {
+				rows.push(popupRow('Temp', `${data.temp}&deg;C`));
+			}
+			if (typeof data.visib === 'string' || typeof data.visib === 'number') {
+				rows.push(popupRow('Visibility', `${escapeHtml(String(data.visib))} mi`));
+			}
+			if (rows.length === 0) return undefined;
+			return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
+		} catch {
+			// Same "reassuring, not alarming" philosophy as the viewport
+			// layers' own loadError handling - a failed weather enrichment
+			// just means the popup stays at its base content, not a visible
+			// error state for something this secondary.
+			return undefined;
+		}
+	}
+
+	function buildCityPopupHtml(properties: Record<string, unknown>): string {
+		const name = typeof properties.name === 'string' ? properties.name : 'City';
+		const rows: string[] = [];
+		if (typeof properties.countryCode === 'string') {
+			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
+		}
+		if (typeof properties.population === 'number') {
+			rows.push(popupRow('Population', properties.population.toLocaleString('en-US')));
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}</div>`;
+	}
+
+	// Raw ADS-B emergency status strings (DO-260B) -> readable labels.
+	const AIRCRAFT_EMERGENCY_LABELS: Record<string, string> = {
+		general: 'General emergency',
+		medical: 'Medical emergency',
+		minfuel: 'Minimum fuel',
+		nordo: 'Radio failure',
+		unlawful: 'Unlawful interference',
+		downed: 'Downed aircraft',
+		reserved: 'Reserved'
+	};
+
+	function buildAircraftPopupHtml(properties: Record<string, unknown>): string {
+		const name = typeof properties.callsign === 'string' ? properties.callsign : 'Aircraft';
+		const isEmergency = properties.isEmergency === true;
+		const isMilitary = properties.isMilitary === true;
+		const badges: string[] = [];
+		if (isEmergency) {
+			badges.push(
+				'<span class="rounded bg-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-critical">EMERGENCY</span>'
+			);
+		}
+		if (isMilitary) {
+			badges.push(
+				'<span class="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-fg-muted">MILITARY</span>'
+			);
+		}
+		const rows: string[] = [];
+		if (isEmergency && typeof properties.emergency === 'string') {
+			const label = AIRCRAFT_EMERGENCY_LABELS[properties.emergency] ?? properties.emergency;
+			rows.push(popupRow('Emergency', escapeHtml(label)));
+		}
+		if (typeof properties.typeDescription === 'string') {
+			rows.push(popupRow('Type', escapeHtml(properties.typeDescription)));
+		}
+		if (typeof properties.operator === 'string') {
+			rows.push(popupRow('Operator', escapeHtml(properties.operator)));
+		}
+		if (typeof properties.registration === 'string') {
+			rows.push(popupRow('Registration', escapeHtml(properties.registration)));
+		}
+		if (typeof properties.icao24 === 'string') {
+			rows.push(popupRow('ICAO24', escapeHtml(properties.icao24)));
+		}
+		if (typeof properties.yearBuilt === 'number') {
+			rows.push(popupRow('Built', String(properties.yearBuilt)));
+		}
+		if (typeof properties.altitudeM === 'number') {
+			rows.push(popupRow('Altitude', formatAltitude(properties.altitudeM, unitsStore.current)));
+		}
+		if (typeof properties.velocityMS === 'number') {
+			rows.push(popupRow('Speed', formatVehicleSpeed(properties.velocityMS, unitsStore.current)));
+		}
+		// Vertical rate stays in formatSpeed's m/s, not formatVehicleSpeed -
+		// a variometer-scale rate (a few m/s at most) reads naturally in
+		// m/s the same way ward telemetry does, unlike ground speed at
+		// aircraft-cruise scale. Under ~1.5 m/s (~300 ft/min) reads as
+		// level flight, not a real climb/descent - skip the row rather than
+		// showing noisy near-zero values every level cruise segment would
+		// otherwise report.
+		if (
+			typeof properties.verticalRateMS === 'number' &&
+			Math.abs(properties.verticalRateMS) >= 1.5
+		) {
+			const climbing = properties.verticalRateMS > 0;
+			rows.push(
+				popupRow(
+					climbing ? 'Climbing' : 'Descending',
+					formatSpeed(Math.abs(properties.verticalRateMS), unitsStore.current)
+				)
+			);
+		}
+		if (properties.onGround === true) {
+			rows.push(popupRow('Status', 'On ground'));
+		}
+		const badgeHtml = badges.length > 0 ? `<div class="flex gap-1">${badges.join('')}</div>` : '';
+		return `<div class="flex flex-col gap-1 text-xs"><div class="flex items-center justify-between gap-2"><p class="font-medium text-fg">${escapeHtml(name)}</p>${badgeHtml}</div>${rows.join('')}</div>`;
+	}
+
+	// adsbdb.com: free, no key, wildcard CORS (confirmed live). Two
+	// independent lookups, run in parallel:
+	// - /v0/callsign/{callsign} (flightroute): fills a real gap in
+	//   airplanes.live's own ownOp field, which is empty even for
+	//   obviously commercial flights (confirmed live: "ABY150", a real
+	//   Air Arabia flight registered in the UAE, had no operator at all
+	//   from airplanes.live, but adsbdb correctly resolves "Air Arabia"
+	//   from the callsign's ICAO airline prefix alone). Only called when
+	//   operator is already missing - airplanes.live's own field is
+	//   preferred when present. Also returns the flight's actual
+	//   origin/destination airports, real route data neither feed
+	//   otherwise provides. Confirmed live this only covers civil
+	//   registrations - a real military aircraft (a Royal Netherlands Air
+	//   Force Apache) returned "unknown callsign"/"unknown aircraft" from
+	//   both adsbdb endpoints, so this contributes nothing for military
+	//   traffic; nothing else here fills that gap either.
+	// - /v0/aircraft/{registration}: registered owner's country and
+	//   manufacturer, which nothing else here provides at all (not
+	//   gated on operator being missing - always worth adding). Also
+	//   returns photo URLs, but confirmed live those are dead links
+	//   (404 from airport-data.com on every real aircraft tried) - not
+	//   used for that reason, not because the fields don't exist.
+	async function fetchAircraftEnrichmentHtml(
+		properties: Record<string, unknown>
+	): Promise<string | undefined> {
+		const callsign = properties.callsign;
+		const registration = properties.registration;
+		const needsAirline = !properties.operator && typeof callsign === 'string' && callsign.trim();
+		const hasRegistration = typeof registration === 'string' && registration.trim();
+		if (!needsAirline && !hasRegistration) return undefined;
+
+		const [flightrouteResult, aircraftResult] = await Promise.allSettled([
+			needsAirline
+				? fetch(
+						`https://api.adsbdb.com/v0/callsign/${encodeURIComponent((callsign as string).trim())}`
+					).then((r) => (r.ok ? r.json() : undefined))
+				: Promise.resolve(undefined),
+			hasRegistration
+				? fetch(
+						`https://api.adsbdb.com/v0/aircraft/${encodeURIComponent((registration as string).trim())}`
+					).then((r) => (r.ok ? r.json() : undefined))
+				: Promise.resolve(undefined)
+		]);
+
+		const rows: string[] = [];
+
+		const flightroute =
+			flightrouteResult.status === 'fulfilled' &&
+			typeof flightrouteResult.value === 'object' &&
+			flightrouteResult.value !== null
+				? (flightrouteResult.value as { response?: { flightroute?: unknown } }).response
+						?.flightroute
+				: undefined;
+		if (typeof flightroute === 'object' && flightroute !== null) {
+			const data = flightroute as Record<string, unknown>;
+			const airline =
+				typeof data.airline === 'object' && data.airline !== null
+					? (data.airline as Record<string, unknown>).name
+					: undefined;
+			const origin =
+				typeof data.origin === 'object' && data.origin !== null
+					? (data.origin as Record<string, unknown>).municipality
+					: undefined;
+			const destination =
+				typeof data.destination === 'object' && data.destination !== null
+					? (data.destination as Record<string, unknown>).municipality
+					: undefined;
+			if (typeof airline === 'string' && airline) {
+				rows.push(popupRow('Operator', escapeHtml(airline)));
+			}
+			if (typeof origin === 'string' && typeof destination === 'string' && origin && destination) {
+				rows.push(popupRow('Route', `${escapeHtml(origin)} &rarr; ${escapeHtml(destination)}`));
+			}
+		}
+
+		const aircraft =
+			aircraftResult.status === 'fulfilled' &&
+			typeof aircraftResult.value === 'object' &&
+			aircraftResult.value !== null
+				? (aircraftResult.value as { response?: { aircraft?: unknown } }).response?.aircraft
+				: undefined;
+		if (typeof aircraft === 'object' && aircraft !== null) {
+			const data = aircraft as Record<string, unknown>;
+			const country = data.registered_owner_country_name;
+			const manufacturer = data.manufacturer;
+			if (typeof country === 'string' && country) {
+				rows.push(popupRow('Country', escapeHtml(country)));
+			}
+			if (typeof manufacturer === 'string' && manufacturer) {
+				rows.push(popupRow('Manufacturer', escapeHtml(manufacturer)));
+			}
+		}
+
+		if (rows.length === 0) return undefined;
+		return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
+	}
+
+	function buildEarthquakePopupHtml(properties: Record<string, unknown>): string {
+		const place = typeof properties.place === 'string' ? properties.place : 'Earthquake';
+		const rows: string[] = [];
+		if (typeof properties.magnitude === 'number') {
+			rows.push(popupRow('Magnitude', properties.magnitude.toFixed(1)));
+		}
+		if (typeof properties.depthKm === 'number') {
+			rows.push(popupRow('Depth', `${properties.depthKm.toFixed(0)} km`));
+		}
+		if (typeof properties.timeMs === 'number') {
+			rows.push(popupRow('When', new Date(properties.timeMs).toLocaleString()));
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(place)}</p>${rows.join('')}</div>`;
+	}
+
+	function buildWildfirePopupHtml(properties: Record<string, unknown>): string {
+		const rows: string[] = [];
+		if (typeof properties.brightnessK === 'number') {
+			rows.push(popupRow('Brightness', `${properties.brightnessK.toFixed(0)} K`));
+		}
+		if (typeof properties.frpMw === 'number') {
+			rows.push(popupRow('Radiative power', `${properties.frpMw.toFixed(1)} MW`));
+		}
+		if (typeof properties.confidence === 'string') {
+			rows.push(popupRow('Confidence', escapeHtml(properties.confidence)));
+		}
+		if (typeof properties.acquiredAtIso === 'string') {
+			rows.push(popupRow('Detected', escapeHtml(properties.acquiredAtIso)));
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">Fire hotspot</p>${rows.join('')}</div>`;
+	}
+
+	// Shared hover-popup wiring for a point layer: shows whatever
+	// buildHtml() produces from the hovered feature's own properties. Plain
+	// mouseleave-closes-immediately doesn't work for a popup with a real
+	// link in it (the obstacle popup's Wikipedia link): moving the cursor
+	// from the dot toward the link leaves the dot's own hit area first,
+	// closing the popup before the click can land. Fixed with a short grace
+	// period instead of switching to click-to-open: leaving the dot starts
+	// a timer to close, but entering the popup's own DOM element (tracked
+	// via its own mouseenter/mouseleave) cancels that timer, so hovering
+	// over either the dot or the balloon itself keeps it open - only
+	// leaving both actually closes it. One popup instance reused across all
+	// three point layers (never more than one open at a time) rather than
+	// one per layer.
+	const POPUP_CLOSE_GRACE_MS = 150;
+	let openPopup: maplibregl.Popup | undefined;
+	let closeTimer: ReturnType<typeof setTimeout> | undefined;
+	function cancelPopupClose(): void {
+		if (closeTimer) clearTimeout(closeTimer);
+		closeTimer = undefined;
+	}
+	function schedulePopupClose(): void {
+		cancelPopupClose();
+		closeTimer = setTimeout(() => {
+			openPopup?.remove();
+			openPopup = undefined;
+		}, POPUP_CLOSE_GRACE_MS);
+	}
+	function wirePointLayerPopup(
+		targetMap: maplibregl.Map,
+		layerId: string,
+		buildHtml: (properties: Record<string, unknown>) => string,
+		// Optional: for a layer whose popup can show more than what's already
+		// in its GeoJSON properties (only the airport layer uses this, for
+		// live METAR weather) - runs after the popup is already showing
+		// buildHtml()'s own synchronous content, and appends whatever this
+		// resolves to once it does. Checked against the popup instance that
+		// was open when the fetch started, not just "is a popup open right
+		// now": the operator may have moved to a different point (or closed
+		// it) before a slow request resolves, and a stale fetch should never
+		// overwrite whatever's showing by the time it lands.
+		fetchExtra?: (properties: Record<string, unknown>) => Promise<string | undefined>
+	): void {
+		targetMap.on('mouseenter', layerId, (event) => {
+			targetMap.getCanvas().style.cursor = 'pointer';
+			cancelPopupClose();
+			const feature = event.features?.[0];
+			if (!feature || feature.geometry.type !== 'Point') return;
+			const [lon, lat] = feature.geometry.coordinates as [number, number];
+			const properties = feature.properties ?? {};
+			const baseHtml = buildHtml(properties);
+			openPopup?.remove();
+			const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 })
+				.setLngLat([lon, lat])
+				.setHTML(baseHtml)
+				.addTo(targetMap);
+			openPopup = popup;
+			const popupEl = popup.getElement();
+			popupEl.addEventListener('mouseenter', cancelPopupClose);
+			popupEl.addEventListener('mouseleave', schedulePopupClose);
+			if (fetchExtra) {
+				void fetchExtra(properties).then((extraHtml) => {
+					if (openPopup !== popup || !extraHtml) return;
+					popup.setHTML(baseHtml + extraHtml);
+				});
+			}
+		});
+		targetMap.on('mouseleave', layerId, () => {
+			targetMap.getCanvas().style.cursor = '';
+			schedulePopupClose();
+		});
 	}
 
 	// imperative per-ward marker cache, deliberately not reactive state
@@ -545,8 +1091,14 @@
 		// own header comment), so adding obstacles/airports here does not
 		// multiply the actual request rate the way three independent
 		// per-layer schedules would.
-		const requestOpenAipLayers = () => {
-			if (created.getZoom() < MIN_GEOZONE_ZOOM) return;
+		// Renamed from its original requestOpenAipLayers: now covers every
+		// third-party/reference layer, not just the three OpenAIP ones -
+		// OpenSky, USGS, and FIRMS each have their own independent service
+		// and rate budget (see each store's own comment), not OpenAIP's, but
+		// still share this one moveend hookup and the same MIN_GEOZONE_ZOOM
+		// floor to avoid firing real network requests at a whole-world zoom.
+		const requestThirdPartyLayers = () => {
+			const zoom = created.getZoom();
 			const bounds = created.getBounds();
 			const viewport: ViewportBounds = [
 				bounds.getWest(),
@@ -554,12 +1106,60 @@
 				bounds.getEast(),
 				bounds.getNorth()
 			];
+			// Cities are a pure in-memory filter (see city-store.svelte.ts's
+			// own comment) with no network cost, so they update at any zoom -
+			// unlike every layer below, gated on MIN_GEOZONE_ZOOM since each
+			// one is a real network request against a bbox-size-limited API.
+			cityStore.setViewport(viewport, zoom);
+			// Weather is a real network request too, but a single-point query,
+			// not a bbox one - MIN_GEOZONE_ZOOM exists specifically because
+			// OpenAIP/etc. reject an oversized bbox, which doesn't apply here,
+			// so this isn't gated on it either.
+			const center = created.getCenter();
+			weatherStore.requestLocation(center.lat, center.lng);
+			updateWeatherLocationLabel(center.lat, center.lng);
+			// Aircraft is a real network request too, but like weather above,
+			// not a raw-bbox one: airplanesLive reduces the viewport to a
+			// center point + radius capped at 250nm internally (see
+			// boundsToPointRadius in airplaneslive.ts) rather than sending the
+			// bbox itself, so there's no "oversized bbox gets rejected" failure
+			// mode to guard against by waiting for a minimum zoom - it was
+			// previously grouped with the OpenAIP/USGS layers below and so
+			// silently didn't load at all until zoomed in past MIN_GEOZONE_ZOOM,
+			// which was never the actual constraint for this one.
+			aircraftStore.requestViewport(viewport, zoom);
+			// Earthquakes (USGS) and Wildfires (FIRMS) also don't need
+			// MIN_GEOZONE_ZOOM: unlike OpenAIP's three layers below (confirmed
+			// live to reject anything over 5 degrees wide/tall), neither
+			// usgs.ts nor firms.ts clamps the bbox at all - both send the real
+			// viewport straight through, and both were confirmed live to
+			// accept a whole-Europe-sized bbox and return real data, not an
+			// error. The zoom floor was blocking them from ever getting the
+			// chance to show that at low zoom, for a constraint (oversized
+			// bbox rejection) that was never actually true for either of them.
+			earthquakeStore.requestViewport(viewport);
+			wildfireStore.requestViewport(viewport);
+			if (zoom < MIN_GEOZONE_ZOOM) return;
 			geozoneStore.requestViewport(viewport);
 			obstacleStore.requestViewport(viewport);
 			airportStore.requestViewport(viewport);
 		};
-		created.on('moveend', requestOpenAipLayers);
+		created.on('moveend', requestThirdPartyLayers);
 		created.on('load', () => {
+			// sdf:true registers each shape as a recolorable template - actual
+			// per-feature color (normal/military/emergency) and rotation come
+			// from the aircraft-points layer's own icon-color/icon-rotate data
+			// expressions below, not from these images themselves. Registered
+			// once here, not per-feature - see icons.ts's own comment.
+			for (const shape of AIRCRAFT_ICON_SHAPES) {
+				const imageData = buildAircraftIconImageData(shape);
+				if (imageData) {
+					created.addImage(iconIdFor(shape), imageData, {
+						sdf: true,
+						pixelRatio: ICON_PIXEL_RATIO
+					});
+				}
+			}
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
 			// never be the thing blocking a no-fly zone or a flight path.
@@ -678,6 +1278,133 @@
 				},
 				ROUTE_SOURCE
 			);
+			created.addSource(CITY_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: CITY_LAYER,
+					type: 'circle',
+					source: CITY_SOURCE,
+					paint: {
+						'circle-radius': 3,
+						'circle-color': CITY_COLOR,
+						'circle-stroke-width': 1,
+						'circle-stroke-color': '#0a0e12'
+					}
+				},
+				ROUTE_SOURCE
+			);
+			// Breadcrumb trails, added before the points layer below so they
+			// paint underneath it - same ordering reasoning as the ward
+			// TRAIL_SOURCE elsewhere in this file.
+			created.addSource(AIRCRAFT_TRAIL_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: AIRCRAFT_TRAIL_LAYER,
+					type: 'line',
+					source: AIRCRAFT_TRAIL_SOURCE,
+					layout: { 'line-join': 'round', 'line-cap': 'round' },
+					paint: {
+						'line-color': AIRCRAFT_COLOR,
+						'line-width': 1.25,
+						'line-opacity': 0.35
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addSource(AIRCRAFT_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			// Symbol layer, not circle like every other point layer here -
+			// aircraft are the one layer that needs a per-feature rotated icon
+			// (heading) and shape (category: fixed-wing/rotorcraft/glider/UAV/
+			// ground vehicle), which a circle layer can't express. Icons are
+			// registered as sdf:true templates above (see the addImage loop),
+			// recolored per-feature here via icon-color instead of needing a
+			// separate colored image per state (normal/military/emergency).
+			created.addLayer(
+				{
+					id: AIRCRAFT_LAYER,
+					type: 'symbol',
+					source: AIRCRAFT_SOURCE,
+					layout: {
+						'icon-image': ['get', 'iconId'],
+						'icon-rotate': ['coalesce', ['get', 'headingDeg'], 0],
+						'icon-rotation-alignment': 'map',
+						'icon-allow-overlap': true,
+						'icon-ignore-placement': true,
+						'icon-size': ['get', 'iconSize']
+					},
+					paint: {
+						'icon-color': [
+							'case',
+							['==', ['get', 'isEmergency'], true],
+							AIRCRAFT_EMERGENCY_COLOR,
+							['==', ['get', 'isMilitary'], true],
+							AIRCRAFT_MILITARY_COLOR,
+							AIRCRAFT_COLOR
+						]
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addSource(EARTHQUAKE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: EARTHQUAKE_LAYER,
+					type: 'circle',
+					source: EARTHQUAKE_SOURCE,
+					paint: {
+						// Magnitude-scaled radius, unlike every other point layer's
+						// fixed size - a M6 and a M2.5 reading identically on the
+						// map would hide the one piece of information that matters
+						// most about an earthquake.
+						'circle-radius': ['interpolate', ['linear'], ['get', 'magnitude'], 2.5, 3, 7, 10],
+						'circle-color': EARTHQUAKE_COLOR,
+						'circle-stroke-width': 1.5,
+						'circle-stroke-color': '#0a0e12'
+					}
+				},
+				ROUTE_SOURCE
+			);
+			created.addSource(WILDFIRE_SOURCE, {
+				type: 'geojson',
+				data: { type: 'FeatureCollection', features: [] }
+			});
+			created.addLayer(
+				{
+					id: WILDFIRE_LAYER,
+					type: 'circle',
+					source: WILDFIRE_SOURCE,
+					paint: {
+						'circle-radius': 4,
+						'circle-color': WILDFIRE_COLOR,
+						'circle-stroke-width': 1.5,
+						'circle-stroke-color': '#0a0e12'
+					}
+				},
+				ROUTE_SOURCE
+			);
+			wirePointLayerPopup(created, OBSTACLE_LAYER, buildObstaclePopupHtml);
+			wirePointLayerPopup(created, AIRPORT_LAYER, buildAirportPopupHtml, fetchMetarHtml);
+			wirePointLayerPopup(created, CITY_LAYER, buildCityPopupHtml);
+			wirePointLayerPopup(
+				created,
+				AIRCRAFT_LAYER,
+				buildAircraftPopupHtml,
+				fetchAircraftEnrichmentHtml
+			);
+			wirePointLayerPopup(created, EARTHQUAKE_LAYER, buildEarthquakePopupHtml);
+			wirePointLayerPopup(created, WILDFIRE_LAYER, buildWildfirePopupHtml);
 			// flown-path trails: above geozones (so a zone fill doesn't visually
 			// bury them), below the mission-route line (a planned route stays
 			// the most prominent line on the map) - a real Marker exists on top
@@ -795,7 +1522,7 @@
 				.querySelector('.maplibregl-ctrl-attrib')
 				?.classList.remove('maplibregl-compact-show');
 			mapLoaded = true;
-			requestOpenAipLayers();
+			requestThirdPartyLayers();
 		});
 		map = created;
 		return () => {
@@ -878,10 +1605,11 @@
 	// and its own failure-retry loop both gate on this internally now.
 	// Previously this effect only ever touched the map layer's CSS
 	// visibility, so unchecking "No-fly zones" hid already-fetched data but
-	// left requestOpenAipLayers() (called on every moveend, unconditionally)
+	// left requestThirdPartyLayers() (called on every moveend, unconditionally)
 	// still firing real network requests in the background indefinitely -
 	// a real bug, not a feature: burning through OpenAIP's rate limit even
-	// with the layer explicitly turned off.
+	// with the layer explicitly turned off. Same reasoning applies to every
+	// store below, each against its own independent budget.
 	$effect(() => {
 		geozoneStore.setVisible(showGeozones);
 	});
@@ -890,6 +1618,42 @@
 	});
 	$effect(() => {
 		airportStore.setVisible(showAirports);
+	});
+	$effect(() => {
+		aircraftStore.setVisible(showAircraft);
+	});
+	$effect(() => {
+		earthquakeStore.setVisible(showEarthquakes);
+	});
+	$effect(() => {
+		wildfireStore.setVisible(showWildfires);
+	});
+	$effect(() => {
+		const activeMap = map;
+		weatherStore.setVisible(showWeather);
+		// Same immediate-fetch reasoning as the Cities effect below: turning
+		// Weather on shouldn't wait for the next pan/zoom to show anything.
+		if (showWeather && activeMap) {
+			const center = activeMap.getCenter();
+			weatherStore.requestLocation(center.lat, center.lng);
+			updateWeatherLocationLabel(center.lat, center.lng);
+		}
+	});
+	// Loads the bundled dataset the first time Cities is turned on (a no-op
+	// on every call after - see ensureLoaded's own comment) and applies the
+	// current viewport immediately once loaded - without this, turning
+	// Cities on would show nothing until the next pan/zoom happened to
+	// trigger requestThirdPartyLayers's own moveend-driven call.
+	$effect(() => {
+		const activeMap = map;
+		if (!showCities || !activeMap) return;
+		void cityStore.ensureLoaded().then(() => {
+			const bounds = activeMap.getBounds();
+			cityStore.setViewport(
+				[bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+				activeMap.getZoom()
+			);
+		});
 	});
 
 	// no-fly-zone layer's own paint visibility, independent of whether
@@ -916,6 +1680,31 @@
 		const visible = showAirports;
 		if (!activeMap || !mapLoaded) return;
 		activeMap.setLayoutProperty(AIRPORT_LAYER, 'visibility', visible ? 'visible' : 'none');
+	});
+	$effect(() => {
+		const activeMap = map;
+		const visible = showCities;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(CITY_LAYER, 'visibility', visible ? 'visible' : 'none');
+	});
+	$effect(() => {
+		const activeMap = map;
+		const visible = showAircraft;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(AIRCRAFT_LAYER, 'visibility', visible ? 'visible' : 'none');
+		activeMap.setLayoutProperty(AIRCRAFT_TRAIL_LAYER, 'visibility', visible ? 'visible' : 'none');
+	});
+	$effect(() => {
+		const activeMap = map;
+		const visible = showEarthquakes;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(EARTHQUAKE_LAYER, 'visibility', visible ? 'visible' : 'none');
+	});
+	$effect(() => {
+		const activeMap = map;
+		const visible = showWildfires;
+		if (!activeMap || !mapLoaded) return;
+		activeMap.setLayoutProperty(WILDFIRE_LAYER, 'visibility', visible ? 'visible' : 'none');
 	});
 
 	// Operator-drawn zone layer visibility - same shape as the geozone
@@ -975,7 +1764,14 @@
 			type: 'FeatureCollection',
 			features: obstacleStore.obstacles.map((obstacle) => ({
 				type: 'Feature',
-				properties: { category: obstacle.category, name: obstacle.name },
+				properties: {
+					category: obstacle.category,
+					name: obstacle.name,
+					countryCode: obstacle.countryCode ?? null,
+					heightM: obstacle.heightM ?? null,
+					elevationM: obstacle.elevationM ?? null,
+					wikipediaUrl: obstacle.wikipediaUrl ?? null
+				},
 				geometry: {
 					type: 'Point',
 					coordinates: [obstacle.longitudeDeg, obstacle.latitudeDeg]
@@ -991,10 +1787,126 @@
 			type: 'FeatureCollection',
 			features: airportStore.airports.map((airport) => ({
 				type: 'Feature',
-				properties: { category: airport.category, name: airport.name },
+				properties: {
+					category: airport.category,
+					name: airport.name,
+					icaoCode: airport.icaoCode ?? null,
+					countryCode: airport.countryCode ?? null,
+					elevationM: airport.elevationM ?? null
+				},
 				geometry: {
 					type: 'Point',
 					coordinates: [airport.longitudeDeg, airport.latitudeDeg]
+				}
+			}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(CITY_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: cityStore.visibleCities.map((city) => ({
+				type: 'Feature',
+				properties: {
+					name: city.name,
+					countryCode: city.countryCode,
+					population: city.population
+				},
+				geometry: {
+					type: 'Point',
+					coordinates: [city.longitudeDeg, city.latitudeDeg]
+				}
+			}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(AIRCRAFT_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: aircraftStore.aircraft.map((plane) => ({
+				type: 'Feature',
+				properties: {
+					callsign: plane.callsign ?? null,
+					icao24: plane.icao24,
+					registration: plane.registration ?? null,
+					typeDescription: plane.typeDescription ?? null,
+					operator: plane.operator ?? null,
+					yearBuilt: plane.yearBuilt ?? null,
+					altitudeM: plane.altitudeM ?? null,
+					velocityMS: plane.velocityMS ?? null,
+					verticalRateMS: plane.verticalRateMS ?? null,
+					headingDeg: plane.headingDeg ?? null,
+					onGround: plane.onGround,
+					isMilitary: plane.isMilitary,
+					isEmergency: isAircraftEmergency(plane),
+					emergency: plane.emergency ?? null,
+					iconId: iconIdFor(iconShapeForCategory(plane.category)),
+					iconSize: aircraftIconSize(plane.category)
+				},
+				geometry: {
+					type: 'Point',
+					coordinates: [plane.longitudeDeg, plane.latitudeDeg]
+				}
+			}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(AIRCRAFT_TRAIL_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: [...aircraftStore.trails.entries()]
+				.filter(([, points]) => points.length > 1)
+				.map(([icao24, points]) => ({
+					type: 'Feature',
+					properties: { icao24 },
+					geometry: { type: 'LineString', coordinates: points }
+				}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(EARTHQUAKE_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: earthquakeStore.earthquakes.map((quake) => ({
+				type: 'Feature',
+				properties: {
+					place: quake.place,
+					magnitude: quake.magnitude,
+					depthKm: quake.depthKm,
+					timeMs: quake.timeMs
+				},
+				geometry: {
+					type: 'Point',
+					coordinates: [quake.longitudeDeg, quake.latitudeDeg]
+				}
+			}))
+		});
+	});
+	$effect(() => {
+		const activeMap = map;
+		if (!activeMap || !mapLoaded) return;
+		const source = activeMap.getSource<maplibregl.GeoJSONSource>(WILDFIRE_SOURCE);
+		source?.setData({
+			type: 'FeatureCollection',
+			features: wildfireStore.hotspots.map((hotspot) => ({
+				type: 'Feature',
+				properties: {
+					brightnessK: hotspot.brightnessK,
+					frpMw: hotspot.frpMw ?? null,
+					confidence: hotspot.confidence,
+					acquiredAtIso: hotspot.acquiredAtIso
+				},
+				geometry: {
+					type: 'Point',
+					coordinates: [hotspot.longitudeDeg, hotspot.latitudeDeg]
 				}
 			}))
 		});
@@ -1366,7 +2278,7 @@
 				const batteryPct = state.battery?.remainingPct;
 				const batteryLabel =
 					batteryPct === undefined || batteryPct < 0 ? '?' : `${batteryPct.toFixed(0)}%`;
-				handle.telemetryEl.textContent = `${state.position.altitudeRelM.toFixed(0)} m \u00b7 ${batteryLabel}`;
+				handle.telemetryEl.textContent = `${formatAltitude(state.position.altitudeRelM, unitsStore.current)} \u00b7 ${batteryLabel}`;
 				const owner = ownerFor?.(wardId);
 				handle.ownerRow.classList.toggle('hidden', !owner);
 				handle.ownerRow.classList.toggle('flex', !!owner);
@@ -1445,23 +2357,126 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
-	{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError)}
-		<!-- Reassuring, not alarming: this is almost always OpenAIP's own
-		     rate limit (see openaip/request-gate.ts, shared across all three
-		     layers), which clears on its own within its cooldown window - not
-		     a real, ongoing failure the operator needs to act on. One
-		     combined banner rather than up to three stacked ones, since all
-		     three layers share the same rate-limited key and so tend to fail
-		     together, not independently. Each store's own raw error still
-		     goes to console.error and sits in its own title attribute for
-		     anyone who wants it. -->
-		<p
-			role="status"
-			title={geozoneStore.loadError ?? obstacleStore.loadError ?? airportStore.loadError}
-			class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2 rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
+	<!-- Both banners share this stack so a simultaneous OpenAIP + aircraft
+	     failure doesn't overlap into unreadable stacked text - genuinely
+	     independent services (different keys, different rate limits), so
+	     each gets its own line rather than being combined into one. -->
+	<div
+		class="absolute top-3 left-1/2 flex w-fit max-w-md -translate-x-1/2 flex-col items-center gap-1.5"
+	>
+		{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError)}
+			<!-- Reassuring, not alarming: this is almost always OpenAIP's own
+			     rate limit (see openaip/request-gate.ts, shared across all three
+			     layers), which clears on its own within its cooldown window - not
+			     a real, ongoing failure the operator needs to act on. One
+			     combined banner rather than up to three stacked ones, since all
+			     three layers share the same rate-limited key and so tend to fail
+			     together, not independently. Each store's own raw error still
+			     goes to console.error and sits in its own title attribute for
+			     anyone who wants it. -->
+			<p
+				role="status"
+				title={geozoneStore.loadError ?? obstacleStore.loadError ?? airportStore.loadError}
+				class="rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
+			>
+				Loading airspace data - this can take a few seconds.
+			</p>
+		{/if}
+		{#if showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
+			<!-- Same reassuring-banner treatment as the OpenAIP one above, not
+			     a separate design - it just wasn't wired up when the aircraft
+			     layer first shipped, which read as this layer failing silently
+			     with no feedback while OpenAIP's own failures were visible.
+			     Unlike the OpenAIP banner (error-only: geozone/obstacle/airport
+			     loadError never represents a real in-progress wait, since those
+			     are quick single requests), this one also covers
+			     aircraftStore.loading - a wide zoomed-out view can now take
+			     several genuine seconds (a multi-tile batch, ~1.2s apart per
+			     tile to respect airplanes.live's rate limit - see
+			     aircraft-store.svelte.ts), and that wait had no visible
+			     feedback at all before loading existed: loadError alone never
+			     fires on a normal successful fetch, so "still working" and
+			     "nothing's happening" looked identical. -->
+			<p
+				role="status"
+				title={aircraftStore.loadError}
+				class="rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
+			>
+				Loading aircraft data - this can take a few seconds.
+			</p>
+		{/if}
+	</div>
+
+	{#if showWeather && weatherStore.conditions}
+		{@const conditions = weatherStore.conditions}
+		<!-- Top-left: the one corner with nothing else in it (legend/scale
+		     live bottom-left, controls bottom-right, error banners top-center).
+		     Not a point/popup layer like Aircraft/Earthquakes/etc.: weather is
+		     a continuous field, not discrete features, so it's a small
+		     always-visible readout for the current map center rather than
+		     something you hover a marker for. -->
+		<div
+			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted"
+			aria-label="Current weather at map center"
 		>
-			Loading airspace data - this can take a few seconds.
-		</p>
+			{#if weatherLocationLabel}
+				<span class="text-[10px] font-medium text-fg-muted uppercase">
+					{weatherLocationLabel}
+				</span>
+			{/if}
+			<div class="flex items-center gap-1.5">
+				<span class="text-fg">
+					<WeatherIcon
+						shape={weatherIconShape(conditions.weatherCode, conditions.isDay)}
+						size={22}
+					/>
+				</span>
+				<span class="font-mono text-sm font-semibold text-fg">
+					{formatTemperature(conditions.temperatureC, unitsStore.current)}
+				</span>
+				<span class="truncate">{weatherConditionLabel(conditions.weatherCode)}</span>
+			</div>
+			{#if conditions.feelsLikeC !== undefined && Math.abs(conditions.feelsLikeC - conditions.temperatureC) >= 1}
+				<span>Feels like {formatTemperature(conditions.feelsLikeC, unitsStore.current)}</span>
+			{/if}
+			<div class="grid grid-cols-2 gap-x-2 gap-y-0.5">
+				<span>
+					{conditions.windDirectionDeg.toFixed(0)}&deg; {formatVehicleSpeed(
+						conditions.windSpeedMS,
+						unitsStore.current
+					)}
+				</span>
+				{#if conditions.windGustMS !== undefined && conditions.windGustMS > conditions.windSpeedMS}
+					<span>Gusts {formatVehicleSpeed(conditions.windGustMS, unitsStore.current)}</span>
+				{/if}
+				{#if conditions.cloudCoverPct !== undefined}
+					<span>Cloud {conditions.cloudCoverPct.toFixed(0)}%</span>
+				{/if}
+				{#if conditions.humidityPct !== undefined}
+					<span>Humidity {conditions.humidityPct.toFixed(0)}%</span>
+				{/if}
+				{#if conditions.rainMm}
+					<span>Rain {formatPrecipitation(conditions.rainMm, unitsStore.current)}</span>
+				{/if}
+				{#if conditions.showersMm}
+					<span>Showers {formatPrecipitation(conditions.showersMm, unitsStore.current)}</span>
+				{/if}
+				{#if conditions.snowfallMm}
+					<span>Snow {formatPrecipitation(conditions.snowfallMm, unitsStore.current)}</span>
+				{/if}
+				{#if !conditions.rainMm && !conditions.showersMm && !conditions.snowfallMm}
+					<span>
+						Precip {formatPrecipitation(conditions.precipitationMm, unitsStore.current)}
+					</span>
+				{/if}
+				{#if conditions.visibilityM !== undefined}
+					<span>Vis {formatDistanceUnits(conditions.visibilityM, unitsStore.current)}</span>
+				{/if}
+				{#if conditions.pressureHpa !== undefined}
+					<span>{formatPressure(conditions.pressureHpa, unitsStore.current)}</span>
+				{/if}
+			</div>
+		</div>
 	{/if}
 
 	<!--
@@ -1520,63 +2535,164 @@
 				</svg>
 			</button>
 			{#if layersMenuOpen}
+				<!-- Anchored above and right-aligned to the trigger, same
+				     opening direction as ThemeToggle/UnitsToggle in the right
+				     rail - and, unlike the old top-1/2/-translate-y-1/2
+				     centering this replaced, its height is capped with its own
+				     scrollbar instead of being free to grow past the map's
+				     top/bottom edges (that used to clip both the map style list
+				     and the Zones row at the bottom silently). -->
 				<div
-					class="absolute top-1/2 right-10 flex w-40 -translate-y-1/2 flex-col gap-3 rounded border border-edge bg-panel/95 p-2.5"
+					class="absolute right-0 bottom-full z-30 mb-1 flex max-h-[min(90vh,44rem)] w-72 flex-col gap-3 overflow-y-auto rounded border border-edge bg-panel/95 p-2.5"
 				>
 					<div>
 						<p class="mb-1.5 text-[9px] font-medium tracking-widest text-fg-muted">MAP STYLE</p>
-						<!-- A choice, not an on/off switch - checkmarks against the
-					     selected option, not a checkbox, since exactly one is always
-					     active. Plain light/dark isn't offered here as its own pair:
-					     "Map" follows the app-wide theme toggle (themeStore) rather
-					     than exposing a second, independent choice - see basemapTiles's
-					     own comment. Roadmap only appears next to the light theme, for
-					     the same reason. -->
-						<div class="flex flex-col gap-0.5">
+						<!-- A choice, not an on/off switch - the selected card gets an
+					     accent border and a check badge, not a checkbox, since
+					     exactly one is always active. Plain light/dark isn't offered
+					     here as its own pair: "Map" follows the app-wide theme
+					     toggle (themeStore) rather than exposing a second,
+					     independent choice - see basemapTiles's own comment.
+					     Roadmap only appears next to the light theme, for the same
+					     reason. Preview thumbnails are real captures of each style
+					     (see src/lib/assets/map-style-previews/), not swatches -
+					     bundled at build time, same asset-import pattern as
+					     logo-mark.svg. -->
+						<div class="grid grid-cols-2 gap-1.5">
 							{#each MAP_STYLE_OPTIONS as option (option.id)}
 								{#if option.id !== 'roadmap' || themeStore.current === 'light'}
 									<button
 										type="button"
 										onclick={() => setMapStyle(option.id)}
 										aria-pressed={mapStyle === option.id}
-										class="flex items-center justify-between rounded px-2 py-1 text-left text-[11px] {mapStyle ===
+										class="relative aspect-[8/5] overflow-hidden rounded border {mapStyle ===
 										option.id
-											? 'bg-accent/15 text-accent'
-											: 'text-fg-muted hover:bg-white/5 hover:text-fg'}"
+											? 'border-accent ring-1 ring-accent'
+											: 'border-edge hover:border-fg-muted'}"
 									>
-										{option.label}
-										{#if mapStyle === option.id}<span aria-hidden="true">&check;</span>{/if}
+										<img
+											src={stylePreviewFor(option)}
+											alt=""
+											class="h-full w-full object-cover"
+											loading="lazy"
+										/>
+										<span
+											class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 text-left text-[10px] font-medium text-white"
+										>
+											{option.label}
+										</span>
+										{#if mapStyle === option.id}
+											<span
+												class="absolute top-1 right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-white"
+												aria-hidden="true"
+											>
+												<svg
+													width="8"
+													height="8"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="3"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												>
+													<path d="M20 6 9 17l-5-5" />
+												</svg>
+											</span>
+										{/if}
 									</button>
 								{/if}
 							{/each}
 						</div>
 					</div>
-					{#if geozoneStore.active || obstacleStore.active || airportStore.active}
-						<div class="border-t border-edge pt-2">
-							<div class="flex flex-col gap-0.5">
+					<div class="border-t border-edge pt-2">
+						<!-- Split into two light categories instead of one flat
+					     8-item list - purely a layout grouping (each item's own
+					     .active/no-gate rules are unchanged), but it reads as
+					     organized rather than a wall of checkboxes, and the
+					     2-column grid halves the vertical space either group
+					     needs. -->
+						{#if geozoneStore.active || obstacleStore.active || airportStore.active}
+							<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
+							<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
 								{#if geozoneStore.active}
-									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+									<label
+										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+									>
 										<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
 										No-fly zones
 									</label>
 								{/if}
 								{#if obstacleStore.active}
-									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+									<label
+										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+									>
 										<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
 										Obstacles
 									</label>
 								{/if}
 								{#if airportStore.active}
-									<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+									<label
+										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+									>
 										<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
 										Airports
 									</label>
 								{/if}
 							</div>
+						{/if}
+						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">DATA LAYERS</p>
+						<div class="grid grid-cols-2 gap-x-1 gap-y-0.5">
+							<!-- No .active gate: cities are a bundled dataset, not an
+							     OpenAIP layer, so there's no key-configured state to
+							     wait on (see city-store.svelte.ts's own comment). -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showCities} class="accent-accent" />
+								Cities
+							</label>
+							<!-- No .active gate: Open-Meteo needs no key. Not a point
+							     layer like everything else here - see the weather
+							     widget itself, rendered separately below. Kept right
+							     after Cities (both no-gate, always-available layers)
+							     rather than grouped with the network/hazard feeds
+							     below it. -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showWeather} class="accent-accent" />
+								Weather
+							</label>
+							<!-- No .active gate either: OpenSky's anonymous tier needs no
+							     signup (see aircraft-store.svelte.ts's own comment). -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
+								Aircraft
+							</label>
+							<!-- Same again: USGS's feed is fully open. -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showEarthquakes} class="accent-accent" />
+								Earthquakes
+							</label>
+							{#if wildfireStore.active}
+								<label
+									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+								>
+									<input type="checkbox" bind:checked={showWildfires} class="accent-accent" />
+									Wildfires
+								</label>
+							{/if}
 						</div>
-					{/if}
+					</div>
 					<div class="border-t border-edge pt-2">
-						<label class="flex cursor-pointer items-center gap-2 px-2 text-[11px]">
+						<label
+							class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+						>
 							<input type="checkbox" bind:checked={showZones} class="accent-accent" />
 							Zones
 						</label>
@@ -1586,16 +2702,20 @@
 		</div>
 	</div>
 
-	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones) || (obstacleStore.active && showObstacles) || (airportStore.active && showAirports)}
+	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones) || (obstacleStore.active && showObstacles) || (airportStore.active && showAirports) || showCities || showAircraft || showEarthquakes || (wildfireStore.active && showWildfires)}
 		{@const showZoneRow = zoneStore.zoneIds.length > 0 && showZones}
 		{@const showGeozoneRow = geozoneStore.active && showGeozones}
 		{@const showObstacleRow = obstacleStore.active && showObstacles}
 		{@const showAirportRow = airportStore.active && showAirports}
+		{@const showCityRow = showCities}
+		{@const showAircraftRow = showAircraft}
+		{@const showEarthquakeRow = showEarthquakes}
+		{@const showWildfireRow = wildfireStore.active && showWildfires}
 		<!-- One panel, not two separately-floating boxes: they used to sit at
 		     different bottom offsets that had to be kept in sync by hand, and
 		     read as visually disconnected even when both were showing. -->
 		<div
-			class="absolute bottom-8 left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5"
+			class="absolute bottom-8 left-[10px] flex flex-col gap-1.5 border border-edge bg-panel/90 px-2 py-1.5"
 		>
 			{#if showZoneRow}
 				<ul class="flex gap-3" aria-label="Zone legend">
@@ -1630,28 +2750,50 @@
 					</li>
 				</ul>
 			{/if}
-			{#if showObstacleRow}
+			{#if showObstacleRow || showAirportRow || showCityRow || showAircraftRow || showEarthquakeRow || showWildfireRow}
 				<ul
-					class="flex gap-3 {showZoneRow || showGeozoneRow ? 'border-t border-edge pt-1.5' : ''}"
-					aria-label="Obstacle legend"
-				>
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
-						Obstacles
-					</li>
-				</ul>
-			{/if}
-			{#if showAirportRow}
-				<ul
-					class="flex gap-3 {showZoneRow || showGeozoneRow || showObstacleRow
+					class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
 						? 'border-t border-edge pt-1.5'
 						: ''}"
-					aria-label="Airport legend"
+					aria-label="Point layer legend"
 				>
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
-						Airports
-					</li>
+					{#if showObstacleRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
+							Obstacles
+						</li>
+					{/if}
+					{#if showAirportRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
+							Airports
+						</li>
+					{/if}
+					{#if showCityRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {CITY_COLOR}"></span>
+							Cities
+						</li>
+					{/if}
+					{#if showAircraftRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {AIRCRAFT_COLOR}"></span>
+							Aircraft
+						</li>
+					{/if}
+					{#if showEarthquakeRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {EARTHQUAKE_COLOR}"
+							></span>
+							Earthquakes
+						</li>
+					{/if}
+					{#if showWildfireRow}
+						<li class="flex items-center gap-1 text-[10px]">
+							<span class="h-2 w-2 rounded-full" style="background-color: {WILDFIRE_COLOR}"></span>
+							Wildfires
+						</li>
+					{/if}
 				</ul>
 			{/if}
 		</div>
@@ -1847,5 +2989,55 @@
 		border-color: var(--color-edge) !important;
 		border-top-color: var(--color-edge) !important;
 		color: var(--color-fg-muted) !important;
+	}
+
+	/* Same reasoning as .maplibregl-ctrl-group above: MapLibre's own Popup
+	   CSS ships hard-coded for a white content box (#fff background, dark
+	   text), which read as washed-out/illegible once the obstacle/airport/
+	   city hover popups' own text used the app's --color-fg tokens (light
+	   colors, meant for a dark panel) against that white background. Themed
+	   the same way as every other MapLibre-injected control, so it follows
+	   dark/light theme changes automatically instead of needing its own
+	   separate toggle. */
+	:global(.maplibregl-popup-content) {
+		background: var(--color-panel);
+		border: 1px solid var(--color-edge);
+		box-shadow: none;
+		padding: 8px 10px;
+		border-radius: 4px;
+		/* MapLibre sets no width of its own - the popup just shrinks to fit
+		   whatever HTML it's given, and popupRow's own justify-between rows
+		   have no minimum, so a popup with only a couple of short rows (or
+		   a long label like "Registration") reads as cramped. A floor, not
+		   a fixed width - still grows past this for genuinely wide content
+		   (the airport-style METAR rows, an aircraft's Route row). */
+		min-width: 200px;
+	}
+	/* MapLibre's own stylesheet sets the tip's actual visible color via
+	   anchor-direction-specific selectors (one border side per direction,
+	   the others transparent to form the triangle), which are more
+	   specific than a flat .maplibregl-popup-tip override and so win the
+	   cascade regardless of Vite's CSS ordering - confirmed live: the
+	   generic override above was fully ignored, tip stayed white in dark
+	   theme. Matching each of MapLibre's own selectors directly is the
+	   only reliable way to actually override this. */
+	:global(.maplibregl-popup-anchor-top .maplibregl-popup-tip) {
+		border-bottom-color: var(--color-panel);
+	}
+	:global(.maplibregl-popup-anchor-bottom .maplibregl-popup-tip) {
+		border-top-color: var(--color-panel);
+	}
+	:global(.maplibregl-popup-anchor-left .maplibregl-popup-tip) {
+		border-right-color: var(--color-panel);
+	}
+	:global(.maplibregl-popup-anchor-right .maplibregl-popup-tip) {
+		border-left-color: var(--color-panel);
+	}
+	:global(.maplibregl-popup-close-button) {
+		color: var(--color-fg-muted);
+	}
+	:global(.maplibregl-popup-close-button:hover) {
+		background: transparent;
+		color: var(--color-fg);
 	}
 </style>

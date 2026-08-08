@@ -6,6 +6,7 @@
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
 	import { obstacleStore } from '$lib/obstacles/obstacle-store.svelte';
 	import { airportStore } from '$lib/airports/airport-store.svelte';
+	import { wildfireStore } from '$lib/wildfires/wildfire-store.svelte';
 	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
 	import { FakeGateway } from '$lib/fake/fleet-sim';
@@ -103,6 +104,7 @@
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
 		obstacleStore.configure(env.PUBLIC_OPENAIP_KEY);
 		airportStore.configure(env.PUBLIC_OPENAIP_KEY);
+		wildfireStore.configure(env.PUBLIC_FIRMS_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);
 		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {

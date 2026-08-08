@@ -1,6 +1,7 @@
 import type { Airport, AirportSource, ViewportBounds } from './types';
 import { OpenAipAirportSource } from './openaip';
 import { openAipRequestGate } from '../openaip/request-gate';
+import { tileOpenAipBounds } from '../openaip/tile-bounds';
 
 // Same tuning as geozones/geozone-store.svelte.ts and
 // obstacles/obstacle-store.svelte.ts - all three share the same
@@ -91,24 +92,42 @@ class AirportStore {
 		}
 
 		const requestId = ++this.lastRequestId;
-		await openAipRequestGate.enqueue(async () => {
-			try {
-				const airports = await source.fetchViewport(bounds);
-				if (requestId !== this.lastRequestId) return;
-				this.airports = airports;
-				this.loadError = undefined;
-				this.cache.set(cacheKey, { airports, fetchedAtMs: Date.now() });
-			} catch (error) {
-				if (requestId !== this.lastRequestId) return;
-				this.loadError = error instanceof Error ? error.message : String(error);
-				openAipRequestGate.noteFailure();
-				console.error('airports: failed to load viewport', error);
-				if (this.retryTimer) clearTimeout(this.retryTimer);
-				this.retryTimer = setTimeout(() => {
-					if (this.lastBounds) void this.fetchViewport(this.lastBounds);
-				}, FAILURE_COOLDOWN_MS);
-			}
-		});
+		// Split into up to 2 side-by-side queries when the viewport is wide
+		// enough that one 5-degree-clamped window would only cover a small,
+		// misleadingly dense fraction of what's visible - see
+		// openaip/tile-bounds.ts and geozone-store.svelte.ts's own identical
+		// comment on this.
+		const tiles = tileOpenAipBounds(bounds);
+		const tileResults: Airport[][] = [];
+		let tileError: unknown;
+		await Promise.all(
+			tiles.map((tile, index) =>
+				openAipRequestGate.enqueue(async () => {
+					try {
+						tileResults[index] = await source.fetchViewport(tile);
+					} catch (error) {
+						tileError = error;
+					}
+				})
+			)
+		);
+		if (requestId !== this.lastRequestId) return;
+		if (tileError !== undefined) {
+			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
+			openAipRequestGate.noteFailure();
+			console.error('airports: failed to load viewport', tileError);
+			if (this.retryTimer) clearTimeout(this.retryTimer);
+			this.retryTimer = setTimeout(() => {
+				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
+			}, FAILURE_COOLDOWN_MS);
+			return;
+		}
+		// Deduped by id: adjacent tiles can both legitimately return an
+		// airport that straddles the split line.
+		const airports = [...new Map(tileResults.flat().map((a) => [a.id, a])).values()];
+		this.airports = airports;
+		this.loadError = undefined;
+		this.cache.set(cacheKey, { airports, fetchedAtMs: Date.now() });
 	}
 }
 
