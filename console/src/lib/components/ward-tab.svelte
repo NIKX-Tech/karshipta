@@ -4,6 +4,8 @@
 	import { formatBatteryLabel, formatGpsLabel } from '$lib/ward-format';
 	import CommandPanel from '$lib/components/command-panel.svelte';
 	import MissionPanel from '$lib/components/mission-panel.svelte';
+	import { unitsStore } from '$lib/units/units-store.svelte';
+	import { formatAltitude, formatSpeed } from '$lib/units/format';
 
 	interface Props {
 		wardId: string;
@@ -65,12 +67,20 @@
 				<dd class="font-medium">{state.flight.inAir ? 'in air' : 'grounded'}</dd>
 			{/if}
 			<dt class="text-fg-muted">Alt rel</dt>
-			<dd class="font-mono tabular-nums">{state.position?.altitudeRelM.toFixed(1) ?? '?'} m</dd>
+			<dd class="font-mono tabular-nums">
+				{state.position !== undefined
+					? formatAltitude(state.position.altitudeRelM, unitsStore.current)
+					: '?'}
+			</dd>
 			<dt class="text-fg-muted">Alt MSL</dt>
-			<dd class="font-mono tabular-nums">{state.position?.altitudeMslM.toFixed(0) ?? '?'} m</dd>
+			<dd class="font-mono tabular-nums">
+				{state.position !== undefined
+					? formatAltitude(state.position.altitudeMslM, unitsStore.current)
+					: '?'}
+			</dd>
 			<dt class="text-fg-muted">Speed</dt>
 			<dd class="font-mono tabular-nums">
-				{groundSpeed === undefined ? '?' : groundSpeed.toFixed(1)} m/s
+				{groundSpeed === undefined ? '?' : formatSpeed(groundSpeed, unitsStore.current)}
 			</dd>
 			<dt class="text-fg-muted">Heading</dt>
 			<dd class="font-mono tabular-nums">{state.headingDeg.toFixed(0)}&deg;</dd>

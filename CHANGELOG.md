@@ -5,7 +5,53 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.1.2]
+
+### Added
+
+- console-core: aircraft markers rebuilt as DOM `maplibregl.Marker`
+  elements with real inline SVG instead of a canvas-rasterized MapLibre
+  symbol layer - the rasterized icons lost fine detail (a thin fuselage
+  vanishing at typical marker size) that native SVG doesn't. Real
+  top-down airliner silhouettes per category replace the old hand-drawn
+  shape; military fixed-wing aircraft get a genuinely distinct fighter
+  silhouette instead of a recolored civilian one, military rotorcraft
+  keep the existing helicopter shape. Marker position and heading now
+  animate between fixes instead of snapping, and the refresh interval
+  drops from 16s to 7s.
+- console-core: Obstacles, Airports, and Aircraft map layers default on;
+  Obstacles gained zoom-based thinning to support that. Richer popup
+  data: airport private/PPR access flags and METAR flight category,
+  earthquake USGS PAGER alert level and tsunami warnings with a link to
+  the event page, wildfire day/night detection.
+- console-core: new "center on my location" map control, using the
+  browser's geolocation.
+- console-core: export the Fleet/Zone/FleetMission message codecs from
+  the `/wire` subpath, not just the package root - the server-side-safe
+  entrypoint a consuming backend actually needs to encode/decode those
+  envelopes without pulling in browser-only Svelte component CSS.
+
+### Fixed
+
+- console-core: `WardMissionStatus` (the enum `WardMissionState` and
+  `WardMissionPlan` reference) was missing from both the package root
+  and `/wire` exports, leaving no way to reference ACTIVE/STOPPED/
+  REJECTED by name.
+- console-core: aircraft viewport tiling collapsed into small dense
+  clusters instead of spreading real coverage across a wide zoomed-out
+  view; fixed to a grid sized proportionally to how much bigger the
+  viewport is than one tile's coverage. Also fixed the loading banner
+  blinking on ordinary background refreshes.
+
 ## [0.1.1]
+
+### Added
+
+- console-core: publish the Zones (operator-drawn keep-in/keep-out
+  geofences), Fleet-groups (named ward groupings within a session), and
+  Fleet-mission (per-ward mission wizard, list, live map routes) wire
+  types, stores, and display components from the library's export
+  surface - built earlier but never exposed to a consuming app until now.
 
 ### Fixed
 
@@ -13,6 +59,18 @@ release onward.
   timeout of its own, so an autopilot that never acknowledged the command
   could hang the call indefinitely. Now bounded to 5 seconds; a timeout is
   treated as a failed disarm instead of left to hang.
+- Gateway: real Windows relay builds. `KARSHIPTA_GATEWAY_ENABLE_RELAY=ON`
+  was a hard error on Windows since the relay transport landed; once
+  relayly shipped Windows SDK support, three more real problems surfaced
+  the first time this was actually built there - a missing mbedTLS
+  dependency, a missing `bcrypt` link for its entropy source, and a
+  Windows-DLL-export gap in ixwebsocket itself (several `static const`
+  class members used as default-argument values, none exported - MSVC
+  does not auto-export data symbols from a DLL the way it does
+  functions). All three fixed; Windows now builds and links with relay
+  enabled like every other platform. The `herald-only` release flavor no
+  longer links relayly at all, on any platform - Herald ingestion is
+  plain HTTP, it never had the NAT-traversal problem relay solves.
 
 ## [0.1.0] - first public release
 

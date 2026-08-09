@@ -5,6 +5,8 @@
 	import WardTab from '$lib/components/ward-tab.svelte';
 	import MissionTab from '$lib/components/mission-tab.svelte';
 	import ZonesTab from '$lib/components/zones-tab.svelte';
+	import ThemeToggle from '$lib/components/theme-toggle.svelte';
+	import UnitsToggle from '$lib/components/units-toggle.svelte';
 
 	interface Props {
 		fleetLabel: string;
@@ -174,8 +176,11 @@
 						stroke-linejoin="round"
 						aria-hidden="true"
 					>
-						<circle cx="12" cy="12" r="7" />
-						<path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+						<circle cx="12" cy="12" r="3" />
+						<line x1="12" y1="2" x2="12" y2="6" />
+						<line x1="12" y1="18" x2="12" y2="22" />
+						<line x1="2" y1="12" x2="6" y2="12" />
+						<line x1="18" y1="12" x2="22" y2="12" />
 					</svg>
 				{:else if tab.id === 'mission'}
 					<svg
@@ -212,5 +217,9 @@
 				{/if}
 			{/snippet}
 		</Tabs>
+
+		<div class="flex-1"></div>
+		<UnitsToggle />
+		<ThemeToggle />
 	</div>
 </div>
