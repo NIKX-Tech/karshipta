@@ -352,6 +352,18 @@
 	// same as markers/aircraftMarkers below.
 	let scaleControl: maplibregl.ScaleControl | undefined;
 	let scaleBarEl: HTMLElement | undefined;
+	// True only once scaleControl.onAdd() has actually run - confirmed live
+	// this matters, not just belt-and-suspenders: scaleControl itself
+	// becomes non-null (in the mount effect below) well before onAdd ever
+	// runs (that's deferred to this action, gated on mapLoaded), so a plain
+	// `scaleControl?.` truthiness check elsewhere is not enough to know the
+	// control is actually usable yet - calling setUnit() on a ScaleControl
+	// before onAdd has set its internal _map/_container crashes inside
+	// MapLibre's own code. $state (not a plain variable) specifically so
+	// the unit-sync effect below can react to this flipping true on its
+	// own, independent of whatever order Svelte happens to run this
+	// action's update() versus that effect in.
+	let scaleControlReady = $state(false);
 
 	// Inserts the scale control's DOM element into this node - a Svelte
 	// action rather than bind:this + appendChild, since manipulating a
@@ -366,6 +378,7 @@
 			if (!isLoaded || !scaleControl || !map || scaleBarEl) return;
 			scaleBarEl = scaleControl.onAdd(map);
 			node.appendChild(scaleBarEl);
+			scaleControlReady = true;
 		}
 		tryInsert(loaded);
 		return {
@@ -373,6 +386,7 @@
 			destroy() {
 				scaleControl?.onRemove();
 				scaleBarEl = undefined;
+				scaleControlReady = false;
 			}
 		};
 	}
@@ -1847,6 +1861,7 @@
 			scaleControl?.onRemove();
 			scaleControl = undefined;
 			scaleBarEl = undefined;
+			scaleControlReady = false;
 			created.remove();
 			map = undefined;
 		};
@@ -1915,8 +1930,13 @@
 	// metric/imperial choice - MapLibre's ScaleControl only reads its unit
 	// once at construction otherwise, so without this it would stay
 	// permanently metric regardless of the Units toggle everything else in
-	// this app already respects.
+	// this app already respects. Gated on scaleControlReady (see its own
+	// comment): confirmed live that calling setUnit before onAdd has run
+	// crashes inside MapLibre's own code, not just a theoretical race - a
+	// consuming app with more components/effects around FleetMap than this
+	// reference app's own page shifted the timing enough to actually hit it.
 	$effect(() => {
+		if (!scaleControlReady) return;
 		scaleControl?.setUnit(unitsStore.current);
 	});
 
@@ -2666,6 +2686,10 @@
 				handle.ownerRow.classList.toggle('flex', !!owner);
 				if (owner) {
 					handle.ownerNameEl.textContent = `@${owner.username}`;
+					// No placeholder circle when there's no photo - an empty
+					// bordered dot next to the name reads as a broken image,
+					// not "no avatar set".
+					handle.ownerAvatar.classList.toggle('hidden', !owner.photoUrl);
 					handle.ownerAvatar.style.backgroundImage = owner.photoUrl
 						? `url(${JSON.stringify(owner.photoUrl)})`
 						: '';
@@ -3244,10 +3268,17 @@
 	 * them. filter:invert flips the dark icon light without touching the
 	 * vendor's asset; simplest fix that doesn't fork the library's SVGs.
 	 */
+	/* !important: MapLibre's own stylesheet sets background/border/box-shadow
+	 * on this exact same single-class selector, so without it, load order
+	 * (not specificity - both rules are equally specific) decides the
+	 * winner, and the vendor's white background + drop-shadow can leak
+	 * through - the zoom/compass group then visibly doesn't match the
+	 * locate/measure/layers buttons right above it, which use this file's
+	 * own plain border-edge/bg-panel styling with no shadow at all. */
 	:global(.maplibregl-ctrl-group) {
-		background: var(--color-panel);
-		border: 1px solid var(--color-edge);
-		box-shadow: none;
+		background: var(--color-panel) !important;
+		border: 1px solid var(--color-edge) !important;
+		box-shadow: none !important;
 	}
 	:global(.maplibregl-ctrl-group button + button) {
 		border-top: 1px solid var(--color-edge);
