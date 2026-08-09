@@ -10,17 +10,23 @@ export interface Airport {
 	category: AirportCategory;
 	/** ICAO code if OpenAIP reports one (most do); undefined otherwise */
 	icaoCode: string | undefined;
-	/** ISO country code - field name confirmed live on the obstacles
-	 * endpoint (see obstacles/openaip.ts's own comment); assumed to use the
-	 * same `country` field here since both endpoints share the same
-	 * response conventions, but not independently confirmed - live
-	 * verification of this endpoint specifically hit OpenAIP's rate limit
-	 * mid-testing. If this renders as always-undefined, check the real
-	 * field name first. */
+	/** ISO country code - confirmed live directly against this endpoint
+	 * (a real Schiphol response), not just assumed from obstacles' own
+	 * identical field. */
 	countryCode: string | undefined;
 	/** meters above sea level - same `{ value, unit }` shape confirmed live
-	 * on obstacles' own elevation field; same caveat as countryCode above. */
+	 * on obstacles' own elevation field, and now directly on this endpoint
+	 * too. */
 	elevationM: number | undefined;
+	/** Not publicly accessible without the owner/operator's own permission -
+	 * a real operational constraint, confirmed live as a plain boolean on
+	 * this endpoint (not every airport sets it; false/absent both mean
+	 * "no restriction reported"). */
+	isPrivate: boolean;
+	/** Prior Permission Required - distinct from `isPrivate`: a PPR field
+	 * can be publicly listed but still require contacting the operator
+	 * ahead of time, confirmed live as its own separate boolean. */
+	requiresPpr: boolean;
 	latitudeDeg: number;
 	longitudeDeg: number;
 }

@@ -8,7 +8,11 @@ import { AirplanesLiveAircraftSource } from './airplaneslive';
 // debounce far more snappily while staying well under it.
 const FETCH_DEBOUNCE_MS = 3_000;
 const FAILURE_COOLDOWN_MS = 10_000;
-const CACHE_TTL_MS = 15_000;
+// 15s+ read as sluggish - 7s keeps a single-tile refresh (the common case)
+// comfortably under the 1 req/s limit while roughly halving the wait.
+// Paired with fleet-map.svelte's own marker animation (see
+// aircraftMarkerElement), which eases between fixes instead of snapping.
+const CACHE_TTL_MS = 7_000;
 const CACHE_GRID_DEG = 0.25;
 // Short breadcrumb, not a real flight-path replay - just enough to read
 // "which way did this one come from" at a glance, same spirit as the
@@ -65,36 +69,49 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Splits a viewport into a 2x2 grid of quadrants once it's wide enough
- * that a single capped-radius query centered on it would only ever
- * reach a small fraction of what's visible - confirmed live: zoomed out
- * to see most of Europe, one query returned a single dense cluster of
- * ~200 aircraft in the middle and nothing else, because one circle can
- * only ever cover a ~460km slice of a view spanning thousands of km.
- * Each quadrant becomes its own independent point+radius query (see
- * fetchViewport below and airplaneslive.ts), so coverage actually
- * spreads across the visible map instead of stacking on the center -
- * the radius itself still can't exceed the API's own cap, but the
- * *view* effectively can. Left as a single untiled query (today's
- * behavior, unchanged) whenever the viewport already fits within
- * roughly one tile - the overwhelmingly common case at city/regional
- * zoom. */
+// Hard cap per axis, not just an overall one - without this, a whole-world
+// view would compute dozens of tiles and take minutes to sequence through
+// the gate. 3x3 = 9 tiles worst case, ~9 x TILE_GAP_MS (~11s) to fully
+// resolve - acceptable for an infrequent zoomed-out refresh, especially
+// now that the loading banner gives real feedback during the wait.
+const MAX_TILES_PER_AXIS = 3;
+
+/** Splits a viewport into a grid of tiles sized to how much bigger it
+ * actually is than one tile's coverage - not a fixed 2x2 regardless of
+ * size, which was confirmed live to be wrong: a whole-Europe view is still
+ * several times wider than 400km even after quartering, so each "tile" was
+ * itself still oversized and collapsed to a small circle at its own
+ * center, not spread-out coverage. Each grid cell is its own independent
+ * point+radius query (the radius itself still can't exceed the API's own
+ * 250nm cap). Left as a single untiled query whenever the viewport already
+ * fits within roughly one tile - the common case at city/regional zoom. */
 function tileBounds(bounds: ViewportBounds): ViewportBounds[] {
 	const [west, south, east, north] = bounds;
 	const midLat = (south + north) / 2;
 	const kmPerDegLon = KM_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
 	const widthKm = (east - west) * kmPerDegLon;
 	const heightKm = (north - south) * KM_PER_DEG_LAT;
-	if (widthKm <= SINGLE_TILE_COVERAGE_KM && heightKm <= SINGLE_TILE_COVERAGE_KM) {
-		return [bounds];
+	const tilesX = Math.min(
+		MAX_TILES_PER_AXIS,
+		Math.max(1, Math.ceil(widthKm / SINGLE_TILE_COVERAGE_KM))
+	);
+	const tilesY = Math.min(
+		MAX_TILES_PER_AXIS,
+		Math.max(1, Math.ceil(heightKm / SINGLE_TILE_COVERAGE_KM))
+	);
+	if (tilesX === 1 && tilesY === 1) return [bounds];
+
+	const tileWidthDeg = (east - west) / tilesX;
+	const tileHeightDeg = (north - south) / tilesY;
+	const tiles: ViewportBounds[] = [];
+	for (let row = 0; row < tilesY; row++) {
+		for (let col = 0; col < tilesX; col++) {
+			const tileWest = west + col * tileWidthDeg;
+			const tileSouth = south + row * tileHeightDeg;
+			tiles.push([tileWest, tileSouth, tileWest + tileWidthDeg, tileSouth + tileHeightDeg]);
+		}
 	}
-	const midLon = (west + east) / 2;
-	return [
-		[west, midLat, midLon, north], // NW
-		[midLon, midLat, east, north], // NE
-		[west, south, midLon, midLat], // SW
-		[midLon, south, east, midLat] // SE
-	];
+	return tiles;
 }
 
 interface CacheEntry {
@@ -125,14 +142,11 @@ class AircraftStore {
 	 * itself, rather than lingering as a stale breadcrumb. */
 	trails = $state<SvelteMap<string, [number, number][]>>(new SvelteMap());
 	loadError = $state<string | undefined>(undefined);
-	/** True for the whole span of an in-flight fetchViewport call,
-	 * including every tile in a multi-tile batch (see tileBounds) - unlike
-	 * loadError, which is error-only. A wide zoomed-out view can now take
-	 * several real seconds (sequential tiles, ~1.2s apart to respect the
-	 * rate limit), and that wait had no visible feedback at all before
-	 * this existed: loadError never fires on a normal successful fetch,
-	 * only a failed one, so "still working on it" and "nothing's
-	 * happening" looked identical. */
+	/** True only for a genuine multi-tile batch (see tileBounds), which can
+	 * take several real seconds. NOT set for the common single-tile
+	 * refresh: confirmed live that flipping this every background tick -
+	 * even ones resolving in under a second - made the loading banner
+	 * blink on and off every REFRESH_INTERVAL_MS. */
 	loading = $state(false);
 
 	private source = new AirplanesLiveAircraftSource();
@@ -191,13 +205,15 @@ class AircraftStore {
 		}
 
 		const requestId = ++this.lastRequestId;
-		this.loading = true;
+		// Cached and trail-tracked unfiltered - the raw response doesn't
+		// depend on zoom, only which of it we choose to show does (see
+		// CATEGORY_MIN_ZOOM above), so re-zooming the same area should
+		// reveal more of what's already been fetched, not force a refetch.
+		const tiles = tileBounds(bounds);
+		// See `loading`'s own comment: only a real multi-tile wait earns a
+		// visible loading state.
+		if (tiles.length > 1) this.loading = true;
 		try {
-			// Cached and trail-tracked unfiltered - the raw response doesn't
-			// depend on zoom, only which of it we choose to show does (see
-			// CATEGORY_MIN_ZOOM above), so re-zooming the same area should
-			// reveal more of what's already been fetched, not force a refetch.
-			const tiles = tileBounds(bounds);
 			const byIcao24 = new SvelteMap<string, Aircraft>();
 			for (let i = 0; i < tiles.length; i++) {
 				if (i > 0) await sleep(TILE_GAP_MS);

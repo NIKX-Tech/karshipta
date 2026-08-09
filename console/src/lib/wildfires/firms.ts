@@ -23,6 +23,7 @@ function parseCsv(text: string): FireHotspot[] {
 	const dateIdx = header.indexOf('acq_date');
 	const timeIdx = header.indexOf('acq_time');
 	const frpIdx = header.indexOf('frp');
+	const daynightIdx = header.indexOf('daynight');
 	if (latIdx === -1 || lonIdx === -1) return [];
 
 	const hotspots: FireHotspot[] = [];
@@ -35,6 +36,7 @@ function parseCsv(text: string): FireHotspot[] {
 		const date = cells[dateIdx] ?? '';
 		const time = (cells[timeIdx] ?? '').padStart(4, '0');
 		const frp = frpIdx !== -1 ? Number(cells[frpIdx]) : NaN;
+		const daynight = daynightIdx !== -1 ? cells[daynightIdx] : undefined;
 		hotspots.push({
 			id: `${latitudeDeg},${longitudeDeg},${date}${time}`,
 			latitudeDeg,
@@ -42,7 +44,8 @@ function parseCsv(text: string): FireHotspot[] {
 			brightnessK: Number.isFinite(brightnessK) ? brightnessK : 0,
 			confidence: cells[confidenceIdx] ?? 'unknown',
 			acquiredAtIso: date && time ? `${date}T${time.slice(0, 2)}:${time.slice(2)}:00Z` : date,
-			frpMw: Number.isFinite(frp) ? frp : undefined
+			frpMw: Number.isFinite(frp) ? frp : undefined,
+			isNightDetection: daynight === 'N' ? true : daynight === 'D' ? false : undefined
 		});
 	}
 	return hotspots;

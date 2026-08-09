@@ -43,6 +43,8 @@ function parseFeature(raw: unknown): Earthquake | undefined {
 	) {
 		return undefined;
 	}
+	const alert = props.alert;
+	const url = props.url;
 	return {
 		id,
 		magnitude,
@@ -50,7 +52,10 @@ function parseFeature(raw: unknown): Earthquake | undefined {
 		timeMs: time,
 		latitudeDeg,
 		longitudeDeg,
-		depthKm
+		depthKm,
+		alertLevel: typeof alert === 'string' ? alert : undefined,
+		tsunamiWarning: props.tsunami === 1,
+		detailsUrl: typeof url === 'string' ? url : undefined
 	};
 }
 

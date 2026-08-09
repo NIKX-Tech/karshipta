@@ -31,13 +31,11 @@
 	import { airportStore } from '$lib/airports/airport-store.svelte';
 	import { cityStore } from '$lib/cities/city-store.svelte';
 	import { aircraftStore } from '$lib/aircraft/aircraft-store.svelte';
-	import { isAircraftEmergency, type AircraftCategory } from '$lib/aircraft/types';
+	import { isAircraftEmergency, type Aircraft, type AircraftCategory } from '$lib/aircraft/types';
 	import {
-		AIRCRAFT_ICON_SHAPES,
-		ICON_PIXEL_RATIO,
-		buildAircraftIconImageData,
-		iconIdFor,
-		iconShapeForCategory
+		aircraftIconMarkup,
+		iconShapeForCategory,
+		type AircraftIconShape
 	} from '$lib/aircraft/icons';
 	import { earthquakeStore } from '$lib/earthquakes/earthquake-store.svelte';
 	import { wildfireStore } from '$lib/wildfires/wildfire-store.svelte';
@@ -109,6 +107,11 @@
 	// only shows a few blocks - unreadable as a city, and the point of
 	// landing on the map is immediately losing your bearings.
 	const INITIAL_ZOOM = 12;
+
+	// Closer than INITIAL_ZOOM (city-scale) on purpose - the "locate me"
+	// button's whole point is "show exactly where I am", not just which
+	// city, so it earns a tighter zoom than the initial landing view does.
+	const LOCATE_ZOOM = 14;
 
 	// Below this, don't fetch airspace data at all - airspace boundaries
 	// (FIRs, TMAs, prohibited zones) are country/region-scale shapes, not
@@ -253,9 +256,24 @@
 	// on being the operator's OWN drawn geometry, a different trust level
 	// than a third-party overlay.
 	let showGeozones = $state(false);
-	// Same off-by-default reasoning as showGeozones above.
-	let showObstacles = $state(false);
-	let showAirports = $state(false);
+	// Default on, unlike showGeozones above: real collision hazards for
+	// low-altitude flight are directly relevant to this app's own purpose
+	// (a drone/ward C2 platform), not just general reference context the
+	// way No-fly zones' regulatory boundaries are - same "no key needed to
+	// be useful, silently no-ops without one" reasoning as showAirports
+	// below. Only safe to default on now that obstacle-store.svelte.ts has
+	// zoom-based thinning (OBSTACLE_MIN_ZOOM) - unlike Airports/Aircraft,
+	// OpenAIP doesn't sparsely cap obstacles the way it does other layers,
+	// so a zoomed-out city view could otherwise return the full 200-result
+	// page with nothing thinning it.
+	let showObstacles = $state(true);
+	// Default on, same reasoning as Cities/Weather below: no key required to
+	// see something, and with an empty fleet (the common first-run state)
+	// an all-black map reads as broken rather than "nothing connected yet".
+	// If PUBLIC_OPENAIP_KEY is unset this silently shows nothing (see
+	// airportStore's own no-op-without-a-key behavior) rather than erroring,
+	// so defaulting it on costs nothing for a deployment without the key.
+	let showAirports = $state(true);
 	// Cities default on, unlike the three OpenAIP layers above: it's a
 	// bundled dataset with no key/trust/rate-limit concern (see
 	// city-store.svelte.ts's own comment), so there's no reason to make an
@@ -265,9 +283,11 @@
 	// not on like Cities: real-time third-party traffic and hazard data,
 	// same trust-level reasoning as showGeozones/showObstacles/showAirports
 	// above, not a static reference dataset.
-	let showAircraft = $state(false);
-	let showEarthquakes = $state(false);
-	let showWildfires = $state(false);
+	// Default on - no key needed (airplanes.live), and an empty fleet with
+	// every layer off used to render as a plain black map on first load.
+	let showAircraft = $state(true);
+	let showEarthquakes = $state(true);
+	let showWildfires = $state(true);
 	// Weather defaults on for the same reason as Cities above: Open-Meteo
 	// needs no key and carries no rate-limit/trust concern an operator
 	// should have to opt into.
@@ -308,6 +328,19 @@
 		ownerNameEl: HTMLElement;
 	}
 
+	// `icon` is the shape-defining <svg> - rotation/color update via plain
+	// CSS, matching the ward marker's own arrow. displayLng/displayLat/
+	// displayHeadingDeg are the currently-shown values, distinct from the
+	// store's latest fix - see animateAircraftMarker's own comment.
+	interface AircraftMarkerHandle {
+		marker: maplibregl.Marker;
+		icon: SVGSVGElement;
+		displayLng: number;
+		displayLat: number;
+		displayHeadingDeg: number;
+		animFrame: number | undefined;
+	}
+
 	const EARTH_CIRCUMFERENCE_M = 40_075_016.686;
 	/** maplibre zoom is normalized to 512px world tiles */
 	const WORLD_TILE_PX = 512;
@@ -315,6 +348,43 @@
 	let container: HTMLDivElement;
 	let map = $state<maplibregl.Map | undefined>(undefined);
 	let mapError = $state<string | undefined>(undefined);
+	// Imperative handles, not $state - only ever read from inside effects,
+	// same as markers/aircraftMarkers below.
+	let scaleControl: maplibregl.ScaleControl | undefined;
+	let scaleBarEl: HTMLElement | undefined;
+
+	// Inserts the scale control's DOM element into this node - a Svelte
+	// action rather than bind:this + appendChild, since manipulating a
+	// bind:this ref directly trips svelte/no-dom-manipulating (Svelte's own
+	// reconciliation could get confused by an untracked child). Keyed off
+	// `mapLoaded` rather than scaleControl/map themselves: those are plain
+	// variables, not $state, so an action's `update` wouldn't re-fire on
+	// their change - mapLoaded flipping true is just the reactive trigger
+	// to re-check them.
+	function scaleBarSlot(node: HTMLDivElement, loaded: boolean) {
+		function tryInsert(isLoaded: boolean) {
+			if (!isLoaded || !scaleControl || !map || scaleBarEl) return;
+			scaleBarEl = scaleControl.onAdd(map);
+			node.appendChild(scaleBarEl);
+		}
+		tryInsert(loaded);
+		return {
+			update: tryInsert,
+			destroy() {
+				scaleControl?.onRemove();
+				scaleBarEl = undefined;
+			}
+		};
+	}
+	const showWardsRow = $derived(fleet.wardIds.length > 0);
+	const showZoneRow = $derived(zoneStore.zoneIds.length > 0 && showZones);
+	const showGeozoneRow = $derived(geozoneStore.active && showGeozones);
+	const showObstacleRow = $derived(obstacleStore.active && showObstacles);
+	const showAirportRow = $derived(airportStore.active && showAirports);
+	const showCityRow = $derived(showCities);
+	const showAircraftRow = $derived(showAircraft);
+	const showEarthquakeRow = $derived(showEarthquakes);
+	const showWildfireRow = $derived(wildfireStore.active && showWildfires);
 	const ROUTE_SOURCE = 'mission-route';
 	const SATELLITE_LABELS_SOURCE = 'satellite-labels';
 	const GEOZONE_SOURCE = 'geozones';
@@ -334,40 +404,46 @@
 	const CITY_SOURCE = 'cities';
 	const CITY_LAYER = 'cities-points';
 	const CITY_COLOR = '#8b98a5';
-	const AIRCRAFT_SOURCE = 'aircraft';
-	const AIRCRAFT_LAYER = 'aircraft-points';
 	const AIRCRAFT_TRAIL_SOURCE = 'aircraft-trails';
 	const AIRCRAFT_TRAIL_LAYER = 'aircraft-trails-line';
 	const AIRCRAFT_COLOR = '#14b8a6';
 	// Reuses --color-critical's hue rather than reading the CSS custom
-	// property directly - MapLibre paint values are plain style-spec
-	// values, not CSS, same reasoning as every other *_COLOR constant here
-	// being a literal hex instead of var(...).
+	// property directly - kept as a literal hex like every other *_COLOR
+	// constant here, now genuinely a CSS color (marker `color` style) since
+	// aircraft moved to DOM markers, not a MapLibre style-spec value
+	// anymore - still not var(...) so this file doesn't need a live
+	// binding to the current theme just to pick a color.
 	const AIRCRAFT_EMERGENCY_COLOR = '#ef4444';
-	// Deliberately not reusing any existing semantic token (armed=green,
-	// critical=red, synthetic=violet, selected=blue all mean something
-	// else already) - a muted slate reads as "notable/distinct" without
-	// implying one of those other states.
-	const AIRCRAFT_MILITARY_COLOR = '#64748b';
+	// First attempt here was a muted slate (#64748b), deliberately avoiding
+	// every existing semantic token - confirmed live to be a real problem,
+	// not just a design nitpick: too low-contrast against light basemaps
+	// (Roadmap especially) to read as a distinct marker at all. This is a
+	// real khaki/olive - the actual color military materiel is drab in -
+	// which reads as "military" by association and has enough saturation
+	// to stay visible on both light and dark basemaps, without being a
+	// bold/alarming color the way red or bright orange would be.
+	const AIRCRAFT_MILITARY_COLOR = '#8a9a5b';
 	// Heavier/larger categories render bigger, same "size communicates
 	// scale" reasoning as EARTHQUAKE_LAYER's magnitude-interpolated radius
 	// below - a 747 and a Cessna reading as the same size marker would
-	// hide a real, useful distinction.
-	function aircraftIconSize(category: AircraftCategory): number {
+	// hide a real, useful distinction. Plain CSS pixels now (a DOM marker's
+	// actual rendered size), not a multiplier against a fixed base icon
+	// the way MapLibre's icon-size worked.
+	function aircraftIconSizePx(category: AircraftCategory): number {
 		switch (category) {
 			case 'heavy':
-				return 0.75;
+				return 18;
 			case 'rotorcraft':
 			case 'glider':
-				return 0.55;
+				return 16;
 			case 'light':
-				return 0.5;
+				return 14;
 			case 'uav':
-				return 0.46;
+				return 14;
 			case 'ground':
-				return 0.4;
+				return 12;
 			default:
-				return 0.45;
+				return 13;
 		}
 	}
 	const EARTHQUAKE_SOURCE = 'earthquakes';
@@ -427,6 +503,31 @@
 	function toggleMeasuring(): void {
 		measuring = !measuring;
 		if (!measuring) measurePoints = [];
+	}
+
+	// Own plain getCurrentPosition call rather than geolocation.ts's
+	// locateOrFallback - that helper is for a silent best-effort default at
+	// initial load; this is an explicit request, so failure should do
+	// nothing visible rather than jump to an unrelated fallback point.
+	const LOCATE_TIMEOUT_MS = 8000;
+	let locating = $state(false);
+	function locateMe(): void {
+		if (!map || locating) return;
+		if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+		locating = true;
+		navigator.geolocation.getCurrentPosition(
+			(position) => {
+				locating = false;
+				map?.flyTo({
+					center: [position.coords.longitude, position.coords.latitude],
+					zoom: Math.max(map?.getZoom() ?? 0, LOCATE_ZOOM)
+				});
+			},
+			() => {
+				locating = false;
+			},
+			{ timeout: LOCATE_TIMEOUT_MS }
+		);
 	}
 	function haversineMeters([lon1, lat1]: [number, number], [lon2, lat2]: [number, number]): number {
 		const toRad = (deg: number) => (deg * Math.PI) / 180;
@@ -495,18 +596,39 @@
 		if (typeof properties.countryCode === 'string') {
 			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
 		}
+		// Only rendered when true - most airports are neither, and a blank
+		// "Access: none" row for the common case would just be noise.
+		const accessNotes: string[] = [];
+		if (properties.isPrivate === true) accessNotes.push('Private');
+		if (properties.requiresPpr === true) accessNotes.push('PPR required');
+		if (accessNotes.length > 0) {
+			rows.push(popupRow('Access', escapeHtml(accessNotes.join(', '))));
+		}
 		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}</div>`;
 	}
 
 	const KNOTS_TO_MS = 0.514444;
 
+	// Raw METAR flight-category strings -> the same VFR/MVFR/IFR/LIFR
+	// terminology real aviation weather briefings use, not a paraphrase -
+	// see the FLIGHT_CATEGORY_LABELS reasoning: worth spelling out in full
+	// since the four-letter code alone means nothing to a non-pilot
+	// operator, but the underlying category itself is real, standard
+	// aviation terminology, not this app inventing a severity scale.
+	const FLIGHT_CATEGORY_LABELS: Record<string, string> = {
+		VFR: 'VFR (visual)',
+		MVFR: 'Marginal VFR',
+		IFR: 'IFR (instrument)',
+		LIFR: 'Low IFR'
+	};
+
 	// Live METAR for the airport popup - confirmed live against a real ICAO
 	// code, free, no key. Fetched on demand per popup open, not a viewport
 	// layer of its own the way Aircraft/Earthquakes/Wildfires are: METAR is
 	// inherently per-airport, and the Airport layer already has exactly one
-	// point per airport to hang it off of. wspd/wdir/temp/visib field names
-	// and units (wspd in knots, temp in Celsius) confirmed against a real
-	// Schiphol report.
+	// point per airport to hang it off of. wspd/wdir/temp/visib/altim/fltCat
+	// field names and units (wspd in knots, temp/altim in Celsius/hPa)
+	// confirmed against a real Schiphol report.
 	async function fetchMetarHtml(properties: Record<string, unknown>): Promise<string | undefined> {
 		const icaoCode = properties.icaoCode;
 		if (typeof icaoCode !== 'string') return undefined;
@@ -520,6 +642,19 @@
 			if (typeof report !== 'object' || report === null) return undefined;
 			const data = report as Record<string, unknown>;
 			const rows: string[] = [];
+			// Flight category first - the single field a pilot-facing METAR
+			// display leads with, since it's the one-glance answer to "is it
+			// safe-looking VMC or not", derived by NOAA itself from the same
+			// visibility/ceiling data reported below rather than this app
+			// guessing at a threshold.
+			if (typeof data.fltCat === 'string' && data.fltCat) {
+				rows.push(
+					popupRow(
+						'Flight category',
+						FLIGHT_CATEGORY_LABELS[data.fltCat] ?? escapeHtml(data.fltCat)
+					)
+				);
+			}
 			if (typeof data.wdir === 'number' && typeof data.wspd === 'number') {
 				rows.push(
 					popupRow(
@@ -533,6 +668,9 @@
 			}
 			if (typeof data.visib === 'string' || typeof data.visib === 'number') {
 				rows.push(popupRow('Visibility', `${escapeHtml(String(data.visib))} mi`));
+			}
+			if (typeof data.altim === 'number') {
+				rows.push(popupRow('Pressure', formatPressure(data.altim, unitsStore.current)));
 			}
 			if (rows.length === 0) return undefined;
 			return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
@@ -567,6 +705,29 @@
 		downed: 'Downed aircraft',
 		reserved: 'Reserved'
 	};
+
+	// Same field shape the old GeoJSON-feature properties used, kept as
+	// its own function now that a plane's popup content is built on
+	// demand (at hover time, from the live aircraft object) rather than
+	// baked into a GeoJSON feature ahead of time - see aircraftMarkerElement.
+	function aircraftPopupProperties(plane: Aircraft): Record<string, unknown> {
+		return {
+			callsign: plane.callsign ?? null,
+			icao24: plane.icao24,
+			registration: plane.registration ?? null,
+			typeDescription: plane.typeDescription ?? null,
+			operator: plane.operator ?? null,
+			yearBuilt: plane.yearBuilt ?? null,
+			altitudeM: plane.altitudeM ?? null,
+			velocityMS: plane.velocityMS ?? null,
+			verticalRateMS: plane.verticalRateMS ?? null,
+			headingDeg: plane.headingDeg ?? null,
+			onGround: plane.onGround,
+			isMilitary: plane.isMilitary,
+			isEmergency: isAircraftEmergency(plane),
+			emergency: plane.emergency ?? null
+		};
+	}
 
 	function buildAircraftPopupHtml(properties: Record<string, unknown>): string {
 		const name = typeof properties.callsign === 'string' ? properties.callsign : 'Aircraft';
@@ -734,6 +895,12 @@
 
 	function buildEarthquakePopupHtml(properties: Record<string, unknown>): string {
 		const place = typeof properties.place === 'string' ? properties.place : 'Earthquake';
+		const badges: string[] = [];
+		if (properties.tsunamiWarning === true) {
+			badges.push(
+				'<span class="rounded bg-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-critical">TSUNAMI</span>'
+			);
+		}
 		const rows: string[] = [];
 		if (typeof properties.magnitude === 'number') {
 			rows.push(popupRow('Magnitude', properties.magnitude.toFixed(1)));
@@ -744,7 +911,28 @@
 		if (typeof properties.timeMs === 'number') {
 			rows.push(popupRow('When', new Date(properties.timeMs).toLocaleString()));
 		}
-		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(place)}</p>${rows.join('')}</div>`;
+		// USGS's own PAGER estimated-impact color ('green'/'yellow'/'orange'/
+		// 'red') is already a valid CSS color keyword - used directly rather
+		// than mapped through this app's own semantic tokens, since it's
+		// USGS's real classification, not a severity scale this app is
+		// inventing. Most events never get one at all (PAGER only runs when
+		// real human impact is likely), so this only shows when present.
+		if (typeof properties.alertLevel === 'string' && properties.alertLevel) {
+			const level = properties.alertLevel;
+			rows.push(
+				popupRow(
+					'PAGER alert',
+					`<span style="color: ${escapeHtml(level)}">${escapeHtml(level)}</span>`
+				)
+			);
+		}
+		const badgeHtml = badges.length > 0 ? `<div class="flex gap-1">${badges.join('')}</div>` : '';
+		let detailsLink = '';
+		if (typeof properties.detailsUrl === 'string') {
+			const href = escapeHtml(properties.detailsUrl);
+			detailsLink = `<a href="${href}" target="_blank" rel="noreferrer" class="text-accent hover:underline">USGS details &#8599;</a>`;
+		}
+		return `<div class="flex flex-col gap-1 text-xs"><div class="flex items-center justify-between gap-2"><p class="font-medium text-fg">${escapeHtml(place)}</p>${badgeHtml}</div>${rows.join('')}${detailsLink}</div>`;
 	}
 
 	function buildWildfirePopupHtml(properties: Record<string, unknown>): string {
@@ -760,6 +948,12 @@
 		}
 		if (typeof properties.acquiredAtIso === 'string') {
 			rows.push(popupRow('Detected', escapeHtml(properties.acquiredAtIso)));
+		}
+		// A daytime detection carries a real caveat VIIRS itself documents
+		// (solar reflection can inflate the thermal signal vs. a nighttime
+		// read) - worth surfacing, not just trivia.
+		if (typeof properties.isNightDetection === 'boolean') {
+			rows.push(popupRow('Detected at', properties.isNightDetection ? 'Night' : 'Day'));
 		}
 		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">Fire hotspot</p>${rows.join('')}</div>`;
 	}
@@ -789,6 +983,33 @@
 		closeTimer = setTimeout(() => {
 			openPopup?.remove();
 			openPopup = undefined;
+		}, POPUP_CLOSE_GRACE_MS);
+	}
+
+	// Which aircraft (icao24) currently shows a trail - only the one being
+	// hovered, not every aircraft in view at once. Confirmed live this was
+	// a real problem, not just a style nitpick: with a dense traffic area
+	// (Dubai/UAE), a trail per aircraft on top of an already-dense cluster
+	// of markers reads as pure noise. Mirrors the ward marker's own trail
+	// effect below, which already only draws a trail for fleet.selectedWardId
+	// rather than every ward - aircraft have no "selected" state (see
+	// aircraftMarkerElement's own comment on why hover, not selection, is
+	// the right interaction model here), so hover fills that role instead.
+	// Same grace-period shape as the popup close timer, kept as its own
+	// timer rather than piggybacking on schedulePopupClose/cancelPopupClose
+	// directly - those are shared across every point layer's popup, not
+	// aircraft-specific, and entangling them would make a non-aircraft
+	// layer's popup timing accidentally depend on aircraft state.
+	let hoveredAircraftIcao24 = $state<string | undefined>(undefined);
+	let aircraftTrailClearTimer: ReturnType<typeof setTimeout> | undefined;
+	function cancelAircraftTrailClear(): void {
+		if (aircraftTrailClearTimer) clearTimeout(aircraftTrailClearTimer);
+		aircraftTrailClearTimer = undefined;
+	}
+	function scheduleAircraftTrailClear(): void {
+		cancelAircraftTrailClear();
+		aircraftTrailClearTimer = setTimeout(() => {
+			hoveredAircraftIcao24 = undefined;
 		}, POPUP_CLOSE_GRACE_MS);
 	}
 	function wirePointLayerPopup(
@@ -838,6 +1059,8 @@
 
 	// imperative per-ward marker cache, deliberately not reactive state
 	let markers: Record<string, MarkerHandle> = {};
+	// same pattern, keyed by icao24 - see the sync effect below
+	let aircraftMarkers: Record<string, AircraftMarkerHandle> = {};
 	// One bubble marker per supercluster cluster_id, only populated at zoom
 	// levels where two or more nearby wards get grouped - see the sync
 	// effect below. Wards absorbed into a cluster keep their `markers`
@@ -955,6 +1178,126 @@
 		};
 	}
 
+	// Wrapping <div> (not the <svg> itself) is the actual Marker element -
+	// mirrors markerElement()'s own root/body split, and gives
+	// mouseenter/mouseleave something to bind to that isn't fighting SVG's
+	// own event model inside a maplibregl.Marker. Popup content is looked
+	// up fresh from aircraftStore.aircraft by icao24 on every hover rather
+	// than baked in at creation time - a marker is created once and then
+	// only repositioned/recolored/resized by the sync effect below, so a
+	// closure captured at creation would go stale the moment the aircraft
+	// moves.
+	function aircraftMarkerElement(
+		targetMap: maplibregl.Map,
+		icao24: string,
+		shape: AircraftIconShape,
+		sizePx: number
+	): { element: HTMLElement; icon: SVGSVGElement } {
+		const element = document.createElement('div');
+		element.className = 'cursor-pointer';
+		element.setAttribute('aria-label', `Aircraft ${icao24}`);
+		const markup = aircraftIconMarkup(shape);
+		element.innerHTML = `<svg width="${sizePx}" height="${sizePx}" viewBox="${markup.viewBox}" fill="currentColor" stroke="#0a0e12" stroke-width="1" stroke-linejoin="round">${markup.innerHtml}</svg>`;
+		const icon = element.querySelector('svg');
+		if (!(icon instanceof SVGSVGElement)) {
+			throw new Error('fleet-map: aircraft marker template is missing its icon');
+		}
+		element.addEventListener('mouseenter', () => {
+			targetMap.getCanvas().style.cursor = 'pointer';
+			cancelPopupClose();
+			cancelAircraftTrailClear();
+			hoveredAircraftIcao24 = icao24;
+			const plane = aircraftStore.aircraft.find((candidate) => candidate.icao24 === icao24);
+			if (!plane) return;
+			const properties = aircraftPopupProperties(plane);
+			const baseHtml = buildAircraftPopupHtml(properties);
+			openPopup?.remove();
+			const popup = new maplibregl.Popup({
+				closeButton: false,
+				closeOnClick: false,
+				offset: sizePx / 2 + 6
+			})
+				.setLngLat([plane.longitudeDeg, plane.latitudeDeg])
+				.setHTML(baseHtml)
+				.addTo(targetMap);
+			openPopup = popup;
+			const popupEl = popup.getElement();
+			popupEl.addEventListener('mouseenter', () => {
+				cancelPopupClose();
+				cancelAircraftTrailClear();
+			});
+			popupEl.addEventListener('mouseleave', () => {
+				schedulePopupClose();
+				scheduleAircraftTrailClear();
+			});
+			void fetchAircraftEnrichmentHtml(properties).then((extraHtml) => {
+				if (openPopup !== popup || !extraHtml) return;
+				popup.setHTML(baseHtml + extraHtml);
+			});
+		});
+		element.addEventListener('mouseleave', () => {
+			targetMap.getCanvas().style.cursor = '';
+			schedulePopupClose();
+			scheduleAircraftTrailClear();
+		});
+		return { element, icon };
+	}
+
+	// Confirmed live that snapping straight to each new fix (a plain
+	// setLngLat per refresh) read as choppy/unprofessional - real traffic
+	// displays (FlightRadar24 and similar) glide between fixes rather than
+	// teleporting, which is what this recreates: eases displayLng/
+	// displayLat/displayHeadingDeg from wherever the marker currently is to
+	// the new fix over AIRCRAFT_ANIMATION_MS, driven by requestAnimationFrame
+	// rather than a CSS transition - MapLibre's own Marker already rewrites
+	// the DOM element's transform on every map paint (pan/zoom/rotate), so a
+	// CSS transition on that same property would fight the camera instead of
+	// the data. Duration is well under aircraft-store.svelte.ts's own
+	// REFRESH_INTERVAL_MS so an animation always finishes before the next
+	// fix arrives, rather than chaining into a permanently-lagging tween.
+	const AIRCRAFT_ANIMATION_MS = 1200;
+
+	function easeOutCubic(t: number): number {
+		return 1 - Math.pow(1 - t, 3);
+	}
+
+	// Shortest signed turn from `fromDeg` to `toDeg`, e.g. 350 -> 10 yields
+	// +20, not -340 - without this, an aircraft crossing the 0/360 wrap
+	// would visibly spin the long way around instead of turning a few
+	// degrees.
+	function shortestHeadingDeltaDeg(fromDeg: number, toDeg: number): number {
+		return ((((toDeg - fromDeg + 540) % 360) + 360) % 360) - 180;
+	}
+
+	function animateAircraftMarker(
+		handle: AircraftMarkerHandle,
+		targetLng: number,
+		targetLat: number,
+		targetHeadingDeg: number
+	): void {
+		if (handle.animFrame !== undefined) cancelAnimationFrame(handle.animFrame);
+		const startLng = handle.displayLng;
+		const startLat = handle.displayLat;
+		const startHeadingDeg = handle.displayHeadingDeg;
+		const headingDeltaDeg = shortestHeadingDeltaDeg(startHeadingDeg, targetHeadingDeg);
+		const startTimeMs = performance.now();
+		const step = (nowMs: number) => {
+			const t = Math.min(1, (nowMs - startTimeMs) / AIRCRAFT_ANIMATION_MS);
+			const eased = easeOutCubic(t);
+			handle.displayLng = startLng + (targetLng - startLng) * eased;
+			handle.displayLat = startLat + (targetLat - startLat) * eased;
+			handle.displayHeadingDeg = startHeadingDeg + headingDeltaDeg * eased;
+			handle.marker.setLngLat([handle.displayLng, handle.displayLat]);
+			handle.icon.style.rotate = `${handle.displayHeadingDeg - bearingDeg}deg`;
+			if (t < 1) {
+				handle.animFrame = requestAnimationFrame(step);
+			} else {
+				handle.animFrame = undefined;
+			}
+		};
+		handle.animFrame = requestAnimationFrame(step);
+	}
+
 	/**
 	 * A cluster bubble is deliberately much simpler than an individual ward
 	 * marker: a count, nothing else - it represents several wards at once,
@@ -1038,14 +1381,20 @@
 		// top edge), and bottom-right is where most map apps put camera
 		// controls anyway.
 		created.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
-		// Bottom-left: the only corner still empty, and where most map apps
-		// put a scale bar - distance is otherwise unjudgeable at a glance,
-		// which matters more here than on a general-purpose map (planning a
-		// goto, eyeballing how far a ward still has to fly).
-		created.addControl(
-			new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }),
-			'bottom-left'
-		);
+		// Distance is otherwise unjudgeable at a glance, which matters more
+		// here than on a general-purpose map (planning a goto, eyeballing
+		// how far a ward still has to fly) - hence a real scale bar, not
+		// just a nice-to-have. Deliberately NOT addControl()'d into
+		// MapLibre's own bottom-left corner box: this control's DOM element
+		// gets inserted directly into the legend panel instead (see the
+		// effect below, which calls onAdd itself), so it only ever exists
+		// in that one place - addControl-then-move-it-afterward left a real
+		// gap where it could still be found in MapLibre's own corner
+		// container. Initial unit doesn't matter (see the separate effect
+		// that sets the real one immediately and on every later change) -
+		// MapLibre's own ScaleControl requires one at construction
+		// regardless.
+		scaleControl = new maplibregl.ScaleControl({ maxWidth: 120, unit: unitsStore.current });
 		created.on('click', (event) => {
 			// Drawing a zone boundary takes priority over everything else -
 			// the most "modal" of the map's click-driven tools, since a
@@ -1141,25 +1490,11 @@
 			wildfireStore.requestViewport(viewport);
 			if (zoom < MIN_GEOZONE_ZOOM) return;
 			geozoneStore.requestViewport(viewport);
-			obstacleStore.requestViewport(viewport);
+			obstacleStore.requestViewport(viewport, zoom);
 			airportStore.requestViewport(viewport);
 		};
 		created.on('moveend', requestThirdPartyLayers);
 		created.on('load', () => {
-			// sdf:true registers each shape as a recolorable template - actual
-			// per-feature color (normal/military/emergency) and rotation come
-			// from the aircraft-points layer's own icon-color/icon-rotate data
-			// expressions below, not from these images themselves. Registered
-			// once here, not per-feature - see icons.ts's own comment.
-			for (const shape of AIRCRAFT_ICON_SHAPES) {
-				const imageData = buildAircraftIconImageData(shape);
-				if (imageData) {
-					created.addImage(iconIdFor(shape), imageData, {
-						sdf: true,
-						pixelRatio: ICON_PIXEL_RATIO
-					});
-				}
-			}
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
 			// never be the thing blocking a no-fly zone or a flight path.
@@ -1317,43 +1652,16 @@
 				},
 				ROUTE_SOURCE
 			);
-			created.addSource(AIRCRAFT_SOURCE, {
-				type: 'geojson',
-				data: { type: 'FeatureCollection', features: [] }
-			});
-			// Symbol layer, not circle like every other point layer here -
-			// aircraft are the one layer that needs a per-feature rotated icon
-			// (heading) and shape (category: fixed-wing/rotorcraft/glider/UAV/
-			// ground vehicle), which a circle layer can't express. Icons are
-			// registered as sdf:true templates above (see the addImage loop),
-			// recolored per-feature here via icon-color instead of needing a
-			// separate colored image per state (normal/military/emergency).
-			created.addLayer(
-				{
-					id: AIRCRAFT_LAYER,
-					type: 'symbol',
-					source: AIRCRAFT_SOURCE,
-					layout: {
-						'icon-image': ['get', 'iconId'],
-						'icon-rotate': ['coalesce', ['get', 'headingDeg'], 0],
-						'icon-rotation-alignment': 'map',
-						'icon-allow-overlap': true,
-						'icon-ignore-placement': true,
-						'icon-size': ['get', 'iconSize']
-					},
-					paint: {
-						'icon-color': [
-							'case',
-							['==', ['get', 'isEmergency'], true],
-							AIRCRAFT_EMERGENCY_COLOR,
-							['==', ['get', 'isMilitary'], true],
-							AIRCRAFT_MILITARY_COLOR,
-							AIRCRAFT_COLOR
-						]
-					}
-				},
-				ROUTE_SOURCE
-			);
+			// Aircraft points themselves are DOM maplibregl.Marker elements now
+			// (see aircraftMarkerElement and the sync effect below), not a GL
+			// layer here - the same technique ward markers already use, and for
+			// the same reason: a MapLibre symbol layer rasterizes each icon to
+			// a fixed-resolution texture and GPU-scales/rotates it, which lost
+			// fine detail (the plane shape's thin fuselage specifically,
+			// confirmed live) that a real SVG element rendered natively by the
+			// browser doesn't. Only the trail source/layer above stays as GL -
+			// a thin line has no such detail to lose, and a GeoJSON line layer
+			// is the right tool for many short paths regardless.
 			created.addSource(EARTHQUAKE_SOURCE, {
 				type: 'geojson',
 				data: { type: 'FeatureCollection', features: [] }
@@ -1397,12 +1705,6 @@
 			wirePointLayerPopup(created, OBSTACLE_LAYER, buildObstaclePopupHtml);
 			wirePointLayerPopup(created, AIRPORT_LAYER, buildAirportPopupHtml, fetchMetarHtml);
 			wirePointLayerPopup(created, CITY_LAYER, buildCityPopupHtml);
-			wirePointLayerPopup(
-				created,
-				AIRCRAFT_LAYER,
-				buildAircraftPopupHtml,
-				fetchAircraftEnrichmentHtml
-			);
 			wirePointLayerPopup(created, EARTHQUAKE_LAYER, buildEarthquakePopupHtml);
 			wirePointLayerPopup(created, WILDFIRE_LAYER, buildWildfirePopupHtml);
 			// flown-path trails: above geozones (so a zone fill doesn't visually
@@ -1536,6 +1838,15 @@
 			measurePoints = [];
 			measuring = false;
 			mapLoaded = false;
+			// Not tracked via addControl (see its own comment above), so
+			// map.remove() below won't know to clean it up on its own -
+			// remove it explicitly first, and reset scaleBarEl so a
+			// remounted instance re-inserts a fresh one rather than thinking
+			// it already has (which would otherwise reference a torn-down
+			// node forever after).
+			scaleControl?.onRemove();
+			scaleControl = undefined;
+			scaleBarEl = undefined;
 			created.remove();
 			map = undefined;
 		};
@@ -1598,6 +1909,15 @@
 			'visibility',
 			showLabels ? 'visible' : 'none'
 		);
+	});
+
+	// Keeps the scale bar's own unit in sync with the operator's
+	// metric/imperial choice - MapLibre's ScaleControl only reads its unit
+	// once at construction otherwise, so without this it would stay
+	// permanently metric regardless of the Units toggle everything else in
+	// this app already respects.
+	$effect(() => {
+		scaleControl?.setUnit(unitsStore.current);
 	});
 
 	// Tells the store itself whether fetching should be happening at all,
@@ -1691,7 +2011,10 @@
 		const activeMap = map;
 		const visible = showAircraft;
 		if (!activeMap || !mapLoaded) return;
-		activeMap.setLayoutProperty(AIRCRAFT_LAYER, 'visibility', visible ? 'visible' : 'none');
+		// Marker visibility itself (not just the trail line layer) is
+		// handled inside the marker sync effect below, which removes every
+		// marker outright when hidden - DOM markers don't have MapLibre's
+		// own layer-visibility toggle to lean on the way a GL layer did.
 		activeMap.setLayoutProperty(AIRCRAFT_TRAIL_LAYER, 'visibility', visible ? 'visible' : 'none');
 	});
 	$effect(() => {
@@ -1792,7 +2115,9 @@
 					name: airport.name,
 					icaoCode: airport.icaoCode ?? null,
 					countryCode: airport.countryCode ?? null,
-					elevationM: airport.elevationM ?? null
+					elevationM: airport.elevationM ?? null,
+					isPrivate: airport.isPrivate,
+					requiresPpr: airport.requiresPpr
 				},
 				geometry: {
 					type: 'Point',
@@ -1821,47 +2146,100 @@
 			}))
 		});
 	});
+	function removeAircraftMarker(icao24: string): void {
+		const handle = aircraftMarkers[icao24];
+		if (!handle) return;
+		if (handle.animFrame !== undefined) cancelAnimationFrame(handle.animFrame);
+		handle.marker.remove();
+		delete aircraftMarkers[icao24];
+	}
+
+	// DOM markers, not a GL source/layer - see AircraftMarkerHandle and
+	// aircraftMarkerElement above. Deliberately does NOT depend on
+	// bearingDeg - that's handled by its own effect below, so rotating the
+	// camera never restarts an in-flight position animation for data that
+	// hasn't actually changed. Colors/position/heading update via
+	// animateAircraftMarker rather than a direct setLngLat/rotate snap - see
+	// that function's own comment.
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
-		const source = activeMap.getSource<maplibregl.GeoJSONSource>(AIRCRAFT_SOURCE);
-		source?.setData({
-			type: 'FeatureCollection',
-			features: aircraftStore.aircraft.map((plane) => ({
-				type: 'Feature',
-				properties: {
-					callsign: plane.callsign ?? null,
-					icao24: plane.icao24,
-					registration: plane.registration ?? null,
-					typeDescription: plane.typeDescription ?? null,
-					operator: plane.operator ?? null,
-					yearBuilt: plane.yearBuilt ?? null,
-					altitudeM: plane.altitudeM ?? null,
-					velocityMS: plane.velocityMS ?? null,
-					verticalRateMS: plane.verticalRateMS ?? null,
-					headingDeg: plane.headingDeg ?? null,
-					onGround: plane.onGround,
-					isMilitary: plane.isMilitary,
-					isEmergency: isAircraftEmergency(plane),
-					emergency: plane.emergency ?? null,
-					iconId: iconIdFor(iconShapeForCategory(plane.category)),
-					iconSize: aircraftIconSize(plane.category)
-				},
-				geometry: {
-					type: 'Point',
-					coordinates: [plane.longitudeDeg, plane.latitudeDeg]
-				}
-			}))
-		});
+		if (!showAircraft) {
+			for (const icao24 of Object.keys(aircraftMarkers)) removeAircraftMarker(icao24);
+			return;
+		}
+		const seenIcao24s: Record<string, true> = {};
+		for (const plane of aircraftStore.aircraft) {
+			seenIcao24s[plane.icao24] = true;
+			const headingDeg = plane.headingDeg ?? 0;
+			let handle = aircraftMarkers[plane.icao24];
+			if (!handle) {
+				// A military fixed-wing aircraft gets a genuinely distinct
+				// fighter-jet silhouette, not just the civilian shape recolored -
+				// there is no data to tell a transport from a fighter apart, so
+				// one shape covers both, but it must not read as "the same
+				// traffic, different color" the way khaki-vs-teal alone did.
+				// Military rotorcraft keep the ordinary helicopter shape (see
+				// icons.ts's own comment) - already a real, non-civilian-specific
+				// silhouette.
+				const isMilitaryFixedWing =
+					plane.isMilitary && (plane.category === 'light' || plane.category === 'heavy');
+				const shape = isMilitaryFixedWing ? 'fighter' : iconShapeForCategory(plane.category);
+				const sizePx = aircraftIconSizePx(plane.category);
+				const { element, icon } = aircraftMarkerElement(activeMap, plane.icao24, shape, sizePx);
+				const marker = new maplibregl.Marker({ element })
+					.setLngLat([plane.longitudeDeg, plane.latitudeDeg])
+					.addTo(activeMap);
+				// First appearance snaps straight in, no animation - there is no
+				// "previous position" to glide from, and animating in from (0,0)
+				// would look worse, not better.
+				icon.style.rotate = `${headingDeg - bearingDeg}deg`;
+				handle = {
+					marker,
+					icon,
+					displayLng: plane.longitudeDeg,
+					displayLat: plane.latitudeDeg,
+					displayHeadingDeg: headingDeg,
+					animFrame: undefined
+				};
+				aircraftMarkers[plane.icao24] = handle;
+			} else {
+				animateAircraftMarker(handle, plane.longitudeDeg, plane.latitudeDeg, headingDeg);
+			}
+			handle.icon.style.color = isAircraftEmergency(plane)
+				? AIRCRAFT_EMERGENCY_COLOR
+				: plane.isMilitary
+					? AIRCRAFT_MILITARY_COLOR
+					: AIRCRAFT_COLOR;
+		}
+		for (const icao24 of Object.keys(aircraftMarkers)) {
+			if (!seenIcao24s[icao24]) removeAircraftMarker(icao24);
+		}
+	});
+	// Camera-bearing compensation only - see the effect above's own comment
+	// on why this is split out. Applies instantly (not animated): this
+	// should track the camera 1:1 like the ward marker's own arrow does,
+	// not lag behind a drag.
+	$effect(() => {
+		const activeBearingDeg = bearingDeg;
+		for (const handle of Object.values(aircraftMarkers)) {
+			handle.icon.style.rotate = `${handle.displayHeadingDeg - activeBearingDeg}deg`;
+		}
 	});
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
 		const source = activeMap.getSource<maplibregl.GeoJSONSource>(AIRCRAFT_TRAIL_SOURCE);
+		// Only the hovered aircraft's own trail, matching the ward trail
+		// effect further below (which only draws fleet.selectedWardId's
+		// trail, never every ward's at once) - see hoveredAircraftIcao24's
+		// own comment on why a dense traffic area made "every aircraft's
+		// trail, always" real, confirmed-live clutter.
+		const hovered = hoveredAircraftIcao24;
 		source?.setData({
 			type: 'FeatureCollection',
 			features: [...aircraftStore.trails.entries()]
-				.filter(([, points]) => points.length > 1)
+				.filter(([icao24, points]) => icao24 === hovered && points.length > 1)
 				.map(([icao24, points]) => ({
 					type: 'Feature',
 					properties: { icao24 },
@@ -1881,7 +2259,10 @@
 					place: quake.place,
 					magnitude: quake.magnitude,
 					depthKm: quake.depthKm,
-					timeMs: quake.timeMs
+					timeMs: quake.timeMs,
+					alertLevel: quake.alertLevel ?? null,
+					tsunamiWarning: quake.tsunamiWarning,
+					detailsUrl: quake.detailsUrl ?? null
 				},
 				geometry: {
 					type: 'Point',
@@ -1902,7 +2283,8 @@
 					brightnessK: hotspot.brightnessK,
 					frpMw: hotspot.frpMw ?? null,
 					confidence: hotspot.confidence,
-					acquiredAtIso: hotspot.acquiredAtIso
+					acquiredAtIso: hotspot.acquiredAtIso,
+					isNightDetection: hotspot.isNightDetection ?? null
 				},
 				geometry: {
 					type: 'Point',
@@ -2357,52 +2739,49 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
-	<!-- Both banners share this stack so a simultaneous OpenAIP + aircraft
-	     failure doesn't overlap into unreadable stacked text - genuinely
-	     independent services (different keys, different rate limits), so
-	     each gets its own line rather than being combined into one. -->
-	<div
-		class="absolute top-3 left-1/2 flex w-fit max-w-md -translate-x-1/2 flex-col items-center gap-1.5"
-	>
-		{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError)}
-			<!-- Reassuring, not alarming: this is almost always OpenAIP's own
-			     rate limit (see openaip/request-gate.ts, shared across all three
-			     layers), which clears on its own within its cooldown window - not
-			     a real, ongoing failure the operator needs to act on. One
-			     combined banner rather than up to three stacked ones, since all
-			     three layers share the same rate-limited key and so tend to fail
-			     together, not independently. Each store's own raw error still
-			     goes to console.error and sits in its own title attribute for
-			     anyone who wants it. -->
+	<!-- One banner, not one per service: confirmed live that stacking a
+	     separate "Loading airspace data" and "Loading aircraft data" box
+	     read as visual clutter even though both were true simultaneously
+	     often enough (OpenAIP and airplanes.live are genuinely independent
+	     services with their own keys/rate limits, so either can be loading
+	     or erroring without the other). The message itself says which,
+	     rather than always showing a generic "Loading map data" that would
+	     lose that distinction. -->
+	<div class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2">
+		{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
+			{@const airspaceLoading =
+				(geozoneStore.active && geozoneStore.loadError) ||
+				(obstacleStore.active && obstacleStore.loadError) ||
+				(airportStore.active && airportStore.loadError)}
+			{@const aircraftLoading = showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
+			<!-- Reassuring, not alarming: airspace errors are almost always
+			     OpenAIP's own shared rate limit (see openaip/request-gate.ts),
+			     which clears on its own - not a real, ongoing failure the
+			     operator needs to act on. aircraftStore.loading (not just its
+			     loadError) is covered too, unlike the airspace side: a wide
+			     zoomed-out view can take several genuine seconds (a multi-tile
+			     batch, ~1.2s apart per tile to respect airplanes.live's rate
+			     limit), and that wait had no visible feedback at all before
+			     loading existed. Every store's own raw error still goes to
+			     console.error and sits in the title attribute for anyone who
+			     wants it. -->
 			<p
 				role="status"
-				title={geozoneStore.loadError ?? obstacleStore.loadError ?? airportStore.loadError}
-				class="rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
+				title={[
+					geozoneStore.loadError,
+					obstacleStore.loadError,
+					airportStore.loadError,
+					aircraftStore.loadError
+				]
+					.filter(Boolean)
+					.join(' / ') || undefined}
+				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-accent"
 			>
-				Loading airspace data - this can take a few seconds.
-			</p>
-		{/if}
-		{#if showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
-			<!-- Same reassuring-banner treatment as the OpenAIP one above, not
-			     a separate design - it just wasn't wired up when the aircraft
-			     layer first shipped, which read as this layer failing silently
-			     with no feedback while OpenAIP's own failures were visible.
-			     Unlike the OpenAIP banner (error-only: geozone/obstacle/airport
-			     loadError never represents a real in-progress wait, since those
-			     are quick single requests), this one also covers
-			     aircraftStore.loading - a wide zoomed-out view can now take
-			     several genuine seconds (a multi-tile batch, ~1.2s apart per
-			     tile to respect airplanes.live's rate limit - see
-			     aircraft-store.svelte.ts), and that wait had no visible
-			     feedback at all before loading existed: loadError alone never
-			     fires on a normal successful fetch, so "still working" and
-			     "nothing's happening" looked identical. -->
-			<p
-				role="status"
-				title={aircraftStore.loadError}
-				class="rounded border border-accent bg-panel px-3 py-1.5 text-xs text-accent"
-			>
-				Loading aircraft data - this can take a few seconds.
+				Loading {airspaceLoading && aircraftLoading
+					? 'airspace and aircraft data'
+					: airspaceLoading
+						? 'airspace data'
+						: 'aircraft data'} - this can take a few seconds.
 			</p>
 		{/if}
 	</div>
@@ -2414,9 +2793,12 @@
 		     Not a point/popup layer like Aircraft/Earthquakes/etc.: weather is
 		     a continuous field, not discrete features, so it's a small
 		     always-visible readout for the current map center rather than
-		     something you hover a marker for. -->
+		     something you hover a marker for. Same dimmed-until-hovered
+		     treatment as the legend panel - a passive readout, not something
+		     that needs to compete with the map at full strength until the
+		     operator actually looks at it. -->
 		<div
-			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted"
+			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
 			aria-label="Current weather at map center"
 		>
 			{#if weatherLocationLabel}
@@ -2484,10 +2866,31 @@
 		(zoom/compass, also bottom-right) - one control cluster instead of two
 		spatially separate ones, since these are all "controls that change how
 		you look at the map" and grouping them reads as more organized than
-		scattering them across corners. Measure stacks above map style, in the
-		same column, for the same reason.
+		scattering them across corners. Locate me and Measure stack above map
+		style, in the same column, for the same reason.
 	-->
 	<div class="absolute right-[10px] bottom-[155px] flex flex-col items-end gap-2.5">
+		<button
+			type="button"
+			onclick={locateMe}
+			disabled={locating}
+			aria-label="Center on my location"
+			class="flex h-8 w-8 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg disabled:opacity-50"
+		>
+			<svg
+				width="15"
+				height="15"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linecap="round"
+				class={locating ? 'animate-spin' : ''}
+			>
+				<circle cx="12" cy="12" r="7" />
+				<path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+			</svg>
+		</button>
 		<button
 			type="button"
 			onclick={toggleMeasuring}
@@ -2612,35 +3015,48 @@
 					     organized rather than a wall of checkboxes, and the
 					     2-column grid halves the vertical space either group
 					     needs. -->
-						{#if geozoneStore.active || obstacleStore.active || airportStore.active}
-							<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
-							<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
-								{#if geozoneStore.active}
-									<label
-										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-									>
-										<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
-										No-fly zones
-									</label>
-								{/if}
-								{#if obstacleStore.active}
-									<label
-										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-									>
-										<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
-										Obstacles
-									</label>
-								{/if}
-								{#if airportStore.active}
-									<label
-										class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-									>
-										<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
-										Airports
-									</label>
-								{/if}
-							</div>
-						{/if}
+						<!-- Always rendered, unlike the individual rows inside it: Aircraft
+						     needs no OpenAIP key (unlike No-fly zones/Obstacles/Airports),
+						     so this section always has at least one row even with no key
+						     configured. Aircraft lives here, not in Data layers below - it
+						     is live traffic occupying the airspace those other three
+						     describe the structure of, not generic geographic reference
+						     data the way Cities/Weather/Earthquakes/Wildfires are. -->
+						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
+						<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
+							{#if airportStore.active}
+								<label
+									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+								>
+									<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
+									Airports
+								</label>
+							{/if}
+							<!-- No .active gate: airplanes.live needs no key (see
+							     aircraft-store.svelte.ts's own comment). -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
+								Aircraft
+							</label>
+							{#if obstacleStore.active}
+								<label
+									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+								>
+									<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
+									Obstacles
+								</label>
+							{/if}
+							{#if geozoneStore.active}
+								<label
+									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+								>
+									<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
+									No-fly zones
+								</label>
+							{/if}
+						</div>
 						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">DATA LAYERS</p>
 						<div class="grid grid-cols-2 gap-x-1 gap-y-0.5">
 							<!-- No .active gate: cities are a bundled dataset, not an
@@ -2654,23 +3070,12 @@
 							</label>
 							<!-- No .active gate: Open-Meteo needs no key. Not a point
 							     layer like everything else here - see the weather
-							     widget itself, rendered separately below. Kept right
-							     after Cities (both no-gate, always-available layers)
-							     rather than grouped with the network/hazard feeds
-							     below it. -->
+							     widget itself, rendered separately below. -->
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
 							>
 								<input type="checkbox" bind:checked={showWeather} class="accent-accent" />
 								Weather
-							</label>
-							<!-- No .active gate either: OpenSky's anonymous tier needs no
-							     signup (see aircraft-store.svelte.ts's own comment). -->
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
-								Aircraft
 							</label>
 							<!-- Same again: USGS's feed is fully open. -->
 							<label
@@ -2702,102 +3107,131 @@
 		</div>
 	</div>
 
-	{#if (zoneStore.zoneIds.length > 0 && showZones) || (geozoneStore.active && showGeozones) || (obstacleStore.active && showObstacles) || (airportStore.active && showAirports) || showCities || showAircraft || showEarthquakes || (wildfireStore.active && showWildfires)}
-		{@const showZoneRow = zoneStore.zoneIds.length > 0 && showZones}
-		{@const showGeozoneRow = geozoneStore.active && showGeozones}
-		{@const showObstacleRow = obstacleStore.active && showObstacles}
-		{@const showAirportRow = airportStore.active && showAirports}
-		{@const showCityRow = showCities}
-		{@const showAircraftRow = showAircraft}
-		{@const showEarthquakeRow = showEarthquakes}
-		{@const showWildfireRow = wildfireStore.active && showWildfires}
-		<!-- One panel, not two separately-floating boxes: they used to sit at
-		     different bottom offsets that had to be kept in sync by hand, and
-		     read as visually disconnected even when both were showing. -->
-		<div
-			class="absolute bottom-8 left-[10px] flex flex-col gap-1.5 border border-edge bg-panel/90 px-2 py-1.5"
-		>
-			{#if showZoneRow}
-				<ul class="flex gap-3" aria-label="Zone legend">
+	<!-- One panel, always rendered (the scale bar - its last child, see
+	     scaleBarSlot - is meaningful on its own even with no layer rows).
+	     Dimmed until hovered as one unit: a static reference key doesn't
+	     need to compete with the map until the operator actually looks. -->
+	<div
+		class="absolute bottom-[10px] left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5 opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
+	>
+		{#if showZoneRow}
+			<ul class="flex gap-3" aria-label="Zone legend">
+				<li class="flex items-center gap-1 text-[10px]">
+					<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_IN_COLOR}"></span>
+					Keep in
+				</li>
+				<li class="flex items-center gap-1 text-[10px]">
+					<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_OUT_COLOR}"></span>
+					Keep out
+				</li>
+			</ul>
+		{/if}
+		{#if showGeozoneRow}
+			<ul
+				class="flex gap-3 {showZoneRow ? 'border-t border-edge pt-1.5' : ''}"
+				aria-label="Airspace zone legend"
+			>
+				<li class="flex items-center gap-1 text-[10px]">
+					<span class="h-2 w-2 rounded-full" style="background-color: #e74c3c"></span>
+					Prohibited
+				</li>
+				<li class="flex items-center gap-1 text-[10px]">
+					<span class="h-2 w-2 rounded-full" style="background-color: #f5a623"></span>
+					Restricted
+				</li>
+				<li class="flex items-center gap-1 text-[10px]">
+					<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
+					Other airspace
+				</li>
+			</ul>
+		{/if}
+		{#if showCityRow || showAirportRow || showObstacleRow || showWildfireRow || showEarthquakeRow}
+			<ul
+				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
+					? 'border-t border-edge pt-1.5'
+					: ''}"
+				aria-label="Point layer legend"
+			>
+				{#if showCityRow}
 					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_IN_COLOR}"
-						></span>
-						Keep in
+						<span class="h-2 w-2 rounded-full" style="background-color: {CITY_COLOR}"></span>
+						Cities
 					</li>
+				{/if}
+				{#if showAirportRow}
 					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {ZONE_KEEP_OUT_COLOR}"
-						></span>
-						Keep out
+						<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
+						Airports
 					</li>
-				</ul>
-			{/if}
-			{#if showGeozoneRow}
-				<ul
-					class="flex gap-3 {showZoneRow ? 'border-t border-edge pt-1.5' : ''}"
-					aria-label="Airspace zone legend"
-				>
+				{/if}
+				{#if showObstacleRow}
 					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: #e74c3c"></span>
-						Prohibited
+						<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
+						Obstacles
 					</li>
+				{/if}
+				{#if showWildfireRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {WILDFIRE_COLOR}"></span>
+						Wildfires
+					</li>
+				{/if}
+				{#if showEarthquakeRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {EARTHQUAKE_COLOR}"></span>
+						Earthquakes
+					</li>
+				{/if}
+			</ul>
+		{/if}
+		{#if showWardsRow || showAircraftRow}
+			<!-- Wards and Aircraft share a row, last: both are moving,
+			     trackable entities on the map (hover/select for details),
+			     unlike every static reference/hazard layer above. Confirmed
+			     live a demo (synthetic) ward and a real gateway-connected one
+			     needed calling out explicitly - they only ever differed by
+			     marker fill color (see the ward marker sync effect below),
+			     with nothing else on screen explaining what that color meant. -->
+			<ul
+				class="flex flex-wrap gap-3 {showZoneRow ||
+				showGeozoneRow ||
+				showCityRow ||
+				showAirportRow ||
+				showObstacleRow ||
+				showWildfireRow ||
+				showEarthquakeRow
+					? 'border-t border-edge pt-1.5'
+					: ''}"
+				aria-label="Ward and aircraft legend"
+			>
+				{#if showWardsRow}
 					<li class="flex items-center gap-1 text-[10px]">
 						<span class="h-2 w-2 rounded-full" style="background-color: #f5a623"></span>
-						Restricted
+						Live ward
 					</li>
 					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
-						Other airspace
+						<span class="h-2 w-2 rounded-full" style="background-color: #a78bfa"></span>
+						Demo ward
 					</li>
-				</ul>
-			{/if}
-			{#if showObstacleRow || showAirportRow || showCityRow || showAircraftRow || showEarthquakeRow || showWildfireRow}
-				<ul
-					class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
-						? 'border-t border-edge pt-1.5'
-						: ''}"
-					aria-label="Point layer legend"
-				>
-					{#if showObstacleRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
-							Obstacles
-						</li>
-					{/if}
-					{#if showAirportRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
-							Airports
-						</li>
-					{/if}
-					{#if showCityRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {CITY_COLOR}"></span>
-							Cities
-						</li>
-					{/if}
-					{#if showAircraftRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {AIRCRAFT_COLOR}"></span>
-							Aircraft
-						</li>
-					{/if}
-					{#if showEarthquakeRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {EARTHQUAKE_COLOR}"
-							></span>
-							Earthquakes
-						</li>
-					{/if}
-					{#if showWildfireRow}
-						<li class="flex items-center gap-1 text-[10px]">
-							<span class="h-2 w-2 rounded-full" style="background-color: {WILDFIRE_COLOR}"></span>
-							Wildfires
-						</li>
-					{/if}
-				</ul>
-			{/if}
-		</div>
-	{/if}
+				{/if}
+				{#if showAircraftRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {AIRCRAFT_COLOR}"></span>
+						Aircraft
+					</li>
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {AIRCRAFT_MILITARY_COLOR}"
+						></span>
+						Military
+					</li>
+				{/if}
+			</ul>
+		{/if}
+		<!-- Leaf slot for the scale control's DOM node - see
+		     scaleBarSlot's own comment on why this can't just be the panel
+		     div above it. -->
+		<div use:scaleBarSlot={mapLoaded}></div>
+	</div>
 </div>
 
 <style>
@@ -2984,10 +3418,19 @@
 		background-position: center !important;
 		background-repeat: no-repeat !important;
 	}
+	/* Lives inside the legend panel now (see scaleBarSlot), as a plain row
+	   matching the others there - not MapLibre's own default floating box
+	   (2px #333 border, white 75%-opacity fill). Top border is the same
+	   row divider every row above it gets, just unconditional since this
+	   one's always last. */
 	:global(.maplibregl-ctrl-scale) {
-		background: var(--color-panel) !important;
-		border-color: var(--color-edge) !important;
-		border-top-color: var(--color-edge) !important;
+		background: transparent !important;
+		border: none !important;
+		border-top: 1px solid var(--color-edge) !important;
+		padding: 6px 0 0 !important;
+		margin: 0 !important;
+		font-size: 10px !important;
+		line-height: 1 !important;
 		color: var(--color-fg-muted) !important;
 	}
 

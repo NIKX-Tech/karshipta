@@ -7,9 +7,11 @@ for aren't drone-only - flight, ground, marine, and anything else a
 gateway or Herald device reports - so "useful for X" below calls out which
 ward types actually benefit from a given layer.
 
-All optional layers default off except Cities (see each entry). An
-operator opts in per layer from the map's layers menu (the icon next to
-the zoom controls).
+Most optional layers default off; Cities, Weather, Aircraft, Airports, and
+Obstacles default on (see each entry) since none need a key to show
+something useful, and an empty fleet with every layer off used to render
+as a plain black map on first load. An operator opts out per layer from
+the map's layers menu (the icon next to the zoom controls).
 
 ## Implemented
 
@@ -24,17 +26,32 @@ the zoom controls).
 
 ### Obstacles
 
-- **Status:** Live.
+- **Status:** Live. **Default on** - real collision hazards for
+  low-altitude flight are directly relevant to this app's own purpose
+  (a drone/ward C2 platform), unlike No-fly zones' regulatory boundaries,
+  which stay off by default. Silently shows nothing without
+  `PUBLIC_OPENAIP_KEY`, same as Airports.
 - **Source:** OpenAIP `/api/obstacles`, same key as No-fly zones.
 - **Purpose:** Towers, masts, wind turbines - real collision hazards for
   low-altitude flight. Popup shows height, elevation, country, and a
   Wikipedia link when OpenAIP's own OSM import carries one.
+- **Viewport handling:** Unlike Airports (sparse) or Aircraft (already
+  zoom-thinned), OpenAIP doesn't cap obstacles per area the way it's
+  naturally sparse for other layers - a zoomed-out city view could return
+  the full 200-result page per tile. Thinned by zoom, same pattern as
+  Cities' population thinning and Aircraft's category thinning: only
+  towers and wind turbines show below zoom 6, the uncategorized 'other'
+  bucket (likely the most numerous) only above it.
 - **Useful for:** Flight wards, low-altitude ground ops near structures.
 - **Files:** `src/lib/obstacles/`
 
 ### Airports
 
-- **Status:** Live.
+- **Status:** Live. **Default on** (same reasoning as Aircraft above -
+  silently shows nothing without `PUBLIC_OPENAIP_KEY` rather than
+  erroring, so defaulting it on costs nothing for a deployment without
+  the key, and shows real airspace reference data immediately for one
+  that has it).
 - **Source:** OpenAIP `/api/airports`, same key as No-fly zones.
 - **Purpose:** Airfields and heliports. Popup shows ICAO code, elevation,
   country.
@@ -58,7 +75,9 @@ the zoom controls).
 
 ### Aircraft
 
-- **Status:** Live.
+- **Status:** Live. **Default on** (no key needed, same reasoning as
+  Cities/Weather - an empty fleet with every layer off used to render as
+  a plain black map on first load).
 - **Source:** airplanes.live `/v2/point/[lat]/[lon]/[radius]` - no key, no
   signup, documented limit 1 request/second. Originally built against
   OpenSky Network's anonymous REST API, but that sends a fixed
@@ -68,19 +87,33 @@ the zoom controls).
   sends a wildcard CORS header and actually works client-side.
 - **Purpose:** Real crewed-aircraft ADS-B positions - actual traffic
   sharing the airspace, not just its boundaries (complements No-fly
-  zones). Category-shaped, heading-rotated icons (plane/rotorcraft/
-  glider/UAV/ground vehicle) and short movement trails.
-- **Military:** A distinct marker color (not a separate icon shape - the
-  feed's `category` and military status are independent, so a military
-  transport is still shaped like any other `heavy` aircraft, a military
-  helicopter like any other `rotorcraft`) driven by the real `dbFlags`
-  bitmask airplanes.live itself returns, confirmed live against a Royal
-  Netherlands Air Force Apache. `ownOp` often already names the
-  operating branch directly for military aircraft (it did for that
-  Apache: "Royal Netherlands Air Force"). The adsbdb enrichment below is
-  civil-registry-only, confirmed live to return "unknown aircraft" /
-  "unknown callsign" for the same Apache - it contributes nothing extra
-  for military traffic, which is expected, not a bug.
+  zones). Rendered as DOM `maplibregl.Marker` elements with real inline
+  SVG (matching the ward marker's own approach), not a MapLibre symbol
+  layer - a canvas-rasterized, GPU-rotated icon was confirmed live to
+  lose fine detail (a thin fuselage vanishing at typical marker size)
+  that a native SVG element doesn't. Real top-down aircraft silhouettes
+  per category (a wide-body for `heavy`, a smaller twin-engine jet for
+  `light`, the existing helicopter silhouette for `rotorcraft`, simple
+  shapes for `glider`/`uav`/`ground`) - deliberately not the ward
+  marker's own dart/kite shape, confirmed live that reusing it read as
+  "this is a ward" on a map that also has real wards on it.
+- **Military:** A genuinely distinct fighter-jet silhouette for military
+  `light`/`heavy` (fixed-wing) aircraft, not just a recolored civilian
+  shape - there is no data to tell a transport from a fighter apart, so
+  one shape covers both, driven by the real `dbFlags` bitmask
+  airplanes.live itself returns (confirmed live against a Royal
+  Netherlands Air Force Apache and a US Air Force HC-130J). Military
+  rotorcraft keep the ordinary helicopter silhouette (already
+  non-civilian-specific), just recolored. Plus a distinct marker color
+  (khaki/olive, not the low-contrast slate gray an earlier version used -
+  confirmed live that read as invisible against light basemaps) for
+  every military aircraft regardless of shape. `ownOp` often already
+  names the operating branch directly for military aircraft (it did for
+  that Apache: "Royal Netherlands Air Force"). The adsbdb enrichment
+  below is civil-registry-only, confirmed live to return "unknown
+  aircraft" / "unknown callsign" for military registrations - it
+  contributes nothing extra for military traffic, which is expected, not
+  a bug.
 - **Emergency:** Same real-field treatment - a distinct marker color plus
   a decoded label (general/medical/minimum fuel/radio failure/unlawful
   interference/downed) from the feed's own `emergency` status, not a
@@ -88,13 +121,18 @@ the zoom controls).
 - **Popup enrichment:** Operator, route, registered country, and
   manufacturer via adsbdb.com (free, no key) when airplanes.live's own
   fields are missing - civil aircraft only, per the Military note above.
+- **Trails:** Only the currently-hovered aircraft draws its short
+  movement trail, matching the ward trail's own selected-only behavior -
+  confirmed live that a trail per aircraft on top of an already-dense
+  traffic area (Dubai/UAE) read as pure noise.
 - **Viewport handling:** The `/point` endpoint's radius is capped at
   250nm regardless of zoom, so a single query over a wide (zoomed-out)
   viewport only ever covered a small, misleadingly dense fraction of it.
-  Fixed two ways: the viewport splits into up to 4 tiled point queries
-  when it's wider than one tile's coverage, and categories are thinned by
-  zoom (only `heavy` aircraft show below zoom 6, matching the same
-  tiered-by-zoom pattern Cities uses for population).
+  Fixed two ways: the viewport splits into a size-proportional grid of
+  tiled point queries (up to 3x3) when it's wider than one tile's
+  coverage, and categories are thinned by zoom (only `heavy` aircraft
+  show below zoom 6, matching the same tiered-by-zoom pattern Cities
+  uses for population).
 - **Useful for:** Flight wards.
 - **Files:** `src/lib/aircraft/`
 

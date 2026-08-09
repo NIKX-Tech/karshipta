@@ -66,6 +66,8 @@ function parseAirport(raw: unknown): Airport | undefined {
 		icaoCode: typeof icaoCode === 'string' && icaoCode ? icaoCode : undefined,
 		countryCode: typeof item.country === 'string' ? item.country : undefined,
 		elevationM: numericValueOf(item.elevation),
+		isPrivate: item.private === true,
+		requiresPpr: item.ppr === true,
 		latitudeDeg,
 		longitudeDeg
 	};

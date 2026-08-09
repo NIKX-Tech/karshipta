@@ -1,4 +1,4 @@
-import type { Obstacle, ObstacleSource, ViewportBounds } from './types';
+import type { Obstacle, ObstacleCategory, ObstacleSource, ViewportBounds } from './types';
 import { OpenAipObstacleSource } from './openaip';
 import { openAipRequestGate } from '../openaip/request-gate';
 import { tileOpenAipBounds } from '../openaip/tile-bounds';
@@ -10,6 +10,25 @@ const FETCH_DEBOUNCE_MS = 1500;
 const FAILURE_COOLDOWN_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60_000;
 const CACHE_GRID_DEG = 1;
+
+// This layer defaults on (see fleet-map.svelte), so unlike the OpenAIP
+// layers that stay opt-in, it needs its own zoom thinning - a zoomed-out
+// city view could otherwise return the full RESULT_LIMIT (200, see
+// openaip.ts) with nothing filtering it. Same pattern as city-store.svelte.ts's
+// population thinning: taller, more-hazardous types (towers, wind turbines)
+// show first, the catch-all 'other' bucket only once zoomed in. 'mast'
+// isn't currently produced by openaip.ts's own categoryFor, included here
+// for type completeness only.
+const OBSTACLE_MIN_ZOOM: Record<ObstacleCategory, number> = {
+	'wind-turbine': 0,
+	tower: 0,
+	mast: 0,
+	other: 6
+};
+
+function filterByZoom(obstacles: Obstacle[], zoom: number): Obstacle[] {
+	return obstacles.filter((obstacle) => zoom >= OBSTACLE_MIN_ZOOM[obstacle.category]);
+}
 
 interface CacheEntry {
 	obstacles: Obstacle[];
@@ -39,6 +58,7 @@ class ObstacleStore {
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastRequestId = 0;
 	private lastBounds: ViewportBounds | undefined;
+	private lastZoom = 0;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
 	private cache = new Map<string, CacheEntry>();
 
@@ -64,16 +84,17 @@ class ObstacleStore {
 			return;
 		}
 		if (this.source && this.lastBounds) {
-			void this.fetchViewport(this.lastBounds);
+			void this.fetchViewport(this.lastBounds, this.lastZoom);
 		}
 	}
 
-	requestViewport(bounds: ViewportBounds): void {
+	requestViewport(bounds: ViewportBounds, zoom: number): void {
 		if (!this.source) return;
 		this.lastBounds = bounds;
+		this.lastZoom = zoom;
 		if (!this.visible) return;
 		if (this.debounceTimer) clearTimeout(this.debounceTimer);
-		this.debounceTimer = setTimeout(() => void this.fetchViewport(bounds), FETCH_DEBOUNCE_MS);
+		this.debounceTimer = setTimeout(() => void this.fetchViewport(bounds, zoom), FETCH_DEBOUNCE_MS);
 	}
 
 	private stopTimers(): void {
@@ -83,14 +104,14 @@ class ObstacleStore {
 		this.retryTimer = undefined;
 	}
 
-	private async fetchViewport(bounds: ViewportBounds): Promise<void> {
+	private async fetchViewport(bounds: ViewportBounds, zoom: number): Promise<void> {
 		const source = this.source;
 		if (!source || !this.visible) return;
 
 		const cacheKey = cacheKeyFor(bounds);
 		const cached = this.cache.get(cacheKey);
 		if (cached && Date.now() - cached.fetchedAtMs < CACHE_TTL_MS) {
-			this.obstacles = cached.obstacles;
+			this.obstacles = filterByZoom(cached.obstacles, zoom);
 			this.loadError = undefined;
 			return;
 		}
@@ -122,14 +143,18 @@ class ObstacleStore {
 			console.error('obstacles: failed to load viewport', tileError);
 			if (this.retryTimer) clearTimeout(this.retryTimer);
 			this.retryTimer = setTimeout(() => {
-				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
+				if (this.lastBounds) void this.fetchViewport(this.lastBounds, this.lastZoom);
 			}, FAILURE_COOLDOWN_MS);
 			return;
 		}
 		// Deduped by id: adjacent tiles can both legitimately return an
-		// obstacle that straddles the split line.
+		// obstacle that straddles the split line. Cached unfiltered (the full
+		// fetched set) so re-zooming the same area doesn't need a fresh
+		// request just to reveal more of what's already been fetched - only
+		// which of it gets displayed depends on zoom, same as
+		// aircraft-store.svelte.ts's identical cache/filter split.
 		const obstacles = [...new Map(tileResults.flat().map((o) => [o.id, o])).values()];
-		this.obstacles = obstacles;
+		this.obstacles = filterByZoom(obstacles, zoom);
 		this.loadError = undefined;
 		this.cache.set(cacheKey, { obstacles, fetchedAtMs: Date.now() });
 	}
