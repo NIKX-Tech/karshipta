@@ -5,6 +5,44 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.1.2]
+
+### Added
+
+- console-core: aircraft markers rebuilt as DOM `maplibregl.Marker`
+  elements with real inline SVG instead of a canvas-rasterized MapLibre
+  symbol layer - the rasterized icons lost fine detail (a thin fuselage
+  vanishing at typical marker size) that native SVG doesn't. Real
+  top-down airliner silhouettes per category replace the old hand-drawn
+  shape; military fixed-wing aircraft get a genuinely distinct fighter
+  silhouette instead of a recolored civilian one, military rotorcraft
+  keep the existing helicopter shape. Marker position and heading now
+  animate between fixes instead of snapping, and the refresh interval
+  drops from 16s to 7s.
+- console-core: Obstacles, Airports, and Aircraft map layers default on;
+  Obstacles gained zoom-based thinning to support that. Richer popup
+  data: airport private/PPR access flags and METAR flight category,
+  earthquake USGS PAGER alert level and tsunami warnings with a link to
+  the event page, wildfire day/night detection.
+- console-core: new "center on my location" map control, using the
+  browser's geolocation.
+- console-core: export the Fleet/Zone/FleetMission message codecs from
+  the `/wire` subpath, not just the package root - the server-side-safe
+  entrypoint a consuming backend actually needs to encode/decode those
+  envelopes without pulling in browser-only Svelte component CSS.
+
+### Fixed
+
+- console-core: `WardMissionStatus` (the enum `WardMissionState` and
+  `WardMissionPlan` reference) was missing from both the package root
+  and `/wire` exports, leaving no way to reference ACTIVE/STOPPED/
+  REJECTED by name.
+- console-core: aircraft viewport tiling collapsed into small dense
+  clusters instead of spreading real coverage across a wide zoomed-out
+  view; fixed to a grid sized proportionally to how much bigger the
+  viewport is than one tile's coverage. Also fixed the loading banner
+  blinking on ordinary background refreshes.
+
 ## [0.1.1]
 
 ### Added
