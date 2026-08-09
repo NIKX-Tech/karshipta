@@ -2686,6 +2686,10 @@
 				handle.ownerRow.classList.toggle('flex', !!owner);
 				if (owner) {
 					handle.ownerNameEl.textContent = `@${owner.username}`;
+					// No placeholder circle when there's no photo - an empty
+					// bordered dot next to the name reads as a broken image,
+					// not "no avatar set".
+					handle.ownerAvatar.classList.toggle('hidden', !owner.photoUrl);
 					handle.ownerAvatar.style.backgroundImage = owner.photoUrl
 						? `url(${JSON.stringify(owner.photoUrl)})`
 						: '';
@@ -3264,10 +3268,17 @@
 	 * them. filter:invert flips the dark icon light without touching the
 	 * vendor's asset; simplest fix that doesn't fork the library's SVGs.
 	 */
+	/* !important: MapLibre's own stylesheet sets background/border/box-shadow
+	 * on this exact same single-class selector, so without it, load order
+	 * (not specificity - both rules are equally specific) decides the
+	 * winner, and the vendor's white background + drop-shadow can leak
+	 * through - the zoom/compass group then visibly doesn't match the
+	 * locate/measure/layers buttons right above it, which use this file's
+	 * own plain border-edge/bg-panel styling with no shadow at all. */
 	:global(.maplibregl-ctrl-group) {
-		background: var(--color-panel);
-		border: 1px solid var(--color-edge);
-		box-shadow: none;
+		background: var(--color-panel) !important;
+		border: 1px solid var(--color-edge) !important;
+		box-shadow: none !important;
 	}
 	:global(.maplibregl-ctrl-group button + button) {
 		border-top: 1px solid var(--color-edge);

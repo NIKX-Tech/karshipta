@@ -69,7 +69,6 @@
 	const unassignedWardIds = $derived(fleetGroups.unassignedWardIds(fleet.wardIds));
 
 	let createFleetOpen = $state(false);
-	let createFleetEl: HTMLDivElement | undefined = $state();
 	let newFleetName = $state('');
 	let newFleetDescription = $state('');
 
@@ -82,24 +81,6 @@
 		newFleetDescription = '';
 		createFleetOpen = false;
 	}
-
-	// close the create-fleet form on an outside click or Escape, same
-	// convention as fleet-map.svelte's layers menu
-	$effect(() => {
-		if (!createFleetOpen) return;
-		const handlePointerDown = (event: PointerEvent) => {
-			if (createFleetEl && !createFleetEl.contains(event.target as Node)) createFleetOpen = false;
-		};
-		const handleKeydown = (event: KeyboardEvent) => {
-			if (event.key === 'Escape') createFleetOpen = false;
-		};
-		window.addEventListener('pointerdown', handlePointerDown);
-		window.addEventListener('keydown', handleKeydown);
-		return () => {
-			window.removeEventListener('pointerdown', handlePointerDown);
-			window.removeEventListener('keydown', handleKeydown);
-		};
-	});
 </script>
 
 <div class="flex h-full border-r border-edge bg-panel">
@@ -254,14 +235,14 @@
 				hidden={leftRailUi.activeTab !== 'fleets'}
 				class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3"
 			>
-				<div class="flex gap-1.5">
-					<AddWardMenu
-						variant="compact"
-						onopenconnection={() => leftRailUi.openGatewayTab()}
-						{onstartdemoplacement}
-					/>
+				<div class="flex flex-col gap-1.5">
+					<div class="flex gap-1.5">
+						<AddWardMenu
+							variant="compact"
+							onopenconnection={() => leftRailUi.openGatewayTab()}
+							{onstartdemoplacement}
+						/>
 
-					<div class="relative" bind:this={createFleetEl}>
 						<button
 							type="button"
 							class="rounded border border-edge px-2 py-1 font-mono text-xs text-fg-muted hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-edge disabled:hover:text-fg-muted"
@@ -273,43 +254,57 @@
 						>
 							+ New {fleetLabel}
 						</button>
-						{#if createFleetOpen}
-							<form
-								class="absolute top-full left-0 z-30 mt-1 flex w-56 flex-col gap-1.5 rounded border border-edge bg-panel p-2"
-								aria-label="New {fleetLabel}"
-								onsubmit={submitCreateFleet}
-							>
-								<input
-									type="text"
-									bind:value={newFleetName}
-									required
-									placeholder="{fleetLabel} name"
-									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-								/>
-								<input
-									type="text"
-									bind:value={newFleetDescription}
-									placeholder="Description (optional)"
-									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-								/>
-								<div class="flex gap-1.5">
-									<button
-										type="submit"
-										class="rounded border border-accent/60 bg-accent/15 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/25"
-									>
-										Create
-									</button>
-									<button
-										type="button"
-										onclick={() => (createFleetOpen = false)}
-										class="rounded border border-edge px-2 py-1 text-xs text-fg-muted hover:text-fg"
-									>
-										Cancel
-									</button>
-								</div>
-							</form>
-						{/if}
 					</div>
+					<!-- Inline, not an absolute-positioned popover: this panel
+					     scrolls (overflow-y-auto above), and an absolutely
+					     positioned child gets clipped by that ancestor the moment
+					     the list is long enough to actually scroll. Same
+					     in-flow expand FleetRow's own "Edit name" form already
+					     uses just below. -->
+					{#if createFleetOpen}
+						<form
+							class="flex flex-col gap-1.5 rounded border border-edge bg-panel p-2"
+							aria-label="New {fleetLabel}"
+							onsubmit={submitCreateFleet}
+						>
+							<!-- svelte-ignore a11y_autofocus -->
+							<input
+								type="text"
+								bind:value={newFleetName}
+								required
+								autofocus
+								placeholder="{fleetLabel} name"
+								onkeydown={(event) => {
+									if (event.key === 'Escape') createFleetOpen = false;
+								}}
+								class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
+							/>
+							<input
+								type="text"
+								bind:value={newFleetDescription}
+								placeholder="Description (optional)"
+								onkeydown={(event) => {
+									if (event.key === 'Escape') createFleetOpen = false;
+								}}
+								class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
+							/>
+							<div class="flex gap-1.5">
+								<button
+									type="submit"
+									class="rounded border border-accent/60 bg-accent/15 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/25"
+								>
+									Create
+								</button>
+								<button
+									type="button"
+									onclick={() => (createFleetOpen = false)}
+									class="rounded border border-edge px-2 py-1 text-xs text-fg-muted hover:text-fg"
+								>
+									Cancel
+								</button>
+							</div>
+						</form>
+					{/if}
 				</div>
 
 				{#each fleetGroups.fleetIds as fleetId (fleetId)}
