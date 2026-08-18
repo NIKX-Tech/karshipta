@@ -445,9 +445,9 @@
 	// to stay visible on both light and dark basemaps, without being a
 	// bold/alarming color the way red or bright orange would be.
 	const AIRCRAFT_MILITARY_COLOR = '#8a9a5b';
-	// Altitude reads as color intensity, not just the popup's own number:
-	// ground-level traffic renders muted/dim, cruise-altitude traffic
-	// renders at full saturation and brightness. Emergency aircraft are
+	// Altitude reads as brightness, not just the popup's own number:
+	// ground-level traffic renders at a still-clearly-visible baseline,
+	// cruise-altitude traffic renders brighter. Emergency aircraft are
 	// deliberately exempt (see the color-assignment call site) - dimming
 	// the one color that's supposed to always read as urgent because a
 	// distressed aircraft happens to be low (often exactly when it matters
@@ -459,25 +459,44 @@
 	// "Visual equivalent" altitude (meters) fed into the same lift formula
 	// ward markers use, at full altitudeFraction (1.0) - see the sync
 	// effect's own comment on why this isn't aircraft's literal altitude.
-	// Comfortably above a ward's usual altitudeRelM range so cruise traffic
-	// reads as distinctly higher than any nearby drone, without the
-	// multi-thousand-meter values a literal projection would produce.
-	const AIRCRAFT_LIFT_REF_M = 400;
-	// HSL hue/saturation/lightness of AIRCRAFT_COLOR/AIRCRAFT_MILITARY_COLOR
-	// above at full intensity (t=1) - computed once (python: colorsys.
-	// rgb_to_hls on the hex values) rather than converting on every render
-	// tick for every aircraft.
+	// sqrt(altitudeFraction), not altitudeFraction directly: a ward's own
+	// altitudeRelM tops out around 200m (drone flight ceilings), and a
+	// *linear* compression needed either an absurdly high REF_M (defeating
+	// the point of compressing at all) or left genuinely-high real traffic
+	// (a regional flight at a few thousand meters, altitudeFraction still
+	// well under 1) reading as no higher than a nearby drone - confirmed
+	// live to look wrong, traffic that's actually kilometers up should
+	// never look close to ward altitude. sqrt rises steeply at first (any
+	// real aircraft clears drone range almost immediately after leaving
+	// the ground) and flattens toward the ceiling, rather than a straight
+	// line through both.
+	const AIRCRAFT_LIFT_REF_M = 2_000;
+	// Belt-and-suspenders cap on the pixel lift itself, independent of the
+	// altitude compression above - without it, a tight zoom + steep pitch
+	// could still push AIRCRAFT_LIFT_REF_M's own projection far enough off
+	// the visible map to feel broken rather than "way up there".
+	const AIRCRAFT_MAX_LIFT_PX = 600;
+	// HSL hue/saturation of AIRCRAFT_COLOR/AIRCRAFT_MILITARY_COLOR above -
+	// computed once (python: colorsys.rgb_to_hls on the hex values) rather
+	// than converting on every render tick for every aircraft. Saturation
+	// stays fixed regardless of altitude (see scaledAircraftColor's own
+	// comment on why only lightness moves) - only lightness has a "full"
+	// value here.
 	const AIRCRAFT_HUE_DEG = 173;
-	const AIRCRAFT_FULL_SATURATION_PCT = 80;
-	const AIRCRAFT_FULL_LIGHTNESS_PCT = 40;
+	const AIRCRAFT_SATURATION_PCT = 80;
+	const AIRCRAFT_FULL_LIGHTNESS_PCT = 55;
 	const AIRCRAFT_MILITARY_HUE_DEG = 75;
-	const AIRCRAFT_MILITARY_FULL_SATURATION_PCT = 26;
-	const AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT = 48;
-	// Floor, not zero - a fully desaturated/black marker at ground level
-	// would be unreadable against a dark basemap and lose its hue-based
-	// category identity (teal vs olive) entirely at low altitude.
-	const AIRCRAFT_COLOR_MIN_SATURATION_PCT = 20;
-	const AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT = 35;
+	const AIRCRAFT_MILITARY_SATURATION_PCT = 40;
+	const AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT = 58;
+	// Floor, not zero - confirmed live that varying *saturation* toward a
+	// floor (the original design here) washed a marker's hue out toward
+	// gray at low altitude, reading as "this marker vanished" against a
+	// near-black basemap rather than "this one's just lower than that
+	// one". Saturation now stays fixed at its full value everywhere (see
+	// above); this is lightness's own floor, chosen well above the
+	// basemap's own near-black tone so nothing ever gets unreadably dim,
+	// only relatively dimmer.
+	const AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT = 42;
 
 	function aircraftAltitudeFraction(plane: Aircraft): number {
 		if (plane.onGround || plane.altitudeM === undefined) return 0;
@@ -486,17 +505,14 @@
 
 	function scaledAircraftColor(
 		hueDeg: number,
-		fullSaturationPct: number,
+		saturationPct: number,
 		fullLightnessPct: number,
 		altitudeFraction: number
 	): string {
-		const s =
-			AIRCRAFT_COLOR_MIN_SATURATION_PCT +
-			(fullSaturationPct - AIRCRAFT_COLOR_MIN_SATURATION_PCT) * altitudeFraction;
 		const l =
 			AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT +
 			(fullLightnessPct - AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT) * altitudeFraction;
-		return `hsl(${hueDeg}, ${s}%, ${l}%)`;
+		return `hsl(${hueDeg}, ${saturationPct}%, ${l}%)`;
 	}
 
 	// Heavier/larger categories render bigger, same "size communicates
@@ -2316,34 +2332,37 @@
 				: plane.isMilitary
 					? scaledAircraftColor(
 							AIRCRAFT_MILITARY_HUE_DEG,
-							AIRCRAFT_MILITARY_FULL_SATURATION_PCT,
+							AIRCRAFT_MILITARY_SATURATION_PCT,
 							AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT,
 							altitudeFraction
 						)
 					: scaledAircraftColor(
 							AIRCRAFT_HUE_DEG,
-							AIRCRAFT_FULL_SATURATION_PCT,
+							AIRCRAFT_SATURATION_PCT,
 							AIRCRAFT_FULL_LIGHTNESS_PCT,
 							altitudeFraction
 						);
 			// lift the body above the ground anchor by the projected altitude,
 			// same formula as ward markers (see markerElement's own comment) -
 			// but fed a compressed "visual equivalent" altitude, not aircraft's
-			// literal real-world one. A ward's altitudeRelM tops out around a
-			// couple hundred meters (drone flight ceilings); cruise-altitude
-			// traffic is 10km+ - projected literally, that would fling a
-			// cruising airliner's marker far off-screen at any real pitch/zoom
-			// rather than reading as "higher than a nearby ward". This keeps
-			// the same zoom/pitch-responsive physical projection wards use,
-			// just applied to altitudeFraction * AIRCRAFT_LIFT_REF_M instead -
-			// deliberately not a physically accurate height, just a
-			// consistent, readable "higher = lifted more" cue on the same
-			// scale as everything else on the map.
+			// literal real-world one (see AIRCRAFT_LIFT_REF_M's own comment on
+			// why sqrt, not altitudeFraction directly). This keeps the same
+			// zoom/pitch-responsive physical projection wards use, just applied
+			// to a compressed altitude instead - deliberately not a physically
+			// accurate height, just a consistent, readable "higher = lifted
+			// more" cue that stays clearly separated from ward altitude, capped
+			// at AIRCRAFT_MAX_LIFT_PX so an extreme zoom/pitch combination can't
+			// push it absurdly far off the visible map.
 			const pxPerMeter =
 				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
 				(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
-			const liftPx =
-				altitudeFraction * AIRCRAFT_LIFT_REF_M * pxPerMeter * Math.sin((pitchDeg * Math.PI) / 180);
+			const liftPx = Math.min(
+				AIRCRAFT_MAX_LIFT_PX,
+				Math.sqrt(altitudeFraction) *
+					AIRCRAFT_LIFT_REF_M *
+					pxPerMeter *
+					Math.sin((pitchDeg * Math.PI) / 180)
+			);
 			handle.body.style.top = `${-liftPx}px`;
 			handle.stem.style.top = `${-liftPx}px`;
 			handle.stem.style.height = `${Math.max(0, liftPx - aircraftIconSizePx(plane.category) / 2)}px`;
