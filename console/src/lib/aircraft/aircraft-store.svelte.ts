@@ -1,11 +1,11 @@
 import { SvelteMap } from 'svelte/reactivity';
 import type { Aircraft, AircraftCategory, ViewportBounds } from './types';
-import { AirplanesLiveAccessError, AirplanesLiveAircraftSource } from './airplaneslive';
+import { AdsbOneAccessError, AdsbOneAircraftSource } from './adsbOne';
 
-// airplanes.live documents a 1 request/second limit (see
-// airplaneslive.ts's own comment) - comfortably generous compared to
-// OpenSky's few-hundred-per-day anonymous tier this replaced, so this can
-// debounce far more snappily while staying well under it.
+// adsb.one documents a 1 request/second limit (see adsbOne.ts's own README
+// reference) - comfortably generous compared to OpenSky's few-hundred-per-day
+// anonymous tier this replaced, so this can debounce far more snappily
+// while staying well under it.
 const FETCH_DEBOUNCE_MS = 3_000;
 const FAILURE_COOLDOWN_MS = 10_000;
 // 15s+ read as sluggish - 7s keeps a single-tile refresh (the common case)
@@ -30,7 +30,7 @@ const TRAIL_MAX_POINTS = 12;
 const REFRESH_INTERVAL_MS = CACHE_TTL_MS + 1_000;
 
 // The /point endpoint's radius is capped at 250nm regardless of how far
-// zoomed out the map is (see airplaneslive.ts) - there's no way to make
+// zoomed out the map is (see adsbOne.ts) - there's no way to make
 // the query itself cover more area. Zoomed way out over a busy region
 // (most of Europe, say), that fixed ~460km-diameter circle can still
 // return hundreds of aircraft including every light GA/glider in range,
@@ -56,13 +56,13 @@ function filterByZoom(aircraft: Aircraft[], zoom: number): Aircraft[] {
 	return aircraft.filter((plane) => zoom >= CATEGORY_MIN_ZOOM[plane.category]);
 }
 
-// Conservative vs airplanes.live's actual ~463km (250nm) diameter cap -
+// Conservative vs adsb.one's actual ~463km (250nm) diameter cap -
 // deliberately smaller so adjacent tiles overlap a bit rather than
 // leaving a gap between them.
 const SINGLE_TILE_COVERAGE_KM = 400;
 const KM_PER_DEG_LAT = 111;
 // Comfortably over 1 request/second between tiles of the same batch (see
-// airplaneslive.ts's own comment on the documented limit).
+// adsbOne.ts's own comment on the documented limit).
 const TILE_GAP_MS = 1_200;
 
 function sleep(ms: number): Promise<void> {
@@ -125,13 +125,11 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 
 /**
  * Owns the currently loaded aircraft for whatever the map viewport last
- * was. No API key/configure() the way geozone-store etc. have -
- * airplanes.live needs no signup at all (see airplaneslive.ts) - but
- * still off by default (see fleet-map.svelte's own showAircraft) since
- * it's live third-party traffic data, the same trust level reasoning as
- * the OpenAIP layers. Not routed through openaip/request-gate.ts: that
- * gate is specifically for OpenAIP's own shared rate-limited key, a
- * completely different service with its own independent limit.
+ * was. No API key/configure() the way geozone-store etc. have - adsb.one
+ * needs no signup at all (see adsbOne.ts). Not routed through
+ * openaip/request-gate.ts: that gate is specifically for OpenAIP's own
+ * shared rate-limited key, a completely different service with its own
+ * independent limit.
  */
 class AircraftStore {
 	aircraft = $state<Aircraft[]>([]);
@@ -149,7 +147,7 @@ class AircraftStore {
 	 * blink on and off every REFRESH_INTERVAL_MS. */
 	loading = $state(false);
 
-	private source = new AirplanesLiveAircraftSource();
+	private source = new AdsbOneAircraftSource();
 	private visible = false;
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private refreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -159,8 +157,8 @@ class AircraftStore {
 	private lastZoom = 0;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
 	private cache = new Map<string, CacheEntry>();
-	/** Set once airplanes.live has outright rejected a request (see
-	 * AirplanesLiveAccessError) - short-circuits both this.refreshTimer's
+	/** Set once adsb.one has outright rejected a request (see
+	 * AdsbOneAccessError) - short-circuits both this.refreshTimer's
 	 * periodic poll and any further debounced viewport request, since a
 	 * source that just said "no" isn't going to start working again on its
 	 * own between now and the next tick. Cleared by toggling the layer off
@@ -252,7 +250,7 @@ class AircraftStore {
 			// spam the console and their server for no chance of success.
 			// Toggling the layer off and back on (setVisible) is still a
 			// valid, deliberate way to try again.
-			if (error instanceof AirplanesLiveAccessError) {
+			if (error instanceof AdsbOneAccessError) {
 				this.permanentlyFailed = true;
 				return;
 			}

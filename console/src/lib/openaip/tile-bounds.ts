@@ -16,7 +16,7 @@ type Bounds = [west: number, south: number, east: number, north: number];
 // the same problem aircraft's own point+radius query had. Kept smaller
 // than aircraft's response to that (a 2x2/4-tile grid) on purpose:
 // OpenAIP's key is shared across three layers and far more tightly
-// rate-limited than airplanes.live (see request-gate.ts), so this only
+// rate-limited than adsb.one (see request-gate.ts), so this only
 // ever splits into 2, along whichever axis is wider - not a full grid.
 const MAX_BBOX_SPAN_DEG = 5;
 // Only bother splitting once meaningfully bigger than one window - a
