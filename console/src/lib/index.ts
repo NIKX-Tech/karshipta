@@ -166,13 +166,18 @@ export type { Airport, AirportCategory, AirportSource } from './airports/types';
 export { cityStore } from './cities/city-store.svelte';
 export type { City } from './cities/types';
 
-// aircraft (adsb.one, no key/signup - see aircraft-store.svelte.ts and
-// adsbOne.ts's own comment on why this replaced an earlier OpenSky-based
-// version: OpenSky's anonymous REST API sends a fixed CORS header that
-// blocks every browser origin but its own, so it could never actually work
-// client-side).
+// aircraft (adsb.lol via a consuming app's own same-origin proxy route -
+// see aircraft-store.svelte.ts and proxiedSource.ts's own comment on why
+// this isn't a direct third-party fetch the way OpenSky/airplanes.live
+// were: OpenSky's anonymous REST API sends a fixed CORS header that blocks
+// every browser origin but its own, and adsb.lol sends no CORS headers at
+// all, so neither could ever work as a direct client-side fetch. The
+// server-side half (fetchAircraftNearPoint, what a consuming app's own API
+// route calls) is exported separately via this package's own
+// "./aircraft-proxy" subpath, not here - it must never end up in a client
+// bundle.
 export { aircraftStore } from './aircraft/aircraft-store.svelte';
-export { AdsbOneAircraftSource } from './aircraft/adsbOne';
+export { ProxiedAircraftSource, AircraftProxyAccessError } from './aircraft/proxiedSource';
 export { isAircraftEmergency } from './aircraft/types';
 export type { Aircraft, AircraftCategory, AircraftSource } from './aircraft/types';
 

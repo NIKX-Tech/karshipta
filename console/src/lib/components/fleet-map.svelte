@@ -282,10 +282,13 @@
 	// Default on, unlike showGeozones/showObstacles/showAirports: no key
 	// needed, and an empty fleet with every layer off used to render as a
 	// plain black map on first load. (api.airplanes.live itself stopped
-	// serving requests in 2026-08 - its own API repo is now archived - and
-	// the source moved to api.adsb.one, see adsbOne.ts's own header
-	// comment; AdsbOneAccessError covers any future repeat of the same
-	// failure mode.)
+	// serving requests in 2026-08 - its own API repo is now archived. Its
+	// documented replacement, api.adsb.one, turned out to have its own
+	// infra problems on top of a Cloudflare bot-challenge - see
+	// proxiedSource.ts's own header comment on why aircraft now go through
+	// this app's own same-origin proxy route to adsb.lol instead of a
+	// direct third-party fetch. AircraftProxyAccessError covers any future
+	// repeat of this failure mode.)
 	let showAircraft = $state(true);
 	let showEarthquakes = $state(true);
 	let showWildfires = $state(true);
@@ -873,9 +876,9 @@
 	// independent lookups, run in parallel:
 	// - /v0/callsign/{callsign} (flightroute): fills a real gap in the
 	//   feed's own ownOp field, which is empty even for obviously
-	//   commercial flights (confirmed live against api.airplanes.live
-	//   before its api.adsb.one migration - same underlying feed shape,
-	//   see adsbOne.ts's own header comment - "ABY150", a real Air Arabia
+	//   commercial flights (confirmed live against api.airplanes.live,
+	//   since replaced - see proxiedSource.ts's own header comment - same
+	//   underlying feed shape though - "ABY150", a real Air Arabia
 	//   flight registered in the UAE, had no operator at all from the
 	//   feed, but adsbdb correctly resolves "Air Arabia" from the
 	//   callsign's ICAO airline prefix alone). Only called when operator
@@ -1556,9 +1559,9 @@
 			weatherStore.requestLocation(center.lat, center.lng);
 			updateWeatherLocationLabel(center.lat, center.lng);
 			// Aircraft is a real network request too, but like weather above,
-			// not a raw-bbox one: adsbOne reduces the viewport to a
+			// not a raw-bbox one: proxiedSource reduces the viewport to a
 			// center point + radius capped at 250nm internally (see
-			// boundsToPointRadius in adsbOne.ts) rather than sending the
+			// boundsToPointRadius in proxiedSource.ts) rather than sending the
 			// bbox itself, so there's no "oversized bbox gets rejected" failure
 			// mode to guard against by waiting for a minimum zoom - it was
 			// previously grouped with the OpenAIP/USGS layers below and so
@@ -2879,7 +2882,7 @@
 	<!-- One banner, not one per service: confirmed live that stacking a
 	     separate "Loading airspace data" and "Loading aircraft data" box
 	     read as visual clutter even though both were true simultaneously
-	     often enough (OpenAIP and adsb.one are genuinely independent
+	     often enough (OpenAIP and adsb.lol are genuinely independent
 	     services with their own keys/rate limits, so either can be loading
 	     or erroring without the other). The message itself says which,
 	     rather than always showing a generic "Loading map data" that would
@@ -2897,7 +2900,7 @@
 			     operator needs to act on. aircraftStore.loading (not just its
 			     loadError) is covered too, unlike the airspace side: a wide
 			     zoomed-out view can take several genuine seconds (a multi-tile
-			     batch, ~1.2s apart per tile to respect adsb.one's rate
+			     batch, ~1.2s apart per tile to respect adsb.lol's rate
 			     limit), and that wait had no visible feedback at all before
 			     loading existed. Every store's own raw error still goes to
 			     console.error and sits in the title attribute for anyone who
@@ -3169,7 +3172,7 @@
 									Airports
 								</label>
 							{/if}
-							<!-- No .active gate: adsb.one needs no key (see
+							<!-- No .active gate: the aircraft proxy needs no key (see
 							     aircraft-store.svelte.ts's own comment). -->
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
