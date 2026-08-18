@@ -281,11 +281,11 @@
 	let showCities = $state(true);
 	// Default on, unlike showGeozones/showObstacles/showAirports: no key
 	// needed, and an empty fleet with every layer off used to render as a
-	// plain black map on first load. (airplanes.live itself started
-	// rejecting every request in 2026-08 - see AirplanesLiveAccessError -
-	// so this currently just shows its own error banner; left on so it
-	// recovers automatically once access is sorted out, nothing to flip
-	// back here.)
+	// plain black map on first load. (api.airplanes.live itself stopped
+	// serving requests in 2026-08 - its own API repo is now archived - and
+	// the source moved to api.adsb.one, see adsbOne.ts's own header
+	// comment; AdsbOneAccessError covers any future repeat of the same
+	// failure mode.)
 	let showAircraft = $state(true);
 	let showEarthquakes = $state(true);
 	let showWildfires = $state(true);
@@ -813,14 +813,16 @@
 
 	// adsbdb.com: free, no key, wildcard CORS (confirmed live). Two
 	// independent lookups, run in parallel:
-	// - /v0/callsign/{callsign} (flightroute): fills a real gap in
-	//   airplanes.live's own ownOp field, which is empty even for
-	//   obviously commercial flights (confirmed live: "ABY150", a real
-	//   Air Arabia flight registered in the UAE, had no operator at all
-	//   from airplanes.live, but adsbdb correctly resolves "Air Arabia"
-	//   from the callsign's ICAO airline prefix alone). Only called when
-	//   operator is already missing - airplanes.live's own field is
-	//   preferred when present. Also returns the flight's actual
+	// - /v0/callsign/{callsign} (flightroute): fills a real gap in the
+	//   feed's own ownOp field, which is empty even for obviously
+	//   commercial flights (confirmed live against api.airplanes.live
+	//   before its api.adsb.one migration - same underlying feed shape,
+	//   see adsbOne.ts's own header comment - "ABY150", a real Air Arabia
+	//   flight registered in the UAE, had no operator at all from the
+	//   feed, but adsbdb correctly resolves "Air Arabia" from the
+	//   callsign's ICAO airline prefix alone). Only called when operator
+	//   is already missing - the feed's own field is preferred when
+	//   present. Also returns the flight's actual
 	//   origin/destination airports, real route data neither feed
 	//   otherwise provides. Confirmed live this only covers civil
 	//   registrations - a real military aircraft (a Royal Netherlands Air
@@ -1483,9 +1485,9 @@
 			weatherStore.requestLocation(center.lat, center.lng);
 			updateWeatherLocationLabel(center.lat, center.lng);
 			// Aircraft is a real network request too, but like weather above,
-			// not a raw-bbox one: airplanesLive reduces the viewport to a
+			// not a raw-bbox one: adsbOne reduces the viewport to a
 			// center point + radius capped at 250nm internally (see
-			// boundsToPointRadius in airplaneslive.ts) rather than sending the
+			// boundsToPointRadius in adsbOne.ts) rather than sending the
 			// bbox itself, so there's no "oversized bbox gets rejected" failure
 			// mode to guard against by waiting for a minimum zoom - it was
 			// previously grouped with the OpenAIP/USGS layers below and so
@@ -2767,7 +2769,7 @@
 	<!-- One banner, not one per service: confirmed live that stacking a
 	     separate "Loading airspace data" and "Loading aircraft data" box
 	     read as visual clutter even though both were true simultaneously
-	     often enough (OpenAIP and airplanes.live are genuinely independent
+	     often enough (OpenAIP and adsb.one are genuinely independent
 	     services with their own keys/rate limits, so either can be loading
 	     or erroring without the other). The message itself says which,
 	     rather than always showing a generic "Loading map data" that would
@@ -2785,7 +2787,7 @@
 			     operator needs to act on. aircraftStore.loading (not just its
 			     loadError) is covered too, unlike the airspace side: a wide
 			     zoomed-out view can take several genuine seconds (a multi-tile
-			     batch, ~1.2s apart per tile to respect airplanes.live's rate
+			     batch, ~1.2s apart per tile to respect adsb.one's rate
 			     limit), and that wait had no visible feedback at all before
 			     loading existed. Every store's own raw error still goes to
 			     console.error and sits in the title attribute for anyone who
@@ -3057,7 +3059,7 @@
 									Airports
 								</label>
 							{/if}
-							<!-- No .active gate: airplanes.live needs no key (see
+							<!-- No .active gate: adsb.one needs no key (see
 							     aircraft-store.svelte.ts's own comment). -->
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"

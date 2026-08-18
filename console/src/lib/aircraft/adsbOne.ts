@@ -1,10 +1,15 @@
 import type { Aircraft, AircraftCategory, AircraftSource, ViewportBounds } from './types';
 
-const AIRPLANES_LIVE_API_URL = 'https://api.airplanes.live/v2/point';
-// The API's own documented ceiling for its /point/[lat]/[lon]/[radius]
-// endpoint (see https://airplanes.live/api-guide/) - radius is nautical
-// miles, not the bbox this store's caller works in, so a viewport gets
-// reduced to a center point and radius below.
+// Formerly api.airplanes.live directly - that API repo is now archived
+// (github.com/airplanes-live/api-archive) and its README points here
+// instead: same org, same /v2/point/[lat]/[lon]/[radius] shape, response
+// format documented as "conforms to the ADSBExchange v2 API" (i.e. not
+// airplanes.live-specific naming at all, hence this file's own name).
+const ADSB_ONE_API_URL = 'https://api.adsb.one/v2/point';
+// Radius is nautical miles, not the bbox this store's caller works in, so
+// a viewport gets reduced to a center point and radius below. 250nm is the
+// same ceiling the old airplanes.live docs documented; unconfirmed whether
+// adsb.one enforces the identical cap, kept as the safe assumption.
 const MAX_RADIUS_NM = 250;
 const MIN_RADIUS_NM = 5;
 const KM_PER_NM = 1.852;
@@ -114,31 +119,26 @@ function parseAircraft(raw: unknown): Aircraft | undefined {
 	};
 }
 
-/** Thrown for a 4xx other than 429: airplanes.live rejecting every request
- * outright (e.g. "contact us for access"), not a transient rate limit -
- * retrying that on a timer every few seconds forever is pointless and just
- * spams both the console and their server. aircraft-store.svelte.ts checks
- * for this specifically to stop its own retry loop. */
-export class AirplanesLiveAccessError extends Error {}
+/** Thrown for a 4xx other than 429: the source rejecting every request
+ * outright, not a transient rate limit - retrying that on a timer every
+ * few seconds forever is pointless and just spams both the console and
+ * their server. aircraft-store.svelte.ts checks for this specifically to
+ * stop its own retry loop. */
+export class AdsbOneAccessError extends Error {}
 
-/** Community-run, unfiltered ADS-B/MLAT aggregator - no key or signup
- * historically (see https://airplanes.live/api-guide/), and previously sent
- * a wildcard CORS header that worked from a browser with no server-side
- * proxy needed. As of 2026-08 it started rejecting every request (including
- * server-side, non-browser ones - confirmed via curl) with a 403 asking
- * projects to contact them directly for approved access; until that's
- * sorted out this will keep failing (see AirplanesLiveAccessError above).
- * Point+radius only (no native bbox endpoint), so the viewport gets reduced
- * to its center and half-diagonal above. */
-export class AirplanesLiveAircraftSource implements AircraftSource {
+/** Community-run, unfiltered ADS-B/MLAT aggregator, no key or signup - see
+ * this file's own header comment on the api.airplanes.live -> api.adsb.one
+ * migration. Point+radius only (no native bbox endpoint), so the viewport
+ * gets reduced to its center and half-diagonal above. */
+export class AdsbOneAircraftSource implements AircraftSource {
 	async fetchViewport(bounds: ViewportBounds): Promise<Aircraft[]> {
 		const { latitudeDeg, longitudeDeg, radiusNm } = boundsToPointRadius(bounds);
-		const url = `${AIRPLANES_LIVE_API_URL}/${latitudeDeg}/${longitudeDeg}/${radiusNm.toFixed(0)}`;
+		const url = `${ADSB_ONE_API_URL}/${latitudeDeg}/${longitudeDeg}/${radiusNm.toFixed(0)}`;
 		const response = await fetch(url);
 		if (!response.ok) {
-			const message = `airplanes.live request failed: ${response.status} ${response.statusText}`;
+			const message = `adsb.one request failed: ${response.status} ${response.statusText}`;
 			if (response.status !== 429 && response.status >= 400 && response.status < 500) {
-				throw new AirplanesLiveAccessError(message);
+				throw new AdsbOneAccessError(message);
 			}
 			throw new Error(message);
 		}

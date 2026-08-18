@@ -166,13 +166,13 @@ export type { Airport, AirportCategory, AirportSource } from './airports/types';
 export { cityStore } from './cities/city-store.svelte';
 export type { City } from './cities/types';
 
-// aircraft (airplanes.live, no key/signup - see aircraft-store.svelte.ts
-// and airplaneslive.ts's own comment on why this replaced an earlier
-// OpenSky-based version: OpenSky's anonymous REST API sends a fixed CORS
-// header that blocks every browser origin but its own, so it could never
-// actually work client-side).
+// aircraft (adsb.one, no key/signup - see aircraft-store.svelte.ts and
+// adsbOne.ts's own comment on why this replaced an earlier OpenSky-based
+// version: OpenSky's anonymous REST API sends a fixed CORS header that
+// blocks every browser origin but its own, so it could never actually work
+// client-side).
 export { aircraftStore } from './aircraft/aircraft-store.svelte';
-export { AirplanesLiveAircraftSource } from './aircraft/airplaneslive';
+export { AdsbOneAircraftSource } from './aircraft/adsbOne';
 export { isAircraftEmergency } from './aircraft/types';
 export type { Aircraft, AircraftCategory, AircraftSource } from './aircraft/types';
 
