@@ -1,6 +1,6 @@
 import { SvelteMap } from 'svelte/reactivity';
 import type { Aircraft, AircraftCategory, ViewportBounds } from './types';
-import { AirplanesLiveAircraftSource } from './airplaneslive';
+import { AirplanesLiveAccessError, AirplanesLiveAircraftSource } from './airplaneslive';
 
 // airplanes.live documents a 1 request/second limit (see
 // airplaneslive.ts's own comment) - comfortably generous compared to
@@ -159,6 +159,13 @@ class AircraftStore {
 	private lastZoom = 0;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
 	private cache = new Map<string, CacheEntry>();
+	/** Set once airplanes.live has outright rejected a request (see
+	 * AirplanesLiveAccessError) - short-circuits both this.refreshTimer's
+	 * periodic poll and any further debounced viewport request, since a
+	 * source that just said "no" isn't going to start working again on its
+	 * own between now and the next tick. Cleared by toggling the layer off
+	 * and back on (see setVisible), the deliberate way to try again. */
+	private permanentlyFailed = false;
 
 	setVisible(visible: boolean): void {
 		this.visible = visible;
@@ -167,9 +174,11 @@ class AircraftStore {
 			this.loadError = undefined;
 			return;
 		}
+		this.permanentlyFailed = false;
 		if (this.lastBounds) void this.fetchViewport(this.lastBounds, this.lastZoom);
 		if (this.refreshTimer) clearInterval(this.refreshTimer);
 		this.refreshTimer = setInterval(() => {
+			if (this.permanentlyFailed) return;
 			if (this.lastBounds) void this.fetchViewport(this.lastBounds, this.lastZoom);
 		}, REFRESH_INTERVAL_MS);
 	}
@@ -194,7 +203,7 @@ class AircraftStore {
 	}
 
 	private async fetchViewport(bounds: ViewportBounds, zoom: number): Promise<void> {
-		if (!this.visible) return;
+		if (!this.visible || this.permanentlyFailed) return;
 
 		const cacheKey = cacheKeyFor(bounds);
 		const cached = this.cache.get(cacheKey);
@@ -238,6 +247,15 @@ class AircraftStore {
 			this.loading = false;
 			this.cooldownUntilMs = Date.now() + FAILURE_COOLDOWN_MS;
 			console.error('aircraft: failed to load viewport', error);
+			// A permanent rejection (e.g. "contact us for access"), not a
+			// transient rate limit - retrying it on a timer forever would just
+			// spam the console and their server for no chance of success.
+			// Toggling the layer off and back on (setVisible) is still a
+			// valid, deliberate way to try again.
+			if (error instanceof AirplanesLiveAccessError) {
+				this.permanentlyFailed = true;
+				return;
+			}
 			if (this.retryTimer) clearTimeout(this.retryTimer);
 			this.retryTimer = setTimeout(() => {
 				if (this.lastBounds) void this.fetchViewport(this.lastBounds, this.lastZoom);

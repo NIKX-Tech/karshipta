@@ -114,24 +114,33 @@ function parseAircraft(raw: unknown): Aircraft | undefined {
 	};
 }
 
-/** Community-run, unfiltered ADS-B/MLAT aggregator - no key or signup, and
- * critically (unlike OpenSky's anonymous REST API, which sends a fixed
- * Access-Control-Allow-Origin locked to opensky-network.org itself, so it
- * can never be called from any other browser origin - confirmed live via a
- * direct CORS error, not an assumption) this one sends a wildcard CORS
- * header and actually works from a browser. See
- * https://airplanes.live/api-guide/: no key currently required, documented
- * limit is 1 request/second, "non-commercial use", no SLA/uptime
- * guarantee - aircraft-store.svelte.ts's own debounce stays well under
- * that limit. Point+radius only (no native bbox endpoint), so the
- * viewport gets reduced to its center and half-diagonal above. */
+/** Thrown for a 4xx other than 429: airplanes.live rejecting every request
+ * outright (e.g. "contact us for access"), not a transient rate limit -
+ * retrying that on a timer every few seconds forever is pointless and just
+ * spams both the console and their server. aircraft-store.svelte.ts checks
+ * for this specifically to stop its own retry loop. */
+export class AirplanesLiveAccessError extends Error {}
+
+/** Community-run, unfiltered ADS-B/MLAT aggregator - no key or signup
+ * historically (see https://airplanes.live/api-guide/), and previously sent
+ * a wildcard CORS header that worked from a browser with no server-side
+ * proxy needed. As of 2026-08 it started rejecting every request (including
+ * server-side, non-browser ones - confirmed via curl) with a 403 asking
+ * projects to contact them directly for approved access; until that's
+ * sorted out this will keep failing (see AirplanesLiveAccessError above).
+ * Point+radius only (no native bbox endpoint), so the viewport gets reduced
+ * to its center and half-diagonal above. */
 export class AirplanesLiveAircraftSource implements AircraftSource {
 	async fetchViewport(bounds: ViewportBounds): Promise<Aircraft[]> {
 		const { latitudeDeg, longitudeDeg, radiusNm } = boundsToPointRadius(bounds);
 		const url = `${AIRPLANES_LIVE_API_URL}/${latitudeDeg}/${longitudeDeg}/${radiusNm.toFixed(0)}`;
 		const response = await fetch(url);
 		if (!response.ok) {
-			throw new Error(`airplanes.live request failed: ${response.status} ${response.statusText}`);
+			const message = `airplanes.live request failed: ${response.status} ${response.statusText}`;
+			if (response.status !== 429 && response.status >= 400 && response.status < 500) {
+				throw new AirplanesLiveAccessError(message);
+			}
+			throw new Error(message);
 		}
 		const body: unknown = await response.json();
 		const list =
