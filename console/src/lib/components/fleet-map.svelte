@@ -279,12 +279,13 @@
 	// city-store.svelte.ts's own comment), so there's no reason to make an
 	// operator opt in just to see it.
 	let showCities = $state(true);
-	// Aircraft/earthquakes/wildfires default off like the OpenAIP layers,
-	// not on like Cities: real-time third-party traffic and hazard data,
-	// same trust-level reasoning as showGeozones/showObstacles/showAirports
-	// above, not a static reference dataset.
-	// Default on - no key needed (airplanes.live), and an empty fleet with
-	// every layer off used to render as a plain black map on first load.
+	// Default on, unlike showGeozones/showObstacles/showAirports: no key
+	// needed, and an empty fleet with every layer off used to render as a
+	// plain black map on first load. (airplanes.live itself started
+	// rejecting every request in 2026-08 - see AirplanesLiveAccessError -
+	// so this currently just shows its own error banner; left on so it
+	// recovers automatically once access is sorted out, nothing to flip
+	// back here.)
 	let showAircraft = $state(true);
 	let showEarthquakes = $state(true);
 	let showWildfires = $state(true);

@@ -17,8 +17,13 @@
  */
 
 // Minimum gap between the start of two OpenAIP requests, regardless of which
-// layer they're for.
-const MIN_REQUEST_GAP_MS = 1500;
+// layer they're for. At 1500ms, 4 back-to-back requests (obstacles and
+// airports both default on, each up to 2 tiles - see their own stores) span
+// only 4.5s start-to-start, inside the documented ~6s/4-request window
+// itself, so a plain cold load could trip the limit by design, not just bad
+// luck - confirmed live (429s right at first paint). 2500ms pushes that same
+// burst out to 7.5s, clear of the window.
+const MIN_REQUEST_GAP_MS = 2500;
 // Shared with geozone-store.svelte.ts's own value: confirmed directly that
 // OpenAIP's rate-limit window clears in roughly 5-10s.
 const FAILURE_COOLDOWN_MS = 10_000;
