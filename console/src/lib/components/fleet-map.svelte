@@ -330,11 +330,15 @@
 	}
 
 	// `icon` is the shape-defining <svg> - rotation/color update via plain
-	// CSS, matching the ward marker's own arrow. displayLng/displayLat/
-	// displayHeadingDeg are the currently-shown values, distinct from the
-	// store's latest fix - see animateAircraftMarker's own comment.
+	// CSS, matching the ward marker's own arrow. `body`/`stem` mirror
+	// MarkerHandle's own ground+stem+body split (see aircraftMarkerElement's
+	// own comment on why aircraft got the same treatment). displayLng/
+	// displayLat/displayHeadingDeg are the currently-shown values, distinct
+	// from the store's latest fix - see animateAircraftMarker's own comment.
 	interface AircraftMarkerHandle {
 		marker: maplibregl.Marker;
+		body: HTMLElement;
+		stem: HTMLElement;
 		icon: SVGSVGElement;
 		displayLng: number;
 		displayLat: number;
@@ -438,6 +442,60 @@
 	// to stay visible on both light and dark basemaps, without being a
 	// bold/alarming color the way red or bright orange would be.
 	const AIRCRAFT_MILITARY_COLOR = '#8a9a5b';
+	// Altitude reads as color intensity, not just the popup's own number:
+	// ground-level traffic renders muted/dim, cruise-altitude traffic
+	// renders at full saturation and brightness. Emergency aircraft are
+	// deliberately exempt (see the color-assignment call site) - dimming
+	// the one color that's supposed to always read as urgent because a
+	// distressed aircraft happens to be low (often exactly when it matters
+	// most, mid-descent) would undermine the whole point of that color.
+	// ~FL390: a reasonable ceiling for "this is about as high as traffic
+	// normally gets", not a hard operational limit - taller-flying traffic
+	// just clamps to full intensity rather than going any brighter.
+	const AIRCRAFT_ALTITUDE_CEILING_M = 12_000;
+	// "Visual equivalent" altitude (meters) fed into the same lift formula
+	// ward markers use, at full altitudeFraction (1.0) - see the sync
+	// effect's own comment on why this isn't aircraft's literal altitude.
+	// Comfortably above a ward's usual altitudeRelM range so cruise traffic
+	// reads as distinctly higher than any nearby drone, without the
+	// multi-thousand-meter values a literal projection would produce.
+	const AIRCRAFT_LIFT_REF_M = 400;
+	// HSL hue/saturation/lightness of AIRCRAFT_COLOR/AIRCRAFT_MILITARY_COLOR
+	// above at full intensity (t=1) - computed once (python: colorsys.
+	// rgb_to_hls on the hex values) rather than converting on every render
+	// tick for every aircraft.
+	const AIRCRAFT_HUE_DEG = 173;
+	const AIRCRAFT_FULL_SATURATION_PCT = 80;
+	const AIRCRAFT_FULL_LIGHTNESS_PCT = 40;
+	const AIRCRAFT_MILITARY_HUE_DEG = 75;
+	const AIRCRAFT_MILITARY_FULL_SATURATION_PCT = 26;
+	const AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT = 48;
+	// Floor, not zero - a fully desaturated/black marker at ground level
+	// would be unreadable against a dark basemap and lose its hue-based
+	// category identity (teal vs olive) entirely at low altitude.
+	const AIRCRAFT_COLOR_MIN_SATURATION_PCT = 20;
+	const AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT = 35;
+
+	function aircraftAltitudeFraction(plane: Aircraft): number {
+		if (plane.onGround || plane.altitudeM === undefined) return 0;
+		return Math.min(1, Math.max(0, plane.altitudeM / AIRCRAFT_ALTITUDE_CEILING_M));
+	}
+
+	function scaledAircraftColor(
+		hueDeg: number,
+		fullSaturationPct: number,
+		fullLightnessPct: number,
+		altitudeFraction: number
+	): string {
+		const s =
+			AIRCRAFT_COLOR_MIN_SATURATION_PCT +
+			(fullSaturationPct - AIRCRAFT_COLOR_MIN_SATURATION_PCT) * altitudeFraction;
+		const l =
+			AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT +
+			(fullLightnessPct - AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT) * altitudeFraction;
+		return `hsl(${hueDeg}, ${s}%, ${l}%)`;
+	}
+
 	// Heavier/larger categories render bigger, same "size communicates
 	// scale" reasoning as EARTHQUAKE_LAYER's magnitude-interpolated radius
 	// below - a 747 and a Cessna reading as the same size marker would
@@ -1204,22 +1262,35 @@
 	// only repositioned/recolored/resized by the sync effect below, so a
 	// closure captured at creation would go stale the moment the aircraft
 	// moves.
+	// Zero-size root pinned at the ground position, body lifted above it by
+	// the projected altitude and connected by a stem - the exact same
+	// ground+stem+body split markerElement (wards) already uses, so a
+	// pitched-camera view reads "higher = lifted more" consistently for
+	// every marker on the map, not just wards. See the sync effect below
+	// for why the lift itself uses a compressed altitude rather than
+	// aircraft's literal (much larger) real-world altitude.
 	function aircraftMarkerElement(
 		targetMap: maplibregl.Map,
 		icao24: string,
 		shape: AircraftIconShape,
 		sizePx: number
-	): { element: HTMLElement; icon: SVGSVGElement } {
+	): { element: HTMLElement; body: HTMLElement; stem: HTMLElement; icon: SVGSVGElement } {
 		const element = document.createElement('div');
-		element.className = 'cursor-pointer';
+		element.className = 'relative h-0 w-0';
 		element.setAttribute('aria-label', `Aircraft ${icao24}`);
 		const markup = aircraftIconMarkup(shape);
-		element.innerHTML = `<svg width="${sizePx}" height="${sizePx}" viewBox="${markup.viewBox}" fill="currentColor" stroke="#0a0e12" stroke-width="1" stroke-linejoin="round">${markup.innerHtml}</svg>`;
+		element.innerHTML = `
+			<span class="bg-edge absolute left-0 w-px" data-part="stem"></span>
+			<div class="absolute cursor-pointer" data-part="body">
+				<svg width="${sizePx}" height="${sizePx}" viewBox="${markup.viewBox}" fill="currentColor" stroke="#0a0e12" stroke-width="1" stroke-linejoin="round" class="-translate-x-1/2 -translate-y-1/2">${markup.innerHtml}</svg>
+			</div>`;
+		const body = element.querySelector<HTMLElement>('[data-part="body"]');
+		const stem = element.querySelector<HTMLElement>('[data-part="stem"]');
 		const icon = element.querySelector('svg');
-		if (!(icon instanceof SVGSVGElement)) {
-			throw new Error('fleet-map: aircraft marker template is missing its icon');
+		if (!body || !stem || !(icon instanceof SVGSVGElement)) {
+			throw new Error('fleet-map: aircraft marker template is missing its parts');
 		}
-		element.addEventListener('mouseenter', () => {
+		body.addEventListener('mouseenter', () => {
 			targetMap.getCanvas().style.cursor = 'pointer';
 			cancelPopupClose();
 			cancelAircraftTrailClear();
@@ -1252,12 +1323,12 @@
 				popup.setHTML(baseHtml + extraHtml);
 			});
 		});
-		element.addEventListener('mouseleave', () => {
+		body.addEventListener('mouseleave', () => {
 			targetMap.getCanvas().style.cursor = '';
 			schedulePopupClose();
 			scheduleAircraftTrailClear();
 		});
-		return { element, icon };
+		return { element, body, stem, icon };
 	}
 
 	// Confirmed live that snapping straight to each new fix (a plain
@@ -2209,7 +2280,12 @@
 					plane.isMilitary && (plane.category === 'light' || plane.category === 'heavy');
 				const shape = isMilitaryFixedWing ? 'fighter' : iconShapeForCategory(plane.category);
 				const sizePx = aircraftIconSizePx(plane.category);
-				const { element, icon } = aircraftMarkerElement(activeMap, plane.icao24, shape, sizePx);
+				const { element, body, stem, icon } = aircraftMarkerElement(
+					activeMap,
+					plane.icao24,
+					shape,
+					sizePx
+				);
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([plane.longitudeDeg, plane.latitudeDeg])
 					.addTo(activeMap);
@@ -2219,6 +2295,8 @@
 				icon.style.rotate = `${headingDeg - bearingDeg}deg`;
 				handle = {
 					marker,
+					body,
+					stem,
 					icon,
 					displayLng: plane.longitudeDeg,
 					displayLat: plane.latitudeDeg,
@@ -2229,11 +2307,43 @@
 			} else {
 				animateAircraftMarker(handle, plane.longitudeDeg, plane.latitudeDeg, headingDeg);
 			}
+			const altitudeFraction = aircraftAltitudeFraction(plane);
 			handle.icon.style.color = isAircraftEmergency(plane)
 				? AIRCRAFT_EMERGENCY_COLOR
 				: plane.isMilitary
-					? AIRCRAFT_MILITARY_COLOR
-					: AIRCRAFT_COLOR;
+					? scaledAircraftColor(
+							AIRCRAFT_MILITARY_HUE_DEG,
+							AIRCRAFT_MILITARY_FULL_SATURATION_PCT,
+							AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT,
+							altitudeFraction
+						)
+					: scaledAircraftColor(
+							AIRCRAFT_HUE_DEG,
+							AIRCRAFT_FULL_SATURATION_PCT,
+							AIRCRAFT_FULL_LIGHTNESS_PCT,
+							altitudeFraction
+						);
+			// lift the body above the ground anchor by the projected altitude,
+			// same formula as ward markers (see markerElement's own comment) -
+			// but fed a compressed "visual equivalent" altitude, not aircraft's
+			// literal real-world one. A ward's altitudeRelM tops out around a
+			// couple hundred meters (drone flight ceilings); cruise-altitude
+			// traffic is 10km+ - projected literally, that would fling a
+			// cruising airliner's marker far off-screen at any real pitch/zoom
+			// rather than reading as "higher than a nearby ward". This keeps
+			// the same zoom/pitch-responsive physical projection wards use,
+			// just applied to altitudeFraction * AIRCRAFT_LIFT_REF_M instead -
+			// deliberately not a physically accurate height, just a
+			// consistent, readable "higher = lifted more" cue on the same
+			// scale as everything else on the map.
+			const pxPerMeter =
+				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
+				(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
+			const liftPx =
+				altitudeFraction * AIRCRAFT_LIFT_REF_M * pxPerMeter * Math.sin((pitchDeg * Math.PI) / 180);
+			handle.body.style.top = `${-liftPx}px`;
+			handle.stem.style.top = `${-liftPx}px`;
+			handle.stem.style.height = `${Math.max(0, liftPx - aircraftIconSizePx(plane.category) / 2)}px`;
 		}
 		for (const icao24 of Object.keys(aircraftMarkers)) {
 			if (!seenIcao24s[icao24]) removeAircraftMarker(icao24);
