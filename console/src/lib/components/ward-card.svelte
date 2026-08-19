@@ -75,24 +75,28 @@
 		? 'opacity-50 grayscale'
 		: ''}"
 >
-	<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-		<h2 class="font-mono text-sm font-semibold">{wardId}</h2>
+	<div class="flex items-center gap-2">
+		<!-- min-w-0 lets a long wardId truncate instead of the row wrapping -
+		     the dot and remove button must never drop to a second line, or a
+		     card in a narrow rail can render with an apparently-missing
+		     remove button that's actually just wrapped out of view below. -->
+		<h2 class="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{wardId}</h2>
 		{#if synthetic}
 			<span
-				class="text-[9px] font-medium tracking-widest text-synthetic"
+				class="shrink-0 text-[9px] font-medium tracking-widest text-synthetic"
 				title="No autopilot behind this ward; demo telemetry standing in for one"
 			>
 				SIM
 			</span>
 		{/if}
 		{#if state?.flight?.armed}
-			<span class="text-[9px] font-medium tracking-widest text-armed">ARMED</span>
+			<span class="shrink-0 text-[9px] font-medium tracking-widest text-armed">ARMED</span>
 		{/if}
 		{#if effectiveReadonly}
-			<span class="text-[9px] font-medium tracking-widest text-fg-muted">VIEW ONLY</span>
+			<span class="shrink-0 text-[9px] font-medium tracking-widest text-fg-muted">VIEW ONLY</span>
 		{/if}
 		<span
-			class="ml-auto inline-block h-2 w-2 shrink-0 rounded-full {connected
+			class="inline-block h-2 w-2 shrink-0 rounded-full {connected
 				? 'animate-pulse bg-accent'
 				: 'bg-critical'}"
 			role="status"

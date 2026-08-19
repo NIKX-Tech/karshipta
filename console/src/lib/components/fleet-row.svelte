@@ -8,9 +8,17 @@
 	interface Props {
 		fleetId: string;
 		fleetLabel: string;
+		// Candidate wards offered by "Manage members" - defaults to every ward
+		// this session knows about, correct for this console's own single-
+		// operator reference app where every ward is the caller's own. A
+		// multi-tenant consumer (e.g. a public map with wards owned by many
+		// different accounts) passes its own account-scoped subset instead, so
+		// this never offers assigning a ward someone else owns.
+		wardIds?: string[];
 	}
 
-	const { fleetId, fleetLabel }: Props = $props();
+	const { fleetId, fleetLabel, wardIds }: Props = $props();
+	const memberCandidateIds = $derived(wardIds ?? fleet.wardIds);
 
 	const group = $derived(fleetGroups.fleets[fleetId]);
 	const pending = $derived(
@@ -143,10 +151,10 @@
 								<p class="px-1.5 pb-1 text-[9px] font-medium tracking-widest text-fg-muted">
 									MEMBERS
 								</p>
-								{#if fleet.wardIds.length === 0}
+								{#if memberCandidateIds.length === 0}
 									<p class="px-1.5 pb-1 text-[10px] text-fg-muted">No wards to add yet.</p>
 								{:else}
-									{#each fleet.wardIds as wardId (wardId)}
+									{#each memberCandidateIds as wardId (wardId)}
 										<label class="flex items-center gap-1.5 px-1.5 py-0.5 text-[10px]">
 											<input
 												type="checkbox"

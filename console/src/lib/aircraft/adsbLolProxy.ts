@@ -1,19 +1,25 @@
-import type { Aircraft, AircraftCategory, AircraftSource, ViewportBounds } from './types';
+import type { Aircraft, AircraftCategory } from './types';
 
-const AIRPLANES_LIVE_API_URL = 'https://api.airplanes.live/v2/point';
-// The API's own documented ceiling for its /point/[lat]/[lon]/[radius]
-// endpoint (see https://airplanes.live/api-guide/) - radius is nautical
-// miles, not the bbox this store's caller works in, so a viewport gets
-// reduced to a center point and radius below.
+// api.adsb.lol: community-run, keyless, real data (confirmed live) - but
+// sends no CORS headers at all (confirmed live: its own OPTIONS preflight
+// returns a plain 405, no Access-Control-* headers whatsoever), unlike the
+// old api.airplanes.live, which sent a wildcard CORS header and could be
+// called directly from a browser. This module is meant to run server-side
+// only, exported via this package's own "./aircraft-proxy" subpath - never
+// import it from client code, since it has nothing to offer a browser's
+// CORS check regardless of origin. See proxiedSource.ts (the client half
+// of this pair) for the same-origin route a consuming app wires this into.
+const ADSB_LOL_API_URL = 'https://api.adsb.lol/v2/point';
+// Radius is nautical miles. 250nm matches the old airplanes.live-era
+// ceiling; unconfirmed whether adsb.lol enforces the identical cap, kept
+// as the safe assumption.
 const MAX_RADIUS_NM = 250;
 const MIN_RADIUS_NM = 5;
-const KM_PER_NM = 1.852;
 const FEET_PER_METER = 3.28084;
 const KNOTS_TO_MS = 0.514444;
 const FEET_PER_MINUTE_TO_MS = 0.3048 / 60;
-const EARTH_RADIUS_KM = 6371;
-// bit 1 of readsb/tar1090's dbFlags convention - confirmed live against a
-// real Royal Netherlands Air Force Apache (category A7, dbFlags 1).
+// bit 1 of readsb/tar1090's dbFlags convention - confirmed live against
+// real military traffic on adsb.lol's own /v2/mil endpoint.
 const DB_FLAG_MILITARY = 1;
 
 // ADS-B emitter category codes (ICAO Annex 10 / DO-260B), collapsed to the
@@ -33,28 +39,6 @@ function mapCategory(raw: unknown): AircraftCategory {
 	return 'unknown';
 }
 
-function boundsToPointRadius(bounds: ViewportBounds): {
-	latitudeDeg: number;
-	longitudeDeg: number;
-	radiusNm: number;
-} {
-	const [west, south, east, north] = bounds;
-	const latitudeDeg = (south + north) / 2;
-	const longitudeDeg = (west + east) / 2;
-	// Half-diagonal (center to a corner) via haversine, clamped to the
-	// API's min/max - close enough for "aircraft roughly in view", not a
-	// precision requirement the way a bbox query would be.
-	const toRad = (deg: number) => (deg * Math.PI) / 180;
-	const dLat = toRad(north - latitudeDeg);
-	const dLon = toRad(east - longitudeDeg);
-	const a =
-		Math.sin(dLat / 2) ** 2 +
-		Math.cos(toRad(latitudeDeg)) * Math.cos(toRad(north)) * Math.sin(dLon / 2) ** 2;
-	const halfDiagonalKm = EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-	const radiusNm = Math.min(MAX_RADIUS_NM, Math.max(MIN_RADIUS_NM, halfDiagonalKm / KM_PER_NM));
-	return { latitudeDeg, longitudeDeg, radiusNm };
-}
-
 // readsb/dump1090's own documented JSON shape (confirmed live) - aircraft
 // are objects keyed by hex/flight/r/t/desc/alt_baro/gs/track/lat/lon, not
 // OpenSky's positional arrays. No nationality field here (unlike OpenSky's
@@ -62,6 +46,10 @@ function boundsToPointRadius(bounds: ViewportBounds): {
 // instead, and are more identifying in practice. alt_baro is feet, or the
 // literal string "ground" when landed; gs is knots - both converted to
 // this app's internal SI units here, same as every other source module.
+// heading prefers track (in-flight ADS-B track angle) but falls back to
+// true_heading - confirmed live that adsb.lol only sends true_heading for
+// grounded aircraft (no meaningful track angle while stationary), not
+// track for every record the way the popup/marker code otherwise assumes.
 function parseAircraft(raw: unknown): Aircraft | undefined {
 	if (typeof raw !== 'object' || raw === null) return undefined;
 	const data = raw as Record<string, unknown>;
@@ -89,7 +77,12 @@ function parseAircraft(raw: unknown): Aircraft | undefined {
 	const velocityMS = typeof data.gs === 'number' ? data.gs * KNOTS_TO_MS : undefined;
 	const verticalRateMS =
 		typeof data.baro_rate === 'number' ? data.baro_rate * FEET_PER_MINUTE_TO_MS : undefined;
-	const headingDeg = typeof data.track === 'number' ? data.track : undefined;
+	const headingDeg =
+		typeof data.track === 'number'
+			? data.track
+			: typeof data.true_heading === 'number'
+				? data.true_heading
+				: undefined;
 	const category = mapCategory(data.category);
 	const isMilitary =
 		typeof data.dbFlags === 'number' && (data.dbFlags & DB_FLAG_MILITARY) === DB_FLAG_MILITARY;
@@ -114,35 +107,37 @@ function parseAircraft(raw: unknown): Aircraft | undefined {
 	};
 }
 
-/** Community-run, unfiltered ADS-B/MLAT aggregator - no key or signup, and
- * critically (unlike OpenSky's anonymous REST API, which sends a fixed
- * Access-Control-Allow-Origin locked to opensky-network.org itself, so it
- * can never be called from any other browser origin - confirmed live via a
- * direct CORS error, not an assumption) this one sends a wildcard CORS
- * header and actually works from a browser. See
- * https://airplanes.live/api-guide/: no key currently required, documented
- * limit is 1 request/second, "non-commercial use", no SLA/uptime
- * guarantee - aircraft-store.svelte.ts's own debounce stays well under
- * that limit. Point+radius only (no native bbox endpoint), so the
- * viewport gets reduced to its center and half-diagonal above. */
-export class AirplanesLiveAircraftSource implements AircraftSource {
-	async fetchViewport(bounds: ViewportBounds): Promise<Aircraft[]> {
-		const { latitudeDeg, longitudeDeg, radiusNm } = boundsToPointRadius(bounds);
-		const url = `${AIRPLANES_LIVE_API_URL}/${latitudeDeg}/${longitudeDeg}/${radiusNm.toFixed(0)}`;
-		const response = await fetch(url);
-		if (!response.ok) {
-			throw new Error(`airplanes.live request failed: ${response.status} ${response.statusText}`);
-		}
-		const body: unknown = await response.json();
-		const list =
-			typeof body === 'object' && body !== null && Array.isArray((body as { ac?: unknown }).ac)
-				? (body as { ac: unknown[] }).ac
-				: [];
-		const aircraft: Aircraft[] = [];
-		for (const raw of list) {
-			const parsed = parseAircraft(raw);
-			if (parsed) aircraft.push(parsed);
-		}
-		return aircraft;
+/** Fetches and parses aircraft within radiusNm of a point from adsb.lol.
+ * Server-side only (see this file's own header comment) - a consuming
+ * app's own same-origin API route calls this and hands the already-typed
+ * Aircraft[] back to the browser, e.g.:
+ *
+ * // src/routes/api/aircraft/point/[lat]/[lon]/[radius]/+server.ts
+ * import { fetchAircraftNearPoint } from
+ *   '@nikx-tech/karshipta-console-core/aircraft-proxy';
+ * export const GET = async ({ params }) =>
+ *   json(await fetchAircraftNearPoint(+params.lat, +params.lon, +params.radius));
+ */
+export async function fetchAircraftNearPoint(
+	latitudeDeg: number,
+	longitudeDeg: number,
+	radiusNm: number
+): Promise<Aircraft[]> {
+	const clampedRadiusNm = Math.min(MAX_RADIUS_NM, Math.max(MIN_RADIUS_NM, radiusNm));
+	const url = `${ADSB_LOL_API_URL}/${latitudeDeg}/${longitudeDeg}/${clampedRadiusNm.toFixed(0)}`;
+	const response = await fetch(url);
+	if (!response.ok) {
+		throw new Error(`adsb.lol request failed: ${response.status} ${response.statusText}`);
 	}
+	const body: unknown = await response.json();
+	const list =
+		typeof body === 'object' && body !== null && Array.isArray((body as { ac?: unknown }).ac)
+			? (body as { ac: unknown[] }).ac
+			: [];
+	const aircraft: Aircraft[] = [];
+	for (const raw of list) {
+		const parsed = parseAircraft(raw);
+		if (parsed) aircraft.push(parsed);
+	}
+	return aircraft;
 }

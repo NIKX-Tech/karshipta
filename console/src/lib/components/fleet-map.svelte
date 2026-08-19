@@ -279,12 +279,16 @@
 	// city-store.svelte.ts's own comment), so there's no reason to make an
 	// operator opt in just to see it.
 	let showCities = $state(true);
-	// Aircraft/earthquakes/wildfires default off like the OpenAIP layers,
-	// not on like Cities: real-time third-party traffic and hazard data,
-	// same trust-level reasoning as showGeozones/showObstacles/showAirports
-	// above, not a static reference dataset.
-	// Default on - no key needed (airplanes.live), and an empty fleet with
-	// every layer off used to render as a plain black map on first load.
+	// Default on, unlike showGeozones/showObstacles/showAirports: no key
+	// needed, and an empty fleet with every layer off used to render as a
+	// plain black map on first load. (api.airplanes.live itself stopped
+	// serving requests in 2026-08 - its own API repo is now archived. Its
+	// documented replacement, api.adsb.one, turned out to have its own
+	// infra problems on top of a Cloudflare bot-challenge - see
+	// proxiedSource.ts's own header comment on why aircraft now go through
+	// this app's own same-origin proxy route to adsb.lol instead of a
+	// direct third-party fetch. AircraftProxyAccessError covers any future
+	// repeat of this failure mode.)
 	let showAircraft = $state(true);
 	let showEarthquakes = $state(true);
 	let showWildfires = $state(true);
@@ -329,11 +333,15 @@
 	}
 
 	// `icon` is the shape-defining <svg> - rotation/color update via plain
-	// CSS, matching the ward marker's own arrow. displayLng/displayLat/
-	// displayHeadingDeg are the currently-shown values, distinct from the
-	// store's latest fix - see animateAircraftMarker's own comment.
+	// CSS, matching the ward marker's own arrow. `body`/`stem` mirror
+	// MarkerHandle's own ground+stem+body split (see aircraftMarkerElement's
+	// own comment on why aircraft got the same treatment). displayLng/
+	// displayLat/displayHeadingDeg are the currently-shown values, distinct
+	// from the store's latest fix - see animateAircraftMarker's own comment.
 	interface AircraftMarkerHandle {
 		marker: maplibregl.Marker;
+		body: HTMLElement;
+		stem: HTMLElement;
 		icon: SVGSVGElement;
 		displayLng: number;
 		displayLat: number;
@@ -352,6 +360,18 @@
 	// same as markers/aircraftMarkers below.
 	let scaleControl: maplibregl.ScaleControl | undefined;
 	let scaleBarEl: HTMLElement | undefined;
+	// True only once scaleControl.onAdd() has actually run - confirmed live
+	// this matters, not just belt-and-suspenders: scaleControl itself
+	// becomes non-null (in the mount effect below) well before onAdd ever
+	// runs (that's deferred to this action, gated on mapLoaded), so a plain
+	// `scaleControl?.` truthiness check elsewhere is not enough to know the
+	// control is actually usable yet - calling setUnit() on a ScaleControl
+	// before onAdd has set its internal _map/_container crashes inside
+	// MapLibre's own code. $state (not a plain variable) specifically so
+	// the unit-sync effect below can react to this flipping true on its
+	// own, independent of whatever order Svelte happens to run this
+	// action's update() versus that effect in.
+	let scaleControlReady = $state(false);
 
 	// Inserts the scale control's DOM element into this node - a Svelte
 	// action rather than bind:this + appendChild, since manipulating a
@@ -366,6 +386,7 @@
 			if (!isLoaded || !scaleControl || !map || scaleBarEl) return;
 			scaleBarEl = scaleControl.onAdd(map);
 			node.appendChild(scaleBarEl);
+			scaleControlReady = true;
 		}
 		tryInsert(loaded);
 		return {
@@ -373,6 +394,7 @@
 			destroy() {
 				scaleControl?.onRemove();
 				scaleBarEl = undefined;
+				scaleControlReady = false;
 			}
 		};
 	}
@@ -423,6 +445,76 @@
 	// to stay visible on both light and dark basemaps, without being a
 	// bold/alarming color the way red or bright orange would be.
 	const AIRCRAFT_MILITARY_COLOR = '#8a9a5b';
+	// Altitude reads as brightness, not just the popup's own number:
+	// ground-level traffic renders at a still-clearly-visible baseline,
+	// cruise-altitude traffic renders brighter. Emergency aircraft are
+	// deliberately exempt (see the color-assignment call site) - dimming
+	// the one color that's supposed to always read as urgent because a
+	// distressed aircraft happens to be low (often exactly when it matters
+	// most, mid-descent) would undermine the whole point of that color.
+	// ~FL390: a reasonable ceiling for "this is about as high as traffic
+	// normally gets", not a hard operational limit - taller-flying traffic
+	// just clamps to full intensity rather than going any brighter.
+	const AIRCRAFT_ALTITUDE_CEILING_M = 12_000;
+	// "Visual equivalent" altitude (meters) fed into the same lift formula
+	// ward markers use, at full altitudeFraction (1.0) - see the sync
+	// effect's own comment on why this isn't aircraft's literal altitude.
+	// sqrt(altitudeFraction), not altitudeFraction directly: a ward's own
+	// altitudeRelM tops out around 200m (drone flight ceilings), and a
+	// *linear* compression needed either an absurdly high REF_M (defeating
+	// the point of compressing at all) or left genuinely-high real traffic
+	// (a regional flight at a few thousand meters, altitudeFraction still
+	// well under 1) reading as no higher than a nearby drone - confirmed
+	// live to look wrong, traffic that's actually kilometers up should
+	// never look close to ward altitude. sqrt rises steeply at first (any
+	// real aircraft clears drone range almost immediately after leaving
+	// the ground) and flattens toward the ceiling, rather than a straight
+	// line through both.
+	const AIRCRAFT_LIFT_REF_M = 2_000;
+	// Belt-and-suspenders cap on the pixel lift itself, independent of the
+	// altitude compression above - without it, a tight zoom + steep pitch
+	// could still push AIRCRAFT_LIFT_REF_M's own projection far enough off
+	// the visible map to feel broken rather than "way up there".
+	const AIRCRAFT_MAX_LIFT_PX = 600;
+	// HSL hue/saturation of AIRCRAFT_COLOR/AIRCRAFT_MILITARY_COLOR above -
+	// computed once (python: colorsys.rgb_to_hls on the hex values) rather
+	// than converting on every render tick for every aircraft. Saturation
+	// stays fixed regardless of altitude (see scaledAircraftColor's own
+	// comment on why only lightness moves) - only lightness has a "full"
+	// value here.
+	const AIRCRAFT_HUE_DEG = 173;
+	const AIRCRAFT_SATURATION_PCT = 80;
+	const AIRCRAFT_FULL_LIGHTNESS_PCT = 55;
+	const AIRCRAFT_MILITARY_HUE_DEG = 75;
+	const AIRCRAFT_MILITARY_SATURATION_PCT = 40;
+	const AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT = 58;
+	// Floor, not zero - confirmed live that varying *saturation* toward a
+	// floor (the original design here) washed a marker's hue out toward
+	// gray at low altitude, reading as "this marker vanished" against a
+	// near-black basemap rather than "this one's just lower than that
+	// one". Saturation now stays fixed at its full value everywhere (see
+	// above); this is lightness's own floor, chosen well above the
+	// basemap's own near-black tone so nothing ever gets unreadably dim,
+	// only relatively dimmer.
+	const AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT = 42;
+
+	function aircraftAltitudeFraction(plane: Aircraft): number {
+		if (plane.onGround || plane.altitudeM === undefined) return 0;
+		return Math.min(1, Math.max(0, plane.altitudeM / AIRCRAFT_ALTITUDE_CEILING_M));
+	}
+
+	function scaledAircraftColor(
+		hueDeg: number,
+		saturationPct: number,
+		fullLightnessPct: number,
+		altitudeFraction: number
+	): string {
+		const l =
+			AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT +
+			(fullLightnessPct - AIRCRAFT_COLOR_MIN_LIGHTNESS_PCT) * altitudeFraction;
+		return `hsl(${hueDeg}, ${saturationPct}%, ${l}%)`;
+	}
+
 	// Heavier/larger categories render bigger, same "size communicates
 	// scale" reasoning as EARTHQUAKE_LAYER's magnitude-interpolated radius
 	// below - a 747 and a Cessna reading as the same size marker would
@@ -798,14 +890,16 @@
 
 	// adsbdb.com: free, no key, wildcard CORS (confirmed live). Two
 	// independent lookups, run in parallel:
-	// - /v0/callsign/{callsign} (flightroute): fills a real gap in
-	//   airplanes.live's own ownOp field, which is empty even for
-	//   obviously commercial flights (confirmed live: "ABY150", a real
-	//   Air Arabia flight registered in the UAE, had no operator at all
-	//   from airplanes.live, but adsbdb correctly resolves "Air Arabia"
-	//   from the callsign's ICAO airline prefix alone). Only called when
-	//   operator is already missing - airplanes.live's own field is
-	//   preferred when present. Also returns the flight's actual
+	// - /v0/callsign/{callsign} (flightroute): fills a real gap in the
+	//   feed's own ownOp field, which is empty even for obviously
+	//   commercial flights (confirmed live against api.airplanes.live,
+	//   since replaced - see proxiedSource.ts's own header comment - same
+	//   underlying feed shape though - "ABY150", a real Air Arabia
+	//   flight registered in the UAE, had no operator at all from the
+	//   feed, but adsbdb correctly resolves "Air Arabia" from the
+	//   callsign's ICAO airline prefix alone). Only called when operator
+	//   is already missing - the feed's own field is preferred when
+	//   present. Also returns the flight's actual
 	//   origin/destination airports, real route data neither feed
 	//   otherwise provides. Confirmed live this only covers civil
 	//   registrations - a real military aircraft (a Royal Netherlands Air
@@ -1187,22 +1281,35 @@
 	// only repositioned/recolored/resized by the sync effect below, so a
 	// closure captured at creation would go stale the moment the aircraft
 	// moves.
+	// Zero-size root pinned at the ground position, body lifted above it by
+	// the projected altitude and connected by a stem - the exact same
+	// ground+stem+body split markerElement (wards) already uses, so a
+	// pitched-camera view reads "higher = lifted more" consistently for
+	// every marker on the map, not just wards. See the sync effect below
+	// for why the lift itself uses a compressed altitude rather than
+	// aircraft's literal (much larger) real-world altitude.
 	function aircraftMarkerElement(
 		targetMap: maplibregl.Map,
 		icao24: string,
 		shape: AircraftIconShape,
 		sizePx: number
-	): { element: HTMLElement; icon: SVGSVGElement } {
+	): { element: HTMLElement; body: HTMLElement; stem: HTMLElement; icon: SVGSVGElement } {
 		const element = document.createElement('div');
-		element.className = 'cursor-pointer';
+		element.className = 'relative h-0 w-0';
 		element.setAttribute('aria-label', `Aircraft ${icao24}`);
 		const markup = aircraftIconMarkup(shape);
-		element.innerHTML = `<svg width="${sizePx}" height="${sizePx}" viewBox="${markup.viewBox}" fill="currentColor" stroke="#0a0e12" stroke-width="1" stroke-linejoin="round">${markup.innerHtml}</svg>`;
+		element.innerHTML = `
+			<span class="bg-edge absolute left-0 w-px" data-part="stem"></span>
+			<div class="absolute cursor-pointer" data-part="body">
+				<svg width="${sizePx}" height="${sizePx}" viewBox="${markup.viewBox}" fill="currentColor" stroke="#0a0e12" stroke-width="1" stroke-linejoin="round" class="-translate-x-1/2 -translate-y-1/2">${markup.innerHtml}</svg>
+			</div>`;
+		const body = element.querySelector<HTMLElement>('[data-part="body"]');
+		const stem = element.querySelector<HTMLElement>('[data-part="stem"]');
 		const icon = element.querySelector('svg');
-		if (!(icon instanceof SVGSVGElement)) {
-			throw new Error('fleet-map: aircraft marker template is missing its icon');
+		if (!body || !stem || !(icon instanceof SVGSVGElement)) {
+			throw new Error('fleet-map: aircraft marker template is missing its parts');
 		}
-		element.addEventListener('mouseenter', () => {
+		body.addEventListener('mouseenter', () => {
 			targetMap.getCanvas().style.cursor = 'pointer';
 			cancelPopupClose();
 			cancelAircraftTrailClear();
@@ -1235,12 +1342,12 @@
 				popup.setHTML(baseHtml + extraHtml);
 			});
 		});
-		element.addEventListener('mouseleave', () => {
+		body.addEventListener('mouseleave', () => {
 			targetMap.getCanvas().style.cursor = '';
 			schedulePopupClose();
 			scheduleAircraftTrailClear();
 		});
-		return { element, icon };
+		return { element, body, stem, icon };
 	}
 
 	// Confirmed live that snapping straight to each new fix (a plain
@@ -1468,9 +1575,9 @@
 			weatherStore.requestLocation(center.lat, center.lng);
 			updateWeatherLocationLabel(center.lat, center.lng);
 			// Aircraft is a real network request too, but like weather above,
-			// not a raw-bbox one: airplanesLive reduces the viewport to a
+			// not a raw-bbox one: proxiedSource reduces the viewport to a
 			// center point + radius capped at 250nm internally (see
-			// boundsToPointRadius in airplaneslive.ts) rather than sending the
+			// boundsToPointRadius in proxiedSource.ts) rather than sending the
 			// bbox itself, so there's no "oversized bbox gets rejected" failure
 			// mode to guard against by waiting for a minimum zoom - it was
 			// previously grouped with the OpenAIP/USGS layers below and so
@@ -1847,6 +1954,7 @@
 			scaleControl?.onRemove();
 			scaleControl = undefined;
 			scaleBarEl = undefined;
+			scaleControlReady = false;
 			created.remove();
 			map = undefined;
 		};
@@ -1915,8 +2023,13 @@
 	// metric/imperial choice - MapLibre's ScaleControl only reads its unit
 	// once at construction otherwise, so without this it would stay
 	// permanently metric regardless of the Units toggle everything else in
-	// this app already respects.
+	// this app already respects. Gated on scaleControlReady (see its own
+	// comment): confirmed live that calling setUnit before onAdd has run
+	// crashes inside MapLibre's own code, not just a theoretical race - a
+	// consuming app with more components/effects around FleetMap than this
+	// reference app's own page shifted the timing enough to actually hit it.
 	$effect(() => {
+		if (!scaleControlReady) return;
 		scaleControl?.setUnit(unitsStore.current);
 	});
 
@@ -2186,7 +2299,12 @@
 					plane.isMilitary && (plane.category === 'light' || plane.category === 'heavy');
 				const shape = isMilitaryFixedWing ? 'fighter' : iconShapeForCategory(plane.category);
 				const sizePx = aircraftIconSizePx(plane.category);
-				const { element, icon } = aircraftMarkerElement(activeMap, plane.icao24, shape, sizePx);
+				const { element, body, stem, icon } = aircraftMarkerElement(
+					activeMap,
+					plane.icao24,
+					shape,
+					sizePx
+				);
 				const marker = new maplibregl.Marker({ element })
 					.setLngLat([plane.longitudeDeg, plane.latitudeDeg])
 					.addTo(activeMap);
@@ -2196,6 +2314,8 @@
 				icon.style.rotate = `${headingDeg - bearingDeg}deg`;
 				handle = {
 					marker,
+					body,
+					stem,
 					icon,
 					displayLng: plane.longitudeDeg,
 					displayLat: plane.latitudeDeg,
@@ -2206,11 +2326,46 @@
 			} else {
 				animateAircraftMarker(handle, plane.longitudeDeg, plane.latitudeDeg, headingDeg);
 			}
+			const altitudeFraction = aircraftAltitudeFraction(plane);
 			handle.icon.style.color = isAircraftEmergency(plane)
 				? AIRCRAFT_EMERGENCY_COLOR
 				: plane.isMilitary
-					? AIRCRAFT_MILITARY_COLOR
-					: AIRCRAFT_COLOR;
+					? scaledAircraftColor(
+							AIRCRAFT_MILITARY_HUE_DEG,
+							AIRCRAFT_MILITARY_SATURATION_PCT,
+							AIRCRAFT_MILITARY_FULL_LIGHTNESS_PCT,
+							altitudeFraction
+						)
+					: scaledAircraftColor(
+							AIRCRAFT_HUE_DEG,
+							AIRCRAFT_SATURATION_PCT,
+							AIRCRAFT_FULL_LIGHTNESS_PCT,
+							altitudeFraction
+						);
+			// lift the body above the ground anchor by the projected altitude,
+			// same formula as ward markers (see markerElement's own comment) -
+			// but fed a compressed "visual equivalent" altitude, not aircraft's
+			// literal real-world one (see AIRCRAFT_LIFT_REF_M's own comment on
+			// why sqrt, not altitudeFraction directly). This keeps the same
+			// zoom/pitch-responsive physical projection wards use, just applied
+			// to a compressed altitude instead - deliberately not a physically
+			// accurate height, just a consistent, readable "higher = lifted
+			// more" cue that stays clearly separated from ward altitude, capped
+			// at AIRCRAFT_MAX_LIFT_PX so an extreme zoom/pitch combination can't
+			// push it absurdly far off the visible map.
+			const pxPerMeter =
+				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
+				(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
+			const liftPx = Math.min(
+				AIRCRAFT_MAX_LIFT_PX,
+				Math.sqrt(altitudeFraction) *
+					AIRCRAFT_LIFT_REF_M *
+					pxPerMeter *
+					Math.sin((pitchDeg * Math.PI) / 180)
+			);
+			handle.body.style.top = `${-liftPx}px`;
+			handle.stem.style.top = `${-liftPx}px`;
+			handle.stem.style.height = `${Math.max(0, liftPx - aircraftIconSizePx(plane.category) / 2)}px`;
 		}
 		for (const icao24 of Object.keys(aircraftMarkers)) {
 			if (!seenIcao24s[icao24]) removeAircraftMarker(icao24);
@@ -2666,6 +2821,10 @@
 				handle.ownerRow.classList.toggle('flex', !!owner);
 				if (owner) {
 					handle.ownerNameEl.textContent = `@${owner.username}`;
+					// No placeholder circle when there's no photo - an empty
+					// bordered dot next to the name reads as a broken image,
+					// not "no avatar set".
+					handle.ownerAvatar.classList.toggle('hidden', !owner.photoUrl);
 					handle.ownerAvatar.style.backgroundImage = owner.photoUrl
 						? `url(${JSON.stringify(owner.photoUrl)})`
 						: '';
@@ -2742,7 +2901,7 @@
 	<!-- One banner, not one per service: confirmed live that stacking a
 	     separate "Loading airspace data" and "Loading aircraft data" box
 	     read as visual clutter even though both were true simultaneously
-	     often enough (OpenAIP and airplanes.live are genuinely independent
+	     often enough (OpenAIP and adsb.lol are genuinely independent
 	     services with their own keys/rate limits, so either can be loading
 	     or erroring without the other). The message itself says which,
 	     rather than always showing a generic "Loading map data" that would
@@ -2760,7 +2919,7 @@
 			     operator needs to act on. aircraftStore.loading (not just its
 			     loadError) is covered too, unlike the airspace side: a wide
 			     zoomed-out view can take several genuine seconds (a multi-tile
-			     batch, ~1.2s apart per tile to respect airplanes.live's rate
+			     batch, ~1.2s apart per tile to respect adsb.lol's rate
 			     limit), and that wait had no visible feedback at all before
 			     loading existed. Every store's own raw error still goes to
 			     console.error and sits in the title attribute for anyone who
@@ -3032,7 +3191,7 @@
 									Airports
 								</label>
 							{/if}
-							<!-- No .active gate: airplanes.live needs no key (see
+							<!-- No .active gate: the aircraft proxy needs no key (see
 							     aircraft-store.svelte.ts's own comment). -->
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
@@ -3244,10 +3403,17 @@
 	 * them. filter:invert flips the dark icon light without touching the
 	 * vendor's asset; simplest fix that doesn't fork the library's SVGs.
 	 */
+	/* !important: MapLibre's own stylesheet sets background/border/box-shadow
+	 * on this exact same single-class selector, so without it, load order
+	 * (not specificity - both rules are equally specific) decides the
+	 * winner, and the vendor's white background + drop-shadow can leak
+	 * through - the zoom/compass group then visibly doesn't match the
+	 * locate/measure/layers buttons right above it, which use this file's
+	 * own plain border-edge/bg-panel styling with no shadow at all. */
 	:global(.maplibregl-ctrl-group) {
-		background: var(--color-panel);
-		border: 1px solid var(--color-edge);
-		box-shadow: none;
+		background: var(--color-panel) !important;
+		border: 1px solid var(--color-edge) !important;
+		box-shadow: none !important;
 	}
 	:global(.maplibregl-ctrl-group button + button) {
 		border-top: 1px solid var(--color-edge);

@@ -166,13 +166,18 @@ export type { Airport, AirportCategory, AirportSource } from './airports/types';
 export { cityStore } from './cities/city-store.svelte';
 export type { City } from './cities/types';
 
-// aircraft (airplanes.live, no key/signup - see aircraft-store.svelte.ts
-// and airplaneslive.ts's own comment on why this replaced an earlier
-// OpenSky-based version: OpenSky's anonymous REST API sends a fixed CORS
-// header that blocks every browser origin but its own, so it could never
-// actually work client-side).
+// aircraft (adsb.lol via a consuming app's own same-origin proxy route -
+// see aircraft-store.svelte.ts and proxiedSource.ts's own comment on why
+// this isn't a direct third-party fetch the way OpenSky/airplanes.live
+// were: OpenSky's anonymous REST API sends a fixed CORS header that blocks
+// every browser origin but its own, and adsb.lol sends no CORS headers at
+// all, so neither could ever work as a direct client-side fetch. The
+// server-side half (fetchAircraftNearPoint, what a consuming app's own API
+// route calls) is exported separately via this package's own
+// "./aircraft-proxy" subpath, not here - it must never end up in a client
+// bundle.
 export { aircraftStore } from './aircraft/aircraft-store.svelte';
-export { AirplanesLiveAircraftSource } from './aircraft/airplaneslive';
+export { ProxiedAircraftSource, AircraftProxyAccessError } from './aircraft/proxiedSource';
 export { isAircraftEmergency } from './aircraft/types';
 export type { Aircraft, AircraftCategory, AircraftSource } from './aircraft/types';
 
@@ -242,6 +247,16 @@ export { default as LocationPickerBar } from './components/location-picker-bar.s
 // language without forking either app-shell component wholesale.
 export { default as Tabs, type TabItem } from './components/ui/tabs.svelte';
 export { default as WardCard } from './components/ward-card.svelte';
+// FleetRow (one collapsible, named group of ward cards, with its own
+// rename/manage-members/delete menu) and Disclosure (the generic
+// collapsible section it's built on) carry no self-host-vs-hosted opinion
+// of their own - same category as Tabs/WardCard above, unlike
+// left-rail.svelte itself (still unexported). A consuming app builds its
+// own rail shell but renders fleet groups with the exact same component,
+// instead of re-implementing grouping/rename/delete/member-management from
+// scratch and drifting from this console's own look.
+export { default as FleetRow } from './components/fleet-row.svelte';
+export { default as Disclosure } from './components/ui/disclosure.svelte';
 // WardDetail is now WardTab (its former self-scrolling <section> chrome
 // moved to right-panel.svelte's tabpanel wrapper, since the console's own
 // shell now always owns that framing - see the shell restructure in
