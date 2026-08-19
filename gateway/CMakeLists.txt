@@ -225,6 +225,16 @@ endif()
 find_package(httplib CONFIG QUIET)
 if(NOT httplib_FOUND)
   include(FetchContent)
+  # cpp-httplib defaults this to ON and silently find_package(OpenSSL)s at
+  # configure time - on a machine that happens to have OpenSSL installed
+  # (GitHub's windows-latest runner ships it system-wide) this links
+  # karshipta_gateway against libssl/libcrypto with zero opt-in from this
+  # file, for HTTPS support the Herald listener never uses. Those DLLs
+  # then aren't on a real customer's Windows machine (no system OpenSSL,
+  # nothing copies them into the release bundle), so the built binary
+  # fails to even start there - confirmed live, "libssl-3-x64.dll was not
+  # found". Off, not left to whatever's on the build machine.
+  set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     httplib
     URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.5.zip
