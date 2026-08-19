@@ -5,6 +5,49 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.1.3]
+
+### Fixed
+
+- Gateway: `karshipta_gateway.exe` failed to start on a real Windows
+  machine ("libssl-3-x64.dll was not found") because cpp-httplib (used
+  only by the Herald HTTP ingestion listener, which never needs HTTPS)
+  silently linked against whatever OpenSSL happened to be on the build
+  machine - present on GitHub's Windows CI runner, absent on a real
+  customer's. Removed the accidental dependency at its source.
+- console-core: the aircraft feed's upstream (api.airplanes.live) shut
+  down third-party API access entirely; its documented replacement
+  (api.adsb.one) turned out to be Cloudflare-bot-challenging every
+  request on top of its own infrastructure problems. Aircraft data now
+  goes through a same-origin server-side proxy (a consuming app's own
+  `/api/aircraft/point/[lat]/[lon]/[radius]` route, backed by
+  adsb.lol) instead of a direct browser-to-third-party fetch, since
+  none of the direct options send the CORS headers a browser needs.
+- console-core: aircraft altitude scaling washed low-altitude markers
+  out to near-invisible against the dark basemap, and lifted real
+  aircraft (which fly kilometers higher than any drone) too close to
+  ward altitude range on a pitched camera. Color intensity now varies
+  by lightness only (hue/saturation stay fixed per category, so
+  markers never wash out); the altitude-to-lift curve widened
+  aircraft/ward separation across the whole realistic altitude range.
+- console-core: `ScaleControl.setUnit` could be called before MapLibre
+  had finished mounting the control, crashing inside MapLibre's own
+  code in a consuming app with enough surrounding components to shift
+  effect scheduling.
+- console-core: `WardCard`'s header wrapped to a second line instead of
+  truncating the ward id; the "+ New Fleet" popover got clipped inside
+  a scrolling panel once the ward list was long enough to scroll.
+
+### Added
+
+- console-core: aircraft markers lift above their ground anchor by
+  altitude on a pitched camera, the same treatment ward markers
+  already had.
+- console-core: `FleetRow` and `Disclosure` exported from the
+  library's public surface, with `FleetRow` gaining an optional
+  `wardIds` prop for a multi-tenant consumer whose ward store includes
+  wards it doesn't own.
+
 ## [0.1.2]
 
 ### Added
