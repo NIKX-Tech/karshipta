@@ -90,6 +90,6 @@
 		"@turf/helpers": "^7.3.5",
 		"maplibre-gl": "^6.2.0",
 		"relayly": "0.6.0",
-		"supercluster": "^8.0.1"
+		"supercluster": "^9.0.0"
 	}
 }
