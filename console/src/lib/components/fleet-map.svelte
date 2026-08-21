@@ -2767,6 +2767,21 @@
 			const ward = fleet.wards[wardId];
 			const state = ward?.state;
 			if (!state?.position) continue;
+			// (0, 0) - "Null Island" - is a fallback, never a genuine fix: a
+			// real ward's state envelope falls invalid/NaN GPS fields back to
+			// 0 rather than dropping the frame (see karshipta-cloud's
+			// toLiveWardState), which used to crash the whole snapshot instead
+			// of just this one ward's position. Plotting that fallback reads
+			// as a ward in the middle of the ocean - confirmed live. Remove
+			// any existing marker instead; the ward stays visible in the
+			// fleet list regardless, this only affects the map layer.
+			const hasNoRealPosition =
+				state.position.latitudeDeg === 0 && state.position.longitudeDeg === 0;
+			if (hasNoRealPosition) {
+				markers[wardId]?.marker.remove();
+				delete markers[wardId];
+				continue;
+			}
 			// flown-path trail: skip appending when the ward hasn't actually
 			// moved (idle/disarmed on the ground), so the array doesn't grow
 			// for no visual benefit. Kept regardless of clustering - a ward's
