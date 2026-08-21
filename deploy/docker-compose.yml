@@ -38,6 +38,15 @@ x-log-limits: &log-limits
 # which does not exist on a native Linux host and silently drops every
 # packet there - confirmed live as the reason a real gateway connected to
 # a standalone `sitl-1` never received telemetry on Ubuntu.
+#
+# px4-mavlink's own -t flag rejects a hostname outright ("invalid partner
+# ip 'host.docker.internal'" - confirmed live) - it wants a literal IP,
+# it does not resolve one itself. extra_hosts above makes Docker write
+# the real resolved IP into /etc/hosts at container start (that is what
+# extra_hosts actually does, independent of any DNS server), so reading
+# it from there needs no extra tooling (getent/nslookup may not even be
+# installed in this image) and needs no separate resolution step of its
+# own.
 x-px4-broadcast-fix: &px4-broadcast-fix
   extra_hosts:
     - 'host.docker.internal:host-gateway'
@@ -57,6 +66,7 @@ x-px4-broadcast-fix: &px4-broadcast-fix
     - -c
     - |
       instance="$$PX4_INSTANCE_NUM"
+      target_ip=$$(awk '/host\.docker\.internal/ {print $$1; exit}' /etc/hosts)
       /opt/px4/bin/px4-entrypoint.sh -i "$$instance" -d &
       px4_pid=$$!
       (
@@ -68,9 +78,9 @@ x-px4-broadcast-fix: &px4-broadcast-fix
           /opt/px4/bin/px4-param --instance "$$instance" set "MAV_$${n}_BROADCAST" 1 >/dev/null 2>&1
         done
         /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$gcs_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t host.docker.internal -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t "$$target_ip" -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
         /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$offboard_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t host.docker.internal -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t "$$target_ip" -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
       ) &
       wait "$$px4_pid"
     - sh
