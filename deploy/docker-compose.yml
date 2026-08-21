@@ -29,7 +29,18 @@ x-log-limits: &log-limits
 # -d: daemon mode, no interactive pxh shell (PX4 otherwise redraws its own
 # prompt forever with no tty attached, which json-file's default unrotated
 # logging will happily grow without bound).
+#
+# host.docker.internal resolves to the host machine from inside a
+# container. Docker Desktop (Mac/Windows) provides it automatically;
+# native Linux Docker Engine needs this extra_hosts entry to get the same
+# name (supported since Docker 20.10) - without it, SITL's own -t target
+# below would need a Docker-Desktop-only literal IP (192.168.65.254),
+# which does not exist on a native Linux host and silently drops every
+# packet there - confirmed live as the reason a real gateway connected to
+# a standalone `sitl-1` never received telemetry on Ubuntu.
 x-px4-broadcast-fix: &px4-broadcast-fix
+  extra_hosts:
+    - 'host.docker.internal:host-gateway'
   environment:
     PX4_INSTANCE_NUM: '0'
     # px4io/px4-sitl's own px4-rc.sihsim reads these directly if set, in
@@ -57,9 +68,9 @@ x-px4-broadcast-fix: &px4-broadcast-fix
           /opt/px4/bin/px4-param --instance "$$instance" set "MAV_$${n}_BROADCAST" 1 >/dev/null 2>&1
         done
         /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$gcs_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t host.docker.internal -u "$$gcs_port" -r 4000000 -f >/dev/null 2>&1
         /opt/px4/bin/px4-mavlink --instance "$$instance" stop -u "$$offboard_port" >/dev/null 2>&1
-        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t 192.168.65.254 -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
+        /opt/px4/bin/px4-mavlink --instance "$$instance" start -x -t host.docker.internal -u "$$offboard_port" -r 4000000 -f -m onboard -o "$$offboard_remote" >/dev/null 2>&1
       ) &
       wait "$$px4_pid"
     - sh
@@ -114,10 +125,10 @@ services:
       - ./gateway-config.yaml:/app/gateway/config/gateway.yaml:ro
     ports:
       - "8765:8765"
-      # PX4 SITL sends its MAVLink stream to Docker Desktop's fixed
-      # host-gateway address (192.168.65.254), so these are host port
-      # publishes matching each seeded ward's connection_url, not something
-      # resolved through the compose network's own DNS/bridge.
+      # PX4 SITL sends its MAVLink stream to host.docker.internal (see
+      # x-px4-broadcast-fix above), so these are host port publishes
+      # matching each seeded ward's connection_url, not something resolved
+      # through the compose network's own DNS/bridge.
       - "24540:24540/udp"
       - "24541:24541/udp"
       - "24542:24542/udp"
