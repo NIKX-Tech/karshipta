@@ -50,6 +50,9 @@
 	import terrainStylePreview from '$lib/assets/map-style-previews/terrain.jpg';
 	import satelliteStylePreview from '$lib/assets/map-style-previews/satellite.jpg';
 	import bathymetryStylePreview from '$lib/assets/map-style-previews/bathymetry.jpg';
+	import openfreemapDarkLayers from '$lib/assets/basemap-styles/openfreemap-dark-layers.json';
+	import openfreemapPositronLayers from '$lib/assets/basemap-styles/openfreemap-positron-layers.json';
+	import openfreemapLibertyLayers from '$lib/assets/basemap-styles/openfreemap-liberty-layers.json';
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import {
 		formatAltitude,
@@ -123,23 +126,43 @@
 	// working zoom (INITIAL_ZOOM=12), so this never affects normal use.
 	const MIN_GEOZONE_ZOOM = 7;
 
-	// All free, no API key: CARTO for dark/light - the same pair the rest of
-	// the UI's own theme.css tokens use, so the map follows the app-wide
-	// theme toggle (themeStore) rather than exposing a second, independent
-	// light/dark choice of its own; a light map under a dark app chrome (or
-	// the reverse) was a real, reported problem, not a style preference.
+	// CARTO's free legacy tile CDN (basemaps.cartocdn.com) started baking
+	// an "API KEY REQUIRED" watermark into every tile image while still
+	// returning HTTP 200 - confirmed live, and not caught by any error
+	// handling since nothing about the response looks like a failure.
+	// OpenFreeMap (openfreemap.org) is the free/no-key replacement, but it
+	// serves vector styles, not raster PNG tiles like every other basemap
+	// here - hence the different shape below (a vector source + a vendored
+	// layer set per style, added/removed the same additive way every other
+	// overlay in this file works, rather than raster tile URLs swapped via
+	// setTiles()). See src/lib/assets/basemap-styles/README.md for exactly
+	// what's vendored and why.
+	const OPENFREEMAP_VECTOR_SOURCE = 'openmaptiles';
+	const OPENFREEMAP_TILES_URL = 'https://tiles.openfreemap.org/planet';
+	const OPENFREEMAP_SPRITE_URL = 'https://tiles.openfreemap.org/sprites/ofm_f384/ofm';
+	const OPENFREEMAP_GLYPHS_URL = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf';
+	// 'default' follows the app theme (dark/light, same pairing CARTO used
+	// to provide) so the map follows the app-wide theme toggle (themeStore)
+	// rather than exposing a second, independent light/dark choice of its
+	// own; a light map under a dark app chrome (or the reverse) was a real,
+	// reported problem, not a style preference. 'roadmap' (OpenFreeMap's
+	// Liberty style) is offered only alongside the light theme (see
+	// mapStyle's own comment below), since its light background would
+	// reintroduce that same mismatch.
+	type VectorBasemap = 'dark' | 'light' | 'roadmap';
+	// Vendored JSON's own type inference doesn't structurally match
+	// MapLibre's tagged LayerSpecification union (paint expression arrays
+	// come back widened) - safe to assert since these are pinned verbatim
+	// from OpenFreeMap's own validated style output, never hand-authored.
+	const VECTOR_BASEMAP_LAYERS: Record<VectorBasemap, maplibregl.LayerSpecification[]> = {
+		dark: openfreemapDarkLayers as maplibregl.LayerSpecification[],
+		light: openfreemapPositronLayers as maplibregl.LayerSpecification[],
+		roadmap: openfreemapLibertyLayers as maplibregl.LayerSpecification[]
+	};
 	// Esri World Imagery for satellite - the standard no-key choice for
 	// this, layered on top as an orthogonal on/off (real photography has no
 	// light/dark variant to match the theme against). Esri's tile scheme is
 	// z/y/x, not the usual z/x/y - easy to get backwards.
-	const DARK_TILES = ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'];
-	const LIGHT_TILES = ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'];
-	// CARTO Voyager: a colorful roadmap style, free/no-key like dark_all and
-	// light_all above (same CDN, same terms) - offered only alongside the
-	// light theme (see mapStyle's own comment), since its light background
-	// would reintroduce the exact light-map-under-dark-chrome mismatch
-	// DARK_TILES/LIGHT_TILES already exist to avoid.
-	const ROADMAP_TILES = ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'];
 	// OpenTopoMap: free/no-key elevation-shaded terrain tiles, community-run
 	// (not CARTO/Esri) - three round-robin subdomains, matching their own
 	// published usage guidance for spreading load. Its shading has no real
@@ -174,13 +197,17 @@
 		'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
 	];
 	// One combined attribution covering every basemap this control can
-	// switch to, set once at source creation: MapLibre's RasterTileSource
-	// has no setAttribution() to go with setTiles(), and rewriting it on
-	// every switch isn't worth the complexity this saves - showing all
-	// credits regardless of which is currently active is a common,
-	// acceptable tradeoff other map apps make too.
+	// switch to, set once at source creation on the raster 'basemap' source
+	// only - MapLibre's attribution control aggregates every source's
+	// attribution regardless of that source's current layer visibility, so
+	// this stays correct even while a vector style (which has no
+	// attribution field of its own; deliberately not set on the
+	// openmaptiles source, or OpenFreeMap's credit would show twice) is the
+	// one actually visible. Showing all credits regardless of which is
+	// currently active is a common, acceptable tradeoff other map apps
+	// make too - not worth rewriting on every switch.
 	const BASEMAP_ATTRIBUTION =
-		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
+		'&copy; OpenStreetMap contributors OpenFreeMap &copy; OpenMapTiles &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
 
 	// 'default' follows the app theme (DARK_TILES/LIGHT_TILES, unchanged
 	// behavior); 'roadmap' is light-only (see ROADMAP_TILES's own comment) -
@@ -236,18 +263,25 @@
 	$effect(() => {
 		if (mapStyle === 'roadmap' && themeStore.current !== 'light') setMapStyle('default');
 	});
-	const basemapTiles = $derived(
+	// undefined for 'default'/'roadmap': those are vector-backed now (see
+	// activeVectorStyle below), not a raster tile source at all.
+	const activeRasterTiles = $derived(
 		mapStyle === 'satellite'
 			? SATELLITE_TILES
 			: mapStyle === 'terrain'
 				? TERRAIN_TILES
 				: mapStyle === 'bathymetry'
 					? BATHYMETRY_TILES
-					: mapStyle === 'roadmap'
-						? ROADMAP_TILES
-						: themeStore.current === 'light'
-							? LIGHT_TILES
-							: DARK_TILES
+					: undefined
+	);
+	const activeVectorStyle = $derived<VectorBasemap | undefined>(
+		mapStyle === 'roadmap'
+			? 'roadmap'
+			: mapStyle === 'default'
+				? themeStore.current === 'light'
+					? 'light'
+					: 'dark'
+				: undefined
 	);
 
 	// Off by default: an operator who configures PUBLIC_OPENAIP_KEY opts
@@ -1440,18 +1474,24 @@
 
 	$effect(() => {
 		// untrack: this effect must run exactly once, on mount, never again.
-		// centerLat/centerLon/basemapTiles are only needed to seed the initial
-		// style - reading them normally would make Svelte treat every later
-		// basemap/theme change as a reason to tear the whole map down and
-		// rebuild it from these original values (losing the operator's pan/zoom
-		// and snapping back to whatever centerLat/centerLon were at mount,
-		// e.g. always Zurich for a caller passing FAKE_FLEET_CENTER). The
-		// tile-swap effect further down is the sole thing that should react to
-		// basemapTiles changing.
-		const { lat, lon, tiles } = untrack(() => ({
+		// centerLat/centerLon/the initial basemap choice are only needed to
+		// seed the initial style - reading them normally would make Svelte
+		// treat every later basemap/theme change as a reason to tear the whole
+		// map down and rebuild it from these original values (losing the
+		// operator's pan/zoom and snapping back to whatever centerLat/centerLon
+		// were at mount, e.g. always Zurich for a caller passing
+		// FAKE_FLEET_CENTER). The tile-swap effect further down is the sole
+		// thing that should react to activeRasterTiles/activeVectorStyle
+		// changing.
+		const { lat, lon, tiles, rasterVisible } = untrack(() => ({
 			lat: centerLat,
 			lon: centerLon,
-			tiles: basemapTiles
+			// TERRAIN_TILES is an arbitrary, harmless placeholder when the
+			// restored mapStyle is actually a vector style - rasterVisible
+			// below keeps this layer hidden in that case, and the tile-swap
+			// effect corrects `tiles` for real on its very first run regardless.
+			tiles: activeRasterTiles ?? TERRAIN_TILES,
+			rasterVisible: activeRasterTiles !== undefined
 		}));
 		// a map init failure (e.g. no WebGL) must not take the rest of the
 		// console down; ward cards keep working without the map
@@ -1472,7 +1512,17 @@
 							attribution: BASEMAP_ATTRIBUTION
 						}
 					},
-					layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }]
+					layers: [
+						{
+							id: 'basemap',
+							type: 'raster',
+							source: 'basemap',
+							// Hidden at mount when the restored mapStyle is actually a
+							// vector style - avoids a flash of the placeholder
+							// TERRAIN_TILES fallback before the vector layers land.
+							layout: { visibility: rasterVisible ? 'visible' : 'none' }
+						}
+					]
 				}
 			});
 		} catch (error) {
@@ -1602,6 +1652,22 @@
 		};
 		created.on('moveend', requestThirdPartyLayers);
 		created.on('load', () => {
+			// OpenFreeMap's vector basemap (see VECTOR_BASEMAP_LAYERS's own
+			// comment on why this is additive rather than map.setStyle()).
+			// Added once, unconditionally: all three vendored variants
+			// (dark/light/roadmap) share this one source and these same
+			// sprite/glyphs URLs, and the tile-swap effect below is what
+			// actually adds/removes each variant's own layers on top of it.
+			// sprite/glyphs are whole-style properties with no per-source
+			// equivalent - setSprite()/setGlyphs() are the additive runtime
+			// setters for them, the same reason setTiles() exists for a raster
+			// source instead of a full style replace.
+			created.addSource(OPENFREEMAP_VECTOR_SOURCE, {
+				type: 'vector',
+				url: OPENFREEMAP_TILES_URL
+			});
+			created.setSprite(OPENFREEMAP_SPRITE_URL);
+			created.setGlyphs(OPENFREEMAP_GLYPHS_URL);
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
 			// never be the thing blocking a no-fly zone or a flight path.
@@ -2001,17 +2067,43 @@
 				: '';
 	});
 
-	// swap the raster tile source in place when the theme or satellite
+	// One vector basemap's layers are resident at a time, removed and
+	// re-added on every switch - the same "one thing active, swapped in
+	// place" shape as the raster setTiles() swap below, and avoids needing
+	// to namespace dark/light/roadmap's own layer ids (they reuse generic
+	// OpenMapTiles ids like "water"/"building" across all three, which only
+	// matters if more than one set could ever coexist). Plain module-scope
+	// state, not $state - purely internal bookkeeping for the effect below
+	// to clean up after itself, never read by anything else.
+	let activeVectorLayerIds: string[] = [];
+
+	// swap the active basemap in place when the theme/style/satellite
 	// choice changes - cheaper than map.setStyle(), which tears down and
 	// rebuilds every source/layer (route, geozones, markers) this component
-	// owns, not just the basemap
+	// owns, not just the basemap. Raster styles (terrain/satellite/
+	// bathymetry) still swap via setTiles(); vector styles (default/roadmap,
+	// now OpenFreeMap-backed) add/remove their own layer set instead, since
+	// a vector source has no equivalent single "which tiles" knob.
 	$effect(() => {
 		const activeMap = map;
-		const tiles = basemapTiles;
+		const rasterTiles = activeRasterTiles;
+		const vectorBasemap = activeVectorStyle;
 		const showLabels = mapStyle === 'satellite';
 		if (!activeMap || !mapLoaded) return;
-		const source = activeMap.getSource<maplibregl.RasterTileSource>('basemap');
-		source?.setTiles(tiles);
+
+		if (rasterTiles) {
+			activeMap.getSource<maplibregl.RasterTileSource>('basemap')?.setTiles(rasterTiles);
+		}
+		activeMap.setLayoutProperty('basemap', 'visibility', rasterTiles ? 'visible' : 'none');
+
+		for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
+		activeVectorLayerIds = vectorBasemap
+			? VECTOR_BASEMAP_LAYERS[vectorBasemap].map((layer) => {
+					activeMap.addLayer(layer, SATELLITE_LABELS_SOURCE);
+					return layer.id;
+				})
+			: [];
+
 		activeMap.setLayoutProperty(
 			SATELLITE_LABELS_SOURCE,
 			'visibility',
@@ -3129,7 +3221,7 @@
 					     exactly one is always active. Plain light/dark isn't offered
 					     here as its own pair: "Map" follows the app-wide theme
 					     toggle (themeStore) rather than exposing a second,
-					     independent choice - see basemapTiles's own comment.
+					     independent choice - see activeVectorStyle's own comment.
 					     Roadmap only appears next to the light theme, for the same
 					     reason. Preview thumbnails are real captures of each style
 					     (see src/lib/assets/map-style-previews/), not swatches -
