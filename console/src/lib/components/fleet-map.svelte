@@ -21,6 +21,14 @@
 	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
 	// so the worker's own relative import resolves correctly.
 	maplibregl.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
+	// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names via
+	// glyphs, not baked-in raster text like CARTO's old tiles - without this
+	// plugin maplibre draws each glyph in isolated form and left-to-right
+	// storage order instead of shaping/joining letters and reordering
+	// right-to-left, so RTL labels render as disconnected, backwards
+	// characters. lazy=true: only fetched the first time a tile actually
+	// needs RTL shaping, not on every map load.
+	void maplibregl.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
