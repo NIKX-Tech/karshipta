@@ -3085,7 +3085,7 @@
 				]
 					.filter(Boolean)
 					.join(' / ') || undefined}
-				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-accent"
+				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-fg"
 			>
 				Loading {airspaceLoading && aircraftLoading
 					? 'airspace and aircraft data'
