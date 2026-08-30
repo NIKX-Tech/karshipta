@@ -18,4 +18,6 @@ vector source rather than two. A fast-follow could re-add it plus
 `ne2_shaded` if the relief shading is wanted.
 
 See `fleet-map.svelte`'s own comment at the CARTO-to-OpenFreeMap migration
-for why these are vendored rather than fetched live.
+for why these are vendored rather than fetched live. Loaded on demand, one
+style at a time (not all three up front), by `load-basemap-layers.ts` in
+this same directory.
