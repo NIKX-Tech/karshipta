@@ -19,6 +19,15 @@
 		 * even though one is still the logically active tab underneath.
 		 * Defaults true (normal tab-strip behavior). */
 		showSelection?: boolean;
+		/** False when the tabpanel elements this strip would otherwise
+		 * reference aren't currently in the DOM at all - e.g. a collapsible
+		 * panel whose icon rail stays mounted (so it's still clickable to
+		 * expand) while its content is entirely unmounted, not just hidden.
+		 * Omits aria-controls in that state rather than pointing it at a
+		 * nonexistent id, which axe/Lighthouse both flag as an invalid ARIA
+		 * attribute value. Defaults true: most Tabs consumers keep every
+		 * panel mounted (just hidden) the whole time. */
+		panelsMounted?: boolean;
 		onchange: (id: string) => void;
 		/** per-tab content, e.g. an icon for a vertical rail or a label for a horizontal strip;
 		 * `tab.label` is still what's read out via aria-label/title regardless of what this renders */
@@ -30,6 +39,7 @@
 		activeId,
 		orientation = 'horizontal',
 		showSelection = true,
+		panelsMounted = true,
 		onchange,
 		children
 	}: Props = $props();
@@ -83,7 +93,7 @@
 			role="tab"
 			id="tab-{tab.id}"
 			aria-selected={tab.id === activeId}
-			aria-controls="tabpanel-{tab.id}"
+			aria-controls={panelsMounted ? `tabpanel-${tab.id}` : undefined}
 			aria-label={tab.label}
 			title={tab.label}
 			tabindex={tab.id === activeId ? 0 : -1}
