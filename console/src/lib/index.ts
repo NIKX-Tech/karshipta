@@ -149,15 +149,21 @@ export { geozoneStore } from './geozones/geozone-store.svelte';
 export { OpenAipGeozoneSource } from './geozones/openaip';
 export type { Geozone, GeozoneCategory, GeozoneSource, ViewportBounds } from './geozones/types';
 
-// obstacles/airports (optional OpenAIP point layers, same opt-in-by-key
-// shape as geozones above - all three share the request coordination in
-// openaip/request-gate.ts, not exported since it's an internal detail no
-// consuming app needs to reach directly).
+// obstacles/airports (OpenAIP point layers, proxied through a consuming
+// app's own same-origin route the same way aircraft is below - see
+// obstacles/proxiedSource.ts's own comment on why OpenAIP can't be called
+// directly from a browser. Still coordinated with geozones above via the
+// shared openaip/request-gate.ts, not exported since it's an internal
+// detail no consuming app needs to reach directly. The server-side halves
+// (fetchObstaclesInBounds/fetchAirportsInBounds, what a consuming app's own
+// API routes call) are exported separately via this package's own
+// "./obstacles-proxy"/"./airports-proxy" subpaths, not here - they must
+// never end up in a client bundle).
 export { obstacleStore } from './obstacles/obstacle-store.svelte';
-export { OpenAipObstacleSource } from './obstacles/openaip';
+export { ProxiedObstacleSource, ObstacleProxyAccessError } from './obstacles/proxiedSource';
 export type { Obstacle, ObstacleCategory, ObstacleSource } from './obstacles/types';
 export { airportStore } from './airports/airport-store.svelte';
-export { OpenAipAirportSource } from './airports/openaip';
+export { ProxiedAirportSource, AirportProxyAccessError } from './airports/proxiedSource';
 export type { Airport, AirportCategory, AirportSource } from './airports/types';
 
 // cities (bundled reference data, not an OpenAIP layer - see

@@ -111,6 +111,7 @@
 		</button>
 		{#if compactMenuOpen}
 			<div
+				role="menu"
 				class="absolute top-full left-0 z-30 mt-1 w-56 rounded border border-edge bg-panel p-1.5"
 				aria-label="Add ward menu"
 			>

@@ -96,13 +96,13 @@
 	{/if}
 
 	{#if progress}
-		<p class="mt-2 font-mono text-[10px] tabular-nums" aria-label="Mission progress">
+		<div role="group" class="mt-2 font-mono text-[10px] tabular-nums" aria-label="Mission progress">
 			{#if progress.finished}
 				<span class="text-armed">finished</span>
 			{:else}
 				<span class="text-accent">wp {progress.currentSeq + 1}/{progress.totalItems}</span>
 			{/if}
-		</p>
+		</div>
 	{/if}
 </section>
 

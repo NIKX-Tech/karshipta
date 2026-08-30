@@ -52,15 +52,16 @@
 	import WeatherIcon from '$lib/components/weather-icon.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
+	import {
+		loadBasemapLayers,
+		type VectorBasemap
+	} from '$lib/assets/basemap-styles/load-basemap-layers';
 	import defaultStyleLightPreview from '$lib/assets/map-style-previews/default-light.jpg';
 	import defaultStyleDarkPreview from '$lib/assets/map-style-previews/default-dark.jpg';
 	import roadmapStylePreview from '$lib/assets/map-style-previews/roadmap.jpg';
 	import terrainStylePreview from '$lib/assets/map-style-previews/terrain.jpg';
 	import satelliteStylePreview from '$lib/assets/map-style-previews/satellite.jpg';
 	import bathymetryStylePreview from '$lib/assets/map-style-previews/bathymetry.jpg';
-	import openfreemapDarkLayers from '$lib/assets/basemap-styles/openfreemap-dark-layers.json';
-	import openfreemapPositronLayers from '$lib/assets/basemap-styles/openfreemap-positron-layers.json';
-	import openfreemapLibertyLayers from '$lib/assets/basemap-styles/openfreemap-liberty-layers.json';
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import {
 		formatAltitude,
@@ -78,6 +79,15 @@
 		centerLat: number;
 		/** read once, before this component mounts - changing it afterward does not move the camera */
 		centerLon: number;
+		/**
+		 * Read once, same as centerLat/centerLon. Defaults to INITIAL_ZOOM
+		 * (city-scale) when omitted, matching every existing caller's
+		 * current behavior unchanged. A consuming app that resolves its own
+		 * fallback center server-side (e.g. a country-scale view for a
+		 * not-yet-located guest) needs a wider starting zoom than
+		 * INITIAL_ZOOM to actually show that scale.
+		 */
+		initialZoom?: number;
 		/**
 		 * Fires on every map click alongside whatever the map already does
 		 * with it (goto targeting, waypoint placement) - a generic escape
@@ -111,7 +121,15 @@
 		ownerFor?: (wardId: string) => { username: string; photoUrl: string | null } | undefined;
 	}
 
-	const { centerLat, centerLon, onMapClick, crosshair, placementPoint, ownerFor }: Props = $props();
+	const {
+		centerLat,
+		centerLon,
+		initialZoom,
+		onMapClick,
+		crosshair,
+		placementPoint,
+		ownerFor
+	}: Props = $props();
 
 	// City-scale, not street-block: the first thing a viewer needs is "where
 	// in the world is this", not individual streets. z15 (the old value)
@@ -157,16 +175,6 @@
 	// Liberty style) is offered only alongside the light theme (see
 	// mapStyle's own comment below), since its light background would
 	// reintroduce that same mismatch.
-	type VectorBasemap = 'dark' | 'light' | 'roadmap';
-	// Vendored JSON's own type inference doesn't structurally match
-	// MapLibre's tagged LayerSpecification union (paint expression arrays
-	// come back widened) - safe to assert since these are pinned verbatim
-	// from OpenFreeMap's own validated style output, never hand-authored.
-	const VECTOR_BASEMAP_LAYERS: Record<VectorBasemap, maplibregl.LayerSpecification[]> = {
-		dark: openfreemapDarkLayers as maplibregl.LayerSpecification[],
-		light: openfreemapPositronLayers as maplibregl.LayerSpecification[],
-		roadmap: openfreemapLibertyLayers as maplibregl.LayerSpecification[]
-	};
 	// Esri World Imagery for satellite - the standard no-key choice for
 	// this, layered on top as an orthogonal on/off (real photography has no
 	// light/dark variant to match the theme against). Esri's tile scheme is
@@ -443,8 +451,8 @@
 	const showWardsRow = $derived(fleet.wardIds.length > 0);
 	const showZoneRow = $derived(zoneStore.zoneIds.length > 0 && showZones);
 	const showGeozoneRow = $derived(geozoneStore.active && showGeozones);
-	const showObstacleRow = $derived(obstacleStore.active && showObstacles);
-	const showAirportRow = $derived(airportStore.active && showAirports);
+	const showObstacleRow = $derived(showObstacles);
+	const showAirportRow = $derived(showAirports);
 	const showCityRow = $derived(showCities);
 	const showAircraftRow = $derived(showAircraft);
 	const showEarthquakeRow = $derived(showEarthquakes);
@@ -1225,7 +1233,7 @@
 	// camera state; arrows compensate for bearing, marker elevation for pitch/zoom
 	let bearingDeg = $state(0);
 	let pitchDeg = $state(0);
-	let zoomLevel = $state(INITIAL_ZOOM);
+	let zoomLevel = $state(untrack(() => initialZoom ?? INITIAL_ZOOM));
 
 	function markerElement(wardId: string): Omit<MarkerHandle, 'marker'> & {
 		element: HTMLElement;
@@ -1338,6 +1346,7 @@
 	): { element: HTMLElement; body: HTMLElement; stem: HTMLElement; icon: SVGSVGElement } {
 		const element = document.createElement('div');
 		element.className = 'relative h-0 w-0';
+		element.setAttribute('role', 'img');
 		element.setAttribute('aria-label', `Aircraft ${icao24}`);
 		const markup = aircraftIconMarkup(shape);
 		element.innerHTML = `
@@ -1491,9 +1500,10 @@
 		// FAKE_FLEET_CENTER). The tile-swap effect further down is the sole
 		// thing that should react to activeRasterTiles/activeVectorStyle
 		// changing.
-		const { lat, lon, tiles, rasterVisible } = untrack(() => ({
+		const { lat, lon, zoom, tiles, rasterVisible } = untrack(() => ({
 			lat: centerLat,
 			lon: centerLon,
+			zoom: initialZoom ?? INITIAL_ZOOM,
 			// TERRAIN_TILES is an arbitrary, harmless placeholder when the
 			// restored mapStyle is actually a vector style - rasterVisible
 			// below keeps this layer hidden in that case, and the tile-swap
@@ -1508,7 +1518,7 @@
 			created = new maplibregl.Map({
 				container,
 				center: [lon, lat],
-				zoom: INITIAL_ZOOM,
+				zoom,
 				attributionControl: { compact: true },
 				style: {
 					version: 8,
@@ -1660,7 +1670,7 @@
 		};
 		created.on('moveend', requestThirdPartyLayers);
 		created.on('load', () => {
-			// OpenFreeMap's vector basemap (see VECTOR_BASEMAP_LAYERS's own
+			// OpenFreeMap's vector basemap (see loadBasemapLayers's own
 			// comment on why this is additive rather than map.setStyle()).
 			// Added once, unconditionally: all three vendored variants
 			// (dark/light/roadmap) share this one source and these same
@@ -2095,7 +2105,6 @@
 	$effect(() => {
 		const activeMap = map;
 		const rasterTiles = activeRasterTiles;
-		const vectorBasemap = activeVectorStyle;
 		const showLabels = mapStyle === 'satellite';
 		if (!activeMap || !mapLoaded) return;
 
@@ -2104,19 +2113,42 @@
 		}
 		activeMap.setLayoutProperty('basemap', 'visibility', rasterTiles ? 'visible' : 'none');
 
-		for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
-		activeVectorLayerIds = vectorBasemap
-			? VECTOR_BASEMAP_LAYERS[vectorBasemap].map((layer) => {
-					activeMap.addLayer(layer, SATELLITE_LABELS_SOURCE);
-					return layer.id;
-				})
-			: [];
-
 		activeMap.setLayoutProperty(
 			SATELLITE_LABELS_SOURCE,
 			'visibility',
 			showLabels ? 'visible' : 'none'
 		);
+	});
+
+	// Separate from the raster/label effect above: this one has an async
+	// gap (loadBasemapLayers fetching a not-yet-cached style's JSON), so it
+	// can't share a single synchronous effect body with work that has to
+	// run immediately. Old layers stay on screen until the new style's are
+	// actually ready to swap in, rather than removing them first and
+	// leaving a blank basemap for the duration of the fetch.
+	$effect(() => {
+		const activeMap = map;
+		const vectorBasemap = activeVectorStyle;
+		if (!activeMap || !mapLoaded) return;
+
+		if (!vectorBasemap) {
+			for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
+			activeVectorLayerIds = [];
+			return;
+		}
+
+		void loadBasemapLayers(vectorBasemap).then((layers) => {
+			// The map may have been torn down, or a newer style requested,
+			// while this style's JSON was still loading - applying a stale
+			// response here would stomp whatever the operator has selected
+			// since.
+			if (map !== activeMap || activeVectorStyle !== vectorBasemap) return;
+			for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
+			activeVectorLayerIds = layers.map((layer) => {
+				activeMap.addLayer(layer, SATELLITE_LABELS_SOURCE);
+				return layer.id;
+			});
+		});
 	});
 
 	// Keeps the scale bar's own unit in sync with the operator's
@@ -2623,6 +2655,7 @@
 				const element = document.createElement('div');
 				element.className =
 					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Zone vertex ${index + 1}`);
 				element.textContent = String(index + 1);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
@@ -2701,6 +2734,7 @@
 				const element = document.createElement('div');
 				element.className =
 					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Waypoint ${index + 1}`);
 				element.textContent = String(index + 1);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
@@ -2727,6 +2761,7 @@
 			const element = document.createElement('div');
 			element.className =
 				'border-accent bg-panel text-accent flex h-6 w-6 items-center justify-center rounded-full border-2';
+			element.setAttribute('role', 'img');
 			element.setAttribute('aria-label', 'Selected spawn point');
 			element.innerHTML =
 				'<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
@@ -2748,6 +2783,7 @@
 			if (!marker) {
 				const element = document.createElement('div');
 				element.className = 'border-fg bg-panel h-2.5 w-2.5 rounded-full border-2';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Measurement point ${index + 1}`);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
 				measureMarkers[index] = marker;
@@ -3004,7 +3040,7 @@
 		control divs) and paints over anything already inside it, so overlays
 		must be siblings here, not children of the bound container below.
 	-->
-	<div bind:this={container} class="h-full w-full" aria-label="Fleet map"></div>
+	<div bind:this={container} role="region" class="h-full w-full" aria-label="Fleet map"></div>
 	{#if mapError}
 		<p
 			role="alert"
@@ -3022,11 +3058,11 @@
 	     rather than always showing a generic "Loading map data" that would
 	     lose that distinction. -->
 	<div class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2">
-		{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
+		{#if (geozoneStore.active && geozoneStore.loadError) || (showObstacles && obstacleStore.loadError) || (showAirports && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
 			{@const airspaceLoading =
 				(geozoneStore.active && geozoneStore.loadError) ||
-				(obstacleStore.active && obstacleStore.loadError) ||
-				(airportStore.active && airportStore.loadError)}
+				(showObstacles && obstacleStore.loadError) ||
+				(showAirports && airportStore.loadError)}
 			{@const aircraftLoading = showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
 			<!-- Reassuring, not alarming: airspace errors are almost always
 			     OpenAIP's own shared rate limit (see openaip/request-gate.ts),
@@ -3072,6 +3108,7 @@
 		     that needs to compete with the map at full strength until the
 		     operator actually looks at it. -->
 		<div
+			role="group"
 			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
 			aria-label="Current weather at map center"
 		>
@@ -3289,39 +3326,34 @@
 					     organized rather than a wall of checkboxes, and the
 					     2-column grid halves the vertical space either group
 					     needs. -->
-						<!-- Always rendered, unlike the individual rows inside it: Aircraft
-						     needs no OpenAIP key (unlike No-fly zones/Obstacles/Airports),
-						     so this section always has at least one row even with no key
-						     configured. Aircraft lives here, not in Data layers below - it
-						     is live traffic occupying the airspace those other three
-						     describe the structure of, not generic geographic reference
-						     data the way Cities/Weather/Earthquakes/Wildfires are. -->
+						<!-- Always rendered, unlike No-fly zones below: Aircraft/Obstacles/
+						     Airports are all proxied through a consuming app's own backend
+						     now (see obstacle-store.svelte.ts's own comment), so none of
+						     them need an OpenAIP key client-side any more - only geozones
+						     still does. Aircraft/Obstacles/Airports live here, not in Data
+						     layers below - they're live traffic and structures occupying
+						     the airspace, not generic geographic reference data the way
+						     Cities/Weather/Earthquakes/Wildfires are. -->
 						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
 						<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
-							{#if airportStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
-									Airports
-								</label>
-							{/if}
-							<!-- No .active gate: the aircraft proxy needs no key (see
-							     aircraft-store.svelte.ts's own comment). -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
+								Airports
+							</label>
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
 							>
 								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
 								Aircraft
 							</label>
-							{#if obstacleStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
-									Obstacles
-								</label>
-							{/if}
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
+								Obstacles
+							</label>
 							{#if geozoneStore.active}
 								<label
 									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"

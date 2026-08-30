@@ -149,6 +149,7 @@
 	</button>
 	{#if open}
 		<div
+			role="menu"
 			class="absolute right-0 bottom-full z-30 mb-1 w-32 rounded border border-edge bg-panel p-1"
 			aria-label="Theme menu"
 		>
