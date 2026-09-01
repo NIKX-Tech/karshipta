@@ -119,6 +119,16 @@
 		 * OSS console has no such notion and simply never passes this.
 		 */
 		ownerFor?: (wardId: string) => { username: string; photoUrl: string | null } | undefined;
+		/**
+		 * Fires after the camera settles from a pan, zoom, or flyTo (bound to
+		 * moveend, not move - the latter fires every animation frame, far too
+		 * often for a consuming app that wants to persist the result, e.g.
+		 * remembering an operator's last view across a page reload). Never
+		 * fires for the initial camera placement itself, only for movement
+		 * after that - centerLat/centerLon/initialZoom already cover the
+		 * starting point.
+		 */
+		onMapMove?: (view: { lat: number; lon: number; zoom: number }) => void;
 	}
 
 	const {
@@ -128,7 +138,8 @@
 		onMapClick,
 		crosshair,
 		placementPoint,
-		ownerFor
+		ownerFor,
+		onMapMove
 	}: Props = $props();
 
 	// City-scale, not street-block: the first thing a viewer needs is "where
@@ -1604,6 +1615,10 @@
 			bearingDeg = created.getBearing();
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
+		});
+		created.on('moveend', () => {
+			const center = created.getCenter();
+			onMapMove?.({ lat: center.lat, lon: center.lng, zoom: created.getZoom() });
 		});
 		// Safe to call unconditionally on every moveend: each store's own
 		// requestViewport() no-ops while inactive (no key configured) or not
