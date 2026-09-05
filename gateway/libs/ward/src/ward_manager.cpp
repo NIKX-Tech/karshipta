@@ -1555,5 +1555,21 @@ void WardManager::run_reconnect_loop(ManagedWard& ward, std::stop_token stop_tok
         }
         spdlog::warn("ward link lost (system_id={}), reconnecting", ward.config.system_id);
         broadcast_link_event(ward.config.ward_id, /*connected=*/false);
+
+        // Confirmed live (3 wards on one shared Mavsdk core, all connecting
+        // at once): if is_connected() flaps false right after a connect
+        // that itself resolves instantly (the socket and System are
+        // already established, so connect_with_retry's own retry_interval
+        // never applies - that only governs the gap between failed
+        // attempts), this loop had no floor at all between an unexpected
+        // disconnect and the next attempt. One flap was enough to become
+        // self-sustaining: near-zero-delay connect/disconnect cycling
+        // logged every iteration, and that logging volume alone was
+        // sustained CPU/IO load competing with the same thread pool
+        // processing heartbeats, which produced more flaps - hundreds of
+        // thousands of log lines within seconds, never recovering on its
+        // own. This is the one place in the loop with no wait already, so
+        // it is the one place a floor was missing.
+        std::this_thread::sleep_for(kReconnectPollInterval);
     }
 }
