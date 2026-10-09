@@ -4,6 +4,11 @@
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import { formatAltitude } from '$lib/units/format';
 
+	interface StatusBadge {
+		label: string;
+		tone: 'muted' | 'warning' | 'critical';
+	}
+
 	interface Props {
 		wardId: string;
 		ward: Ward;
@@ -11,9 +16,18 @@
 		 * multi-tenant consumer showing owned and view-only wards in the
 		 * same list. Omitting it keeps the existing store-wide behavior. */
 		readonly?: boolean;
+		/** Generic extension point for a consumer app with its own
+		 * per-ward status concept this library has no notion of. Absent by
+		 * default; this library never sets it itself. */
+		statusBadge?: StatusBadge;
 	}
 
-	const { wardId, ward, readonly }: Props = $props();
+	const { wardId, ward, readonly, statusBadge }: Props = $props();
+	const statusBadgeToneClass: Record<StatusBadge['tone'], string> = {
+		muted: 'text-fg-muted',
+		warning: 'text-accent',
+		critical: 'text-critical'
+	};
 	const effectiveReadonly = $derived(readonly ?? fleet.readonly);
 
 	const FLIGHT_MODE_PREFIX = 'FLIGHT_MODE_';
@@ -115,6 +129,16 @@
 			</button>
 		{/if}
 	</div>
+	{#if statusBadge}
+		<!-- Its own line, not squeezed into the header row with the wardId,
+		     dot, and remove button: unlike the single-word built-in badges
+		     (SIM, ARMED, VIEW ONLY), a consumer-supplied label has no length
+		     guarantee, and cramming it in there pushed the wardId down to a
+		     one- or two-character truncation in a narrow rail. -->
+		<p class="mt-1 truncate text-[10px] font-medium {statusBadgeToneClass[statusBadge.tone]}">
+			{statusBadge.label}
+		</p>
+	{/if}
 	{#if state}
 		<p class="mt-1 truncate font-mono text-[10px] text-fg-muted tabular-nums">
 			{#if modeLabel}{modeLabel} &middot;
