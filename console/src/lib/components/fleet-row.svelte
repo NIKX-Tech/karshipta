@@ -5,6 +5,16 @@
 	import WardCard from '$lib/components/ward-card.svelte';
 	import Disclosure from '$lib/components/ui/disclosure.svelte';
 
+	// Mirrors ward-card.svelte's own (not exported, so redefined here rather
+	// than imported) - see its own comment on why this stays generic. A
+	// callback, not a static map, so the caller can compute it from
+	// whatever per-ward concept it has without this component needing to
+	// know what that concept is.
+	interface StatusBadge {
+		label: string;
+		tone: 'muted' | 'warning' | 'critical';
+	}
+
 	interface Props {
 		fleetId: string;
 		fleetLabel: string;
@@ -15,9 +25,12 @@
 		// different accounts) passes its own account-scoped subset instead, so
 		// this never offers assigning a ward someone else owns.
 		wardIds?: string[];
+		// Forwarded straight to each ward's own WardCard - see its Props
+		// comment. Absent by default; this library never sets it itself.
+		statusBadgeFor?: (wardId: string) => StatusBadge | undefined;
 	}
 
-	const { fleetId, fleetLabel, wardIds }: Props = $props();
+	const { fleetId, fleetLabel, wardIds, statusBadgeFor }: Props = $props();
 	const memberCandidateIds = $derived(wardIds ?? fleet.wardIds);
 
 	const group = $derived(fleetGroups.fleets[fleetId]);
@@ -176,7 +189,7 @@
 					<p class="text-[10px] text-fg-muted">No wards yet.</p>
 				{:else}
 					{#each group.wardIds.filter((wardId) => wardId in fleet.wards) as wardId (wardId)}
-						<WardCard {wardId} ward={fleet.wards[wardId]} />
+						<WardCard {wardId} ward={fleet.wards[wardId]} statusBadge={statusBadgeFor?.(wardId)} />
 					{/each}
 				{/if}
 			{/if}
