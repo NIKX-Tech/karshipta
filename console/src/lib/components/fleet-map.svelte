@@ -30,32 +30,44 @@
 	// copies both files as-is into static/maplibre-gl, keeping them
 	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
 	// so the worker's own relative import resolves correctly.
-	maplibreglModule.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
-	// MapLibre's own doc comment on setRTLTextPlugin is explicit: "If the
-	// status is loaded and the plugin is requested again, an error will be
-	// thrown" - this is a once-per-page registration, not a per-map-instance
-	// one. Calling it from the component's own instance script (as this did
-	// before) re-requested it on every single FleetMap mount - every repeat
-	// visit to a page that mounts this component, not just a rare edge case -
-	// confirmed live as the root cause of an intermittent blank map: the
-	// second registration corrupts the first one's still-in-flight (lazy:
-	// true defers the real fetch) worker broadcast, throwing deep inside
-	// MapLibre's own internals ("Cannot read properties of undefined
-	// (reading 'off')" in a control's onRemove, several frames below
-	// anything this app's own code calls directly) and leaving the map
-	// mid-setup. <script module> runs exactly once per page load regardless
-	// of how many times this component itself mounts/unmounts, which is
-	// what this call actually needs - the getRTLTextPluginStatus() check is
-	// a second, defensive layer on top of that, not a replacement for it.
-	if (maplibreglModule.getRTLTextPluginStatus() === 'unavailable') {
-		// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names
-		// via glyphs, not baked-in raster text like CARTO's old tiles -
-		// without this plugin maplibre draws each glyph in isolated form and
-		// left-to-right storage order instead of shaping/joining letters and
-		// reordering right-to-left, so RTL labels render as disconnected,
-		// backwards characters. lazy=true: only fetched the first time a
-		// tile actually needs RTL shaping, not on every map load.
-		void maplibreglModule.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
+	// Guarded on document, not just wrapped in a function called from
+	// onMount: <script module> body code runs the moment this module is
+	// first imported, which happens during SvelteKit's SSR/prerender
+	// analysis too (any page that statically imports FleetMap pulls this
+	// in, whether or not FleetMap ever actually renders there). Confirmed
+	// live in a consumer app's own `npm run build`: maplibre-gl's
+	// setRTLTextPlugin calls into code that reads `document`, which
+	// doesn't exist in that Node analysis pass, crashing the build outright
+	// - the same class of environment this file's own worker/RTL setup
+	// needs a real browser for in the first place.
+	if (typeof document !== 'undefined') {
+		maplibreglModule.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
+		// MapLibre's own doc comment on setRTLTextPlugin is explicit: "If the
+		// status is loaded and the plugin is requested again, an error will be
+		// thrown" - this is a once-per-page registration, not a per-map-instance
+		// one. Calling it from the component's own instance script (as this did
+		// before) re-requested it on every single FleetMap mount - every repeat
+		// visit to a page that mounts this component, not just a rare edge case -
+		// confirmed live as the root cause of an intermittent blank map: the
+		// second registration corrupts the first one's still-in-flight (lazy:
+		// true defers the real fetch) worker broadcast, throwing deep inside
+		// MapLibre's own internals ("Cannot read properties of undefined
+		// (reading 'off')" in a control's onRemove, several frames below
+		// anything this app's own code calls directly) and leaving the map
+		// mid-setup. <script module> runs exactly once per page load regardless
+		// of how many times this component itself mounts/unmounts, which is
+		// what this call actually needs - the getRTLTextPluginStatus() check is
+		// a second, defensive layer on top of that, not a replacement for it.
+		if (maplibreglModule.getRTLTextPluginStatus() === 'unavailable') {
+			// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names
+			// via glyphs, not baked-in raster text like CARTO's old tiles -
+			// without this plugin maplibre draws each glyph in isolated form and
+			// left-to-right storage order instead of shaping/joining letters and
+			// reordering right-to-left, so RTL labels render as disconnected,
+			// backwards characters. lazy=true: only fetched the first time a
+			// tile actually needs RTL shaping, not on every map load.
+			void maplibreglModule.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
+		}
 	}
 </script>
 
