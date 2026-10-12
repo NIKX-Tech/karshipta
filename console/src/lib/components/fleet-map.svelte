@@ -1,5 +1,36 @@
 <script module lang="ts">
 	import * as maplibreglModule from 'maplibre-gl';
+	// Both calls below move here together, in their original relative order,
+	// because that order plausibly matters: the RTL plugin's own worker
+	// broadcast may depend on the worker URL already being configured. The
+	// very first draft of this fix moved only setRTLTextPlugin into this
+	// module block, which runs before the instance script below ever does -
+	// that silently reversed the two calls' order (setWorkerUrl used to run
+	// first, every time, in the old single-script version), a real risk
+	// caught by re-checking this fix rather than trusting it, not something
+	// confirmed as the cause of any specific incident. Keeping both calls
+	// together here removes the question entirely instead of leaving it
+	// open.
+	//
+	// maplibre-gl builds its worker URL from a dynamic template string
+	// (`./${t}gl-worker.mjs`, not a static import.meta.url literal), which
+	// Vite's asset analysis can't follow - the worker chunk silently never
+	// gets served (dev, 404 from node_modules/.vite/deps/) or copied (prod
+	// build, 404 from _app/immutable/), in both cases with zero console
+	// error from maplibre itself: every GeoJSON source (trails, zones,
+	// geozones, mission route) just tiles nothing forever, while markers
+	// (DOM, not GL) and the base map (loaded independently) keep working,
+	// making this look like a data or paint bug instead of a missing
+	// worker. A `?url` import fixes serving the worker file itself, but the
+	// worker's own code then imports a second chunk
+	// ("./maplibre-gl-shared.mjs") via a plain relative specifier resolved
+	// against wherever the worker was served from - Vite never sees that
+	// import (it's inside an opaque `?url` asset, not a parsed module), so
+	// that 404s too. scripts/copy-maplibre-worker.mjs (predev/prebuild)
+	// copies both files as-is into static/maplibre-gl, keeping them
+	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
+	// so the worker's own relative import resolves correctly.
+	maplibreglModule.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
 	// MapLibre's own doc comment on setRTLTextPlugin is explicit: "If the
 	// status is loaded and the plugin is requested again, an error will be
 	// thrown" - this is a once-per-page registration, not a per-map-instance
@@ -32,27 +63,6 @@
 	import { untrack } from 'svelte';
 	import * as maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	// maplibre-gl builds its worker URL from a dynamic template string
-	// (`./${t}gl-worker.mjs`, not a static import.meta.url literal), which
-	// Vite's asset analysis can't follow - the worker chunk silently never
-	// gets served (dev, 404 from node_modules/.vite/deps/) or copied (prod
-	// build, 404 from _app/immutable/), in both cases with zero console
-	// error from maplibre itself: every GeoJSON source (trails, zones,
-	// geozones, mission route) just tiles nothing forever, while markers
-	// (DOM, not GL) and the base map (loaded independently) keep working,
-	// making this look like a data or paint bug instead of a missing
-	// worker. A `?url` import fixes serving the worker file itself, but the
-	// worker's own code then imports a second chunk
-	// ("./maplibre-gl-shared.mjs") via a plain relative specifier resolved
-	// against wherever the worker was served from - Vite never sees that
-	// import (it's inside an opaque `?url` asset, not a parsed module), so
-	// that 404s too. scripts/copy-maplibre-worker.mjs (predev/prebuild)
-	// copies both files as-is into static/maplibre-gl, keeping them
-	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
-	// so the worker's own relative import resolves correctly. Safe to call
-	// on every mount (unlike setRTLTextPlugin above) - this just sets a
-	// config string, not a singleton async registration.
-	maplibregl.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
