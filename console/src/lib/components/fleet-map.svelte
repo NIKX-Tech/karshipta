@@ -1,7 +1,17 @@
-<script lang="ts">
-	import { untrack } from 'svelte';
-	import * as maplibregl from 'maplibre-gl';
-	import 'maplibre-gl/dist/maplibre-gl.css';
+<script module lang="ts">
+	import * as maplibreglModule from 'maplibre-gl';
+	// Both calls below move here together, in their original relative order,
+	// because that order plausibly matters: the RTL plugin's own worker
+	// broadcast may depend on the worker URL already being configured. The
+	// very first draft of this fix moved only setRTLTextPlugin into this
+	// module block, which runs before the instance script below ever does -
+	// that silently reversed the two calls' order (setWorkerUrl used to run
+	// first, every time, in the old single-script version), a real risk
+	// caught by re-checking this fix rather than trusting it, not something
+	// confirmed as the cause of any specific incident. Keeping both calls
+	// together here removes the question entirely instead of leaving it
+	// open.
+	//
 	// maplibre-gl builds its worker URL from a dynamic template string
 	// (`./${t}gl-worker.mjs`, not a static import.meta.url literal), which
 	// Vite's asset analysis can't follow - the worker chunk silently never
@@ -20,15 +30,39 @@
 	// copies both files as-is into static/maplibre-gl, keeping them
 	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
 	// so the worker's own relative import resolves correctly.
-	maplibregl.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
-	// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names via
-	// glyphs, not baked-in raster text like CARTO's old tiles - without this
-	// plugin maplibre draws each glyph in isolated form and left-to-right
-	// storage order instead of shaping/joining letters and reordering
-	// right-to-left, so RTL labels render as disconnected, backwards
-	// characters. lazy=true: only fetched the first time a tile actually
-	// needs RTL shaping, not on every map load.
-	void maplibregl.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
+	maplibreglModule.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
+	// MapLibre's own doc comment on setRTLTextPlugin is explicit: "If the
+	// status is loaded and the plugin is requested again, an error will be
+	// thrown" - this is a once-per-page registration, not a per-map-instance
+	// one. Calling it from the component's own instance script (as this did
+	// before) re-requested it on every single FleetMap mount - every repeat
+	// visit to a page that mounts this component, not just a rare edge case -
+	// confirmed live as the root cause of an intermittent blank map: the
+	// second registration corrupts the first one's still-in-flight (lazy:
+	// true defers the real fetch) worker broadcast, throwing deep inside
+	// MapLibre's own internals ("Cannot read properties of undefined
+	// (reading 'off')" in a control's onRemove, several frames below
+	// anything this app's own code calls directly) and leaving the map
+	// mid-setup. <script module> runs exactly once per page load regardless
+	// of how many times this component itself mounts/unmounts, which is
+	// what this call actually needs - the getRTLTextPluginStatus() check is
+	// a second, defensive layer on top of that, not a replacement for it.
+	if (maplibreglModule.getRTLTextPluginStatus() === 'unavailable') {
+		// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names
+		// via glyphs, not baked-in raster text like CARTO's old tiles -
+		// without this plugin maplibre draws each glyph in isolated form and
+		// left-to-right storage order instead of shaping/joining letters and
+		// reordering right-to-left, so RTL labels render as disconnected,
+		// backwards characters. lazy=true: only fetched the first time a
+		// tile actually needs RTL shaping, not on every map load.
+		void maplibreglModule.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
+	}
+</script>
+
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import * as maplibregl from 'maplibre-gl';
+	import 'maplibre-gl/dist/maplibre-gl.css';
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
@@ -453,7 +487,17 @@
 		return {
 			update: tryInsert,
 			destroy() {
-				scaleControl?.onRemove();
+				// Not scaleControl?.onRemove() here too: the main map effect
+				// (see its own cleanup below, paired with the `new
+				// ScaleControl` that creates this instance) already owns that
+				// call. This action's node and that effect are torn down
+				// together on every unmount (the legend panel this is nested
+				// in is never conditionally rendered), so calling onRemove()
+				// from both was a real, confirmed-live double-teardown bug:
+				// MapLibre's own onRemove() clears the control's internal
+				// _map reference, so the second call crashed inside it
+				// ("Cannot read properties of undefined (reading 'off')").
+				// Only this action's own local bookkeeping belongs here.
 				scaleBarEl = undefined;
 				scaleControlReady = false;
 			}
@@ -2049,7 +2093,9 @@
 			// remove it explicitly first, and reset scaleBarEl so a
 			// remounted instance re-inserts a fresh one rather than thinking
 			// it already has (which would otherwise reference a torn-down
-			// node forever after).
+			// node forever after). This effect is the sole owner of this
+			// call - see scaleBarSlot's own destroy() above for why it no
+			// longer also calls onRemove() itself.
 			scaleControl?.onRemove();
 			scaleControl = undefined;
 			scaleBarEl = undefined;
