@@ -487,7 +487,17 @@
 		return {
 			update: tryInsert,
 			destroy() {
-				scaleControl?.onRemove();
+				// Not scaleControl?.onRemove() here too: the main map effect
+				// (see its own cleanup below, paired with the `new
+				// ScaleControl` that creates this instance) already owns that
+				// call. This action's node and that effect are torn down
+				// together on every unmount (the legend panel this is nested
+				// in is never conditionally rendered), so calling onRemove()
+				// from both was a real, confirmed-live double-teardown bug:
+				// MapLibre's own onRemove() clears the control's internal
+				// _map reference, so the second call crashed inside it
+				// ("Cannot read properties of undefined (reading 'off')").
+				// Only this action's own local bookkeeping belongs here.
 				scaleBarEl = undefined;
 				scaleControlReady = false;
 			}
@@ -2083,7 +2093,9 @@
 			// remove it explicitly first, and reset scaleBarEl so a
 			// remounted instance re-inserts a fresh one rather than thinking
 			// it already has (which would otherwise reference a torn-down
-			// node forever after).
+			// node forever after). This effect is the sole owner of this
+			// call - see scaleBarSlot's own destroy() above for why it no
+			// longer also calls onRemove() itself.
 			scaleControl?.onRemove();
 			scaleControl = undefined;
 			scaleBarEl = undefined;
