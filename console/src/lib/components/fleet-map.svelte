@@ -2069,22 +2069,35 @@
 				source: MEASURE_SOURCE,
 				paint: { 'line-color': '#e8edf2', 'line-width': 2, 'line-dasharray': [3, 2] }
 			});
-			// MapLibre's own compact-attribution logic (verified directly in its
-			// bundled source, not guessed) initializes already expanded: its
-			// _updateCompact() adds both the "open" attribute AND the
-			// maplibregl-compact-show class on construction. The "open"
-			// attribute is a red herring here - _toggleAttribution's own
-			// open/close branches both set it unconditionally; the class is
-			// what CSS actually keys the visible/hidden state off (see
-			// .maplibregl-compact-show .maplibregl-ctrl-attrib-inner in
-			// maplibre-gl.css). Removing just that class, matching exactly what
-			// _toggleAttribution's own "close" branch does, collapses it and
-			// leaves the control's click handler free to reopen it normally -
-			// removing the "open" attribute instead (an earlier, wrong attempt)
-			// looked like it worked on first paint but didn't survive a click.
-			container
-				.querySelector('.maplibregl-ctrl-attrib')
-				?.classList.remove('maplibregl-compact-show');
+			// MapLibre's own compact-attribution logic (verified directly in
+			// its bundled source, not guessed) ends up expanded by default. A
+			// one-time removal of maplibregl-compact-show here (matching what
+			// _toggleAttribution's own "close" branch does) is not enough on
+			// its own - confirmed live: the control starts as
+			// maplibregl-attrib-empty (no attribution text loaded yet), so
+			// _updateCompact()'s own guard skips adding compact-show at this
+			// point; once real attribution content arrives a moment later,
+			// AttributionControl's own _updateData handler (bound to
+			// 'styledata'/'sourcedata'/'terrain') clears attrib-empty via
+			// _updateAttributions() and _updateCompact() adds compact-show
+			// fresh, after this code already ran.
+			//
+			// Re-removing it on those exact same three events, registered
+			// after the control's own listeners (addControl ran at map
+			// construction, before this 'load' handler), fires after them in
+			// the same event and wins - a plain classList.remove() per event
+			// rather than a MutationObserver watching this node's class
+			// attribute continuously, which measured live as expensive
+			// enough on a busy telemetry map to stall the render thread
+			// (sourcedata alone can fire many times a second).
+			const collapseAttribution = () =>
+				container
+					.querySelector('.maplibregl-ctrl-attrib')
+					?.classList.remove('maplibregl-compact-show');
+			collapseAttribution();
+			created.on('styledata', collapseAttribution);
+			created.on('sourcedata', collapseAttribution);
+			created.on('terrain', collapseAttribution);
 			mapLoaded = true;
 			requestThirdPartyLayers();
 		});
