@@ -4,8 +4,6 @@
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { geozoneStore } from '$lib/geozones/geozone-store.svelte';
-	import { obstacleStore } from '$lib/obstacles/obstacle-store.svelte';
-	import { airportStore } from '$lib/airports/airport-store.svelte';
 	import { wildfireStore } from '$lib/wildfires/wildfire-store.svelte';
 	import { leftRailUi } from '$lib/left-rail-ui.svelte';
 	import { locateOrFallback } from '$lib/geolocation';
@@ -102,8 +100,12 @@
 		fleet.readonly = env.PUBLIC_READONLY === 'true';
 		fleetLabel = env.PUBLIC_FLEET_LABEL || DEFAULT_FLEET_LABEL;
 		geozoneStore.configure(env.PUBLIC_OPENAIP_KEY);
-		obstacleStore.configure(env.PUBLIC_OPENAIP_KEY);
-		airportStore.configure(env.PUBLIC_OPENAIP_KEY);
+		// obstacleStore/airportStore need no configure() any more - they're
+		// proxied through a consuming app's own backend now (see
+		// obstacles/proxiedSource.ts). This reference app is adapter-static
+		// with no backend, so /api/obstacles and /api/airports simply 404 and
+		// both layers degrade gracefully, same as the Aircraft layer already
+		// does here.
 		wildfireStore.configure(env.PUBLIC_FIRMS_KEY);
 		const gatewayUrl = env.PUBLIC_GATEWAY_WS_URL;
 		if (gatewayUrl) fleet.connectGateway(gatewayUrl);

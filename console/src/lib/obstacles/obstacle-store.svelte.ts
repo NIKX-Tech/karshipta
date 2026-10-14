@@ -1,11 +1,12 @@
-import type { Obstacle, ObstacleCategory, ObstacleSource, ViewportBounds } from './types';
-import { OpenAipObstacleSource } from './openaip';
+import type { Obstacle, ObstacleCategory, ViewportBounds } from './types';
+import { ObstacleProxyAccessError, ProxiedObstacleSource } from './proxiedSource';
 import { openAipRequestGate } from '../openaip/request-gate';
 import { tileOpenAipBounds } from '../openaip/tile-bounds';
 
-// Same tuning as geozones/geozone-store.svelte.ts - both share the same
-// rate-limited OpenAIP key via openAipRequestGate, see that module's own
-// header comment for why a per-layer debounce alone isn't enough.
+// Same tuning as geozones/geozone-store.svelte.ts - both ultimately draw
+// against the same rate-limited OpenAIP account, coordinated via
+// openAipRequestGate; see that module's own header comment for why a
+// per-layer debounce alone isn't enough.
 const FETCH_DEBOUNCE_MS = 1500;
 const FAILURE_COOLDOWN_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60_000;
@@ -14,11 +15,11 @@ const CACHE_GRID_DEG = 1;
 // This layer defaults on (see fleet-map.svelte), so unlike the OpenAIP
 // layers that stay opt-in, it needs its own zoom thinning - a zoomed-out
 // city view could otherwise return the full RESULT_LIMIT (200, see
-// openaip.ts) with nothing filtering it. Same pattern as city-store.svelte.ts's
-// population thinning: taller, more-hazardous types (towers, wind turbines)
-// show first, the catch-all 'other' bucket only once zoomed in. 'mast'
-// isn't currently produced by openaip.ts's own categoryFor, included here
-// for type completeness only.
+// openaipProxy.ts) with nothing filtering it. Same pattern as
+// city-store.svelte.ts's population thinning: taller, more-hazardous types
+// (towers, wind turbines) show first, the catch-all 'other' bucket only
+// once zoomed in. 'mast' isn't currently produced by openaipProxy.ts's own
+// categoryFor, included here for type completeness only.
 const OBSTACLE_MIN_ZOOM: Record<ObstacleCategory, number> = {
 	'wind-turbine': 0,
 	tower: 0,
@@ -41,19 +42,17 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 
 /**
  * Owns the currently loaded obstacles for whatever the map viewport last
- * was. Structurally the same as geozone-store.svelte.ts (inactive until
- * configure() has a key, visible gates every fetch path, requests route
- * through the shared openAipRequestGate) - kept as its own store rather
- * than generalized into one shared "OpenAIP point layer" base, matching
- * this codebase's existing preference for small independent stores over a
- * shared abstraction (see geozones/types.ts's own comment on GeozoneSource
- * being swappable without touching the map).
+ * was. No API key/configure() the way geozone-store etc. have - the proxy
+ * route behind this needs no key client-side (see proxiedSource.ts).
+ * Still routed through the shared openAipRequestGate: the key moved
+ * server-side, but bursts of tile requests still benefit from client-side
+ * pacing ahead of whatever the server enforces.
  */
 class ObstacleStore {
 	obstacles = $state<Obstacle[]>([]);
 	loadError = $state<string | undefined>(undefined);
 
-	private source = $state<ObstacleSource | undefined>(undefined);
+	private source = new ProxiedObstacleSource();
 	private visible = false;
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastRequestId = 0;
@@ -61,20 +60,12 @@ class ObstacleStore {
 	private lastZoom = 0;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
 	private cache = new Map<string, CacheEntry>();
-
-	get active(): boolean {
-		return this.source !== undefined;
-	}
-
-	configure(apiKey: string | undefined): void {
-		this.source = apiKey ? new OpenAipObstacleSource(apiKey) : undefined;
-		if (!this.source) {
-			this.obstacles = [];
-			this.loadError = undefined;
-			this.cache.clear();
-			this.stopTimers();
-		}
-	}
+	/** Set once the proxy route has outright rejected a request (see
+	 * ObstacleProxyAccessError) - short-circuits further retries, since a
+	 * source that just said "no" isn't going to start working again on its
+	 * own between now and the next tick. Cleared by toggling the layer off
+	 * and back on (see setVisible), the deliberate way to try again. */
+	private permanentlyFailed = false;
 
 	setVisible(visible: boolean): void {
 		this.visible = visible;
@@ -83,16 +74,16 @@ class ObstacleStore {
 			this.loadError = undefined;
 			return;
 		}
-		if (this.source && this.lastBounds) {
+		this.permanentlyFailed = false;
+		if (this.lastBounds) {
 			void this.fetchViewport(this.lastBounds, this.lastZoom);
 		}
 	}
 
 	requestViewport(bounds: ViewportBounds, zoom: number): void {
-		if (!this.source) return;
 		this.lastBounds = bounds;
 		this.lastZoom = zoom;
-		if (!this.visible) return;
+		if (!this.visible || this.permanentlyFailed) return;
 		if (this.debounceTimer) clearTimeout(this.debounceTimer);
 		this.debounceTimer = setTimeout(() => void this.fetchViewport(bounds, zoom), FETCH_DEBOUNCE_MS);
 	}
@@ -106,7 +97,7 @@ class ObstacleStore {
 
 	private async fetchViewport(bounds: ViewportBounds, zoom: number): Promise<void> {
 		const source = this.source;
-		if (!source || !this.visible) return;
+		if (!this.visible || this.permanentlyFailed) return;
 
 		const cacheKey = cacheKeyFor(bounds);
 		const cached = this.cache.get(cacheKey);
@@ -141,6 +132,15 @@ class ObstacleStore {
 			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
 			openAipRequestGate.noteFailure();
 			console.error('obstacles: failed to load viewport', tileError);
+			// A permanent rejection (e.g. the server has no OPENAIP_KEY
+			// configured), not a transient rate limit - retrying it on a
+			// timer forever would just spam the console for no chance of
+			// success. Toggling the layer off and back on (setVisible) is
+			// still a valid, deliberate way to try again.
+			if (tileError instanceof ObstacleProxyAccessError) {
+				this.permanentlyFailed = true;
+				return;
+			}
 			if (this.retryTimer) clearTimeout(this.retryTimer);
 			this.retryTimer = setTimeout(() => {
 				if (this.lastBounds) void this.fetchViewport(this.lastBounds, this.lastZoom);

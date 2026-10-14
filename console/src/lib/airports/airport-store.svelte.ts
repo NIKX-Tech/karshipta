@@ -1,11 +1,11 @@
-import type { Airport, AirportSource, ViewportBounds } from './types';
-import { OpenAipAirportSource } from './openaip';
+import type { Airport, ViewportBounds } from './types';
+import { AirportProxyAccessError, ProxiedAirportSource } from './proxiedSource';
 import { openAipRequestGate } from '../openaip/request-gate';
 import { tileOpenAipBounds } from '../openaip/tile-bounds';
 
 // Same tuning as geozones/geozone-store.svelte.ts and
-// obstacles/obstacle-store.svelte.ts - all three share the same
-// rate-limited OpenAIP key via openAipRequestGate.
+// obstacles/obstacle-store.svelte.ts - all three ultimately draw against
+// the same rate-limited OpenAIP account, coordinated via openAipRequestGate.
 const FETCH_DEBOUNCE_MS = 1500;
 const FAILURE_COOLDOWN_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60_000;
@@ -22,35 +22,29 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 
 /**
  * Owns the currently loaded airports for whatever the map viewport last
- * was. Structurally the same as obstacle-store.svelte.ts - see that
- * file's own comment on why this stays a separate store rather than a
- * shared generic base.
+ * was. No API key/configure() the way geozone-store has - the proxy route
+ * behind this needs no key client-side (see proxiedSource.ts). Structurally
+ * the same as obstacle-store.svelte.ts otherwise - see that file's own
+ * comment on why this stays a separate store rather than a shared generic
+ * base.
  */
 class AirportStore {
 	airports = $state<Airport[]>([]);
 	loadError = $state<string | undefined>(undefined);
 
-	private source = $state<AirportSource | undefined>(undefined);
+	private source = new ProxiedAirportSource();
 	private visible = false;
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastRequestId = 0;
 	private lastBounds: ViewportBounds | undefined;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
 	private cache = new Map<string, CacheEntry>();
-
-	get active(): boolean {
-		return this.source !== undefined;
-	}
-
-	configure(apiKey: string | undefined): void {
-		this.source = apiKey ? new OpenAipAirportSource(apiKey) : undefined;
-		if (!this.source) {
-			this.airports = [];
-			this.loadError = undefined;
-			this.cache.clear();
-			this.stopTimers();
-		}
-	}
+	/** Set once the proxy route has outright rejected a request (see
+	 * AirportProxyAccessError) - short-circuits further retries, since a
+	 * source that just said "no" isn't going to start working again on its
+	 * own between now and the next tick. Cleared by toggling the layer off
+	 * and back on (see setVisible), the deliberate way to try again. */
+	private permanentlyFailed = false;
 
 	setVisible(visible: boolean): void {
 		this.visible = visible;
@@ -59,15 +53,15 @@ class AirportStore {
 			this.loadError = undefined;
 			return;
 		}
-		if (this.source && this.lastBounds) {
+		this.permanentlyFailed = false;
+		if (this.lastBounds) {
 			void this.fetchViewport(this.lastBounds);
 		}
 	}
 
 	requestViewport(bounds: ViewportBounds): void {
-		if (!this.source) return;
 		this.lastBounds = bounds;
-		if (!this.visible) return;
+		if (!this.visible || this.permanentlyFailed) return;
 		if (this.debounceTimer) clearTimeout(this.debounceTimer);
 		this.debounceTimer = setTimeout(() => void this.fetchViewport(bounds), FETCH_DEBOUNCE_MS);
 	}
@@ -81,7 +75,7 @@ class AirportStore {
 
 	private async fetchViewport(bounds: ViewportBounds): Promise<void> {
 		const source = this.source;
-		if (!source || !this.visible) return;
+		if (!this.visible || this.permanentlyFailed) return;
 
 		const cacheKey = cacheKeyFor(bounds);
 		const cached = this.cache.get(cacheKey);
@@ -116,6 +110,15 @@ class AirportStore {
 			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
 			openAipRequestGate.noteFailure();
 			console.error('airports: failed to load viewport', tileError);
+			// A permanent rejection (e.g. the server has no OPENAIP_KEY
+			// configured), not a transient rate limit - retrying it on a
+			// timer forever would just spam the console for no chance of
+			// success. Toggling the layer off and back on (setVisible) is
+			// still a valid, deliberate way to try again.
+			if (tileError instanceof AirportProxyAccessError) {
+				this.permanentlyFailed = true;
+				return;
+			}
 			if (this.retryTimer) clearTimeout(this.retryTimer);
 			this.retryTimer = setTimeout(() => {
 				if (this.lastBounds) void this.fetchViewport(this.lastBounds);

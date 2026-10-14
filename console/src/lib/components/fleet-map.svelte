@@ -1,7 +1,17 @@
-<script lang="ts">
-	import { untrack } from 'svelte';
-	import * as maplibregl from 'maplibre-gl';
-	import 'maplibre-gl/dist/maplibre-gl.css';
+<script module lang="ts">
+	import * as maplibreglModule from 'maplibre-gl';
+	// Both calls below move here together, in their original relative order,
+	// because that order plausibly matters: the RTL plugin's own worker
+	// broadcast may depend on the worker URL already being configured. The
+	// very first draft of this fix moved only setRTLTextPlugin into this
+	// module block, which runs before the instance script below ever does -
+	// that silently reversed the two calls' order (setWorkerUrl used to run
+	// first, every time, in the old single-script version), a real risk
+	// caught by re-checking this fix rather than trusting it, not something
+	// confirmed as the cause of any specific incident. Keeping both calls
+	// together here removes the question entirely instead of leaving it
+	// open.
+	//
 	// maplibre-gl builds its worker URL from a dynamic template string
 	// (`./${t}gl-worker.mjs`, not a static import.meta.url literal), which
 	// Vite's asset analysis can't follow - the worker chunk silently never
@@ -20,7 +30,51 @@
 	// copies both files as-is into static/maplibre-gl, keeping them
 	// adjacent at a stable path exactly like node_modules/maplibre-gl/dist,
 	// so the worker's own relative import resolves correctly.
-	maplibregl.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
+	// Guarded on document, not just wrapped in a function called from
+	// onMount: <script module> body code runs the moment this module is
+	// first imported, which happens during SvelteKit's SSR/prerender
+	// analysis too (any page that statically imports FleetMap pulls this
+	// in, whether or not FleetMap ever actually renders there). Confirmed
+	// live in a consumer app's own `npm run build`: maplibre-gl's
+	// setRTLTextPlugin calls into code that reads `document`, which
+	// doesn't exist in that Node analysis pass, crashing the build outright
+	// - the same class of environment this file's own worker/RTL setup
+	// needs a real browser for in the first place.
+	if (typeof document !== 'undefined') {
+		maplibreglModule.setWorkerUrl('/maplibre-gl/maplibre-gl-worker.mjs');
+		// MapLibre's own doc comment on setRTLTextPlugin is explicit: "If the
+		// status is loaded and the plugin is requested again, an error will be
+		// thrown" - this is a once-per-page registration, not a per-map-instance
+		// one. Calling it from the component's own instance script (as this did
+		// before) re-requested it on every single FleetMap mount - every repeat
+		// visit to a page that mounts this component, not just a rare edge case -
+		// confirmed live as the root cause of an intermittent blank map: the
+		// second registration corrupts the first one's still-in-flight (lazy:
+		// true defers the real fetch) worker broadcast, throwing deep inside
+		// MapLibre's own internals ("Cannot read properties of undefined
+		// (reading 'off')" in a control's onRemove, several frames below
+		// anything this app's own code calls directly) and leaving the map
+		// mid-setup. <script module> runs exactly once per page load regardless
+		// of how many times this component itself mounts/unmounts, which is
+		// what this call actually needs - the getRTLTextPluginStatus() check is
+		// a second, defensive layer on top of that, not a replacement for it.
+		if (maplibreglModule.getRTLTextPluginStatus() === 'unavailable') {
+			// OpenFreeMap's vector styles label Arabic/Hebrew/etc. place names
+			// via glyphs, not baked-in raster text like CARTO's old tiles -
+			// without this plugin maplibre draws each glyph in isolated form and
+			// left-to-right storage order instead of shaping/joining letters and
+			// reordering right-to-left, so RTL labels render as disconnected,
+			// backwards characters. lazy=true: only fetched the first time a
+			// tile actually needs RTL shaping, not on every map load.
+			void maplibreglModule.setRTLTextPlugin('/maplibre-gl/mapbox-gl-rtl-text.js', true);
+		}
+	}
+</script>
+
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import * as maplibregl from 'maplibre-gl';
+	import 'maplibre-gl/dist/maplibre-gl.css';
 	import Supercluster from 'supercluster';
 	import { WardOrigin } from '$lib/gen/karshipta/v1/common';
 	import { ZoneType } from '$lib/gen/karshipta/v1/fleet';
@@ -44,6 +98,10 @@
 	import WeatherIcon from '$lib/components/weather-icon.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
+	import {
+		loadBasemapLayers,
+		type VectorBasemap
+	} from '$lib/assets/basemap-styles/load-basemap-layers';
 	import defaultStyleLightPreview from '$lib/assets/map-style-previews/default-light.jpg';
 	import defaultStyleDarkPreview from '$lib/assets/map-style-previews/default-dark.jpg';
 	import roadmapStylePreview from '$lib/assets/map-style-previews/roadmap.jpg';
@@ -67,6 +125,15 @@
 		centerLat: number;
 		/** read once, before this component mounts - changing it afterward does not move the camera */
 		centerLon: number;
+		/**
+		 * Read once, same as centerLat/centerLon. Defaults to INITIAL_ZOOM
+		 * (city-scale) when omitted, matching every existing caller's
+		 * current behavior unchanged. A consuming app that resolves its own
+		 * fallback center server-side (e.g. a country-scale view for a
+		 * not-yet-located guest) needs a wider starting zoom than
+		 * INITIAL_ZOOM to actually show that scale.
+		 */
+		initialZoom?: number;
 		/**
 		 * Fires on every map click alongside whatever the map already does
 		 * with it (goto targeting, waypoint placement) - a generic escape
@@ -98,9 +165,28 @@
 		 * OSS console has no such notion and simply never passes this.
 		 */
 		ownerFor?: (wardId: string) => { username: string; photoUrl: string | null } | undefined;
+		/**
+		 * Fires after the camera settles from a pan, zoom, or flyTo (bound to
+		 * moveend, not move - the latter fires every animation frame, far too
+		 * often for a consuming app that wants to persist the result, e.g.
+		 * remembering an operator's last view across a page reload). Never
+		 * fires for the initial camera placement itself, only for movement
+		 * after that - centerLat/centerLon/initialZoom already cover the
+		 * starting point.
+		 */
+		onMapMove?: (view: { lat: number; lon: number; zoom: number }) => void;
 	}
 
-	const { centerLat, centerLon, onMapClick, crosshair, placementPoint, ownerFor }: Props = $props();
+	const {
+		centerLat,
+		centerLon,
+		initialZoom,
+		onMapClick,
+		crosshair,
+		placementPoint,
+		ownerFor,
+		onMapMove
+	}: Props = $props();
 
 	// City-scale, not street-block: the first thing a viewer needs is "where
 	// in the world is this", not individual streets. z15 (the old value)
@@ -123,23 +209,33 @@
 	// working zoom (INITIAL_ZOOM=12), so this never affects normal use.
 	const MIN_GEOZONE_ZOOM = 7;
 
-	// All free, no API key: CARTO for dark/light - the same pair the rest of
-	// the UI's own theme.css tokens use, so the map follows the app-wide
-	// theme toggle (themeStore) rather than exposing a second, independent
-	// light/dark choice of its own; a light map under a dark app chrome (or
-	// the reverse) was a real, reported problem, not a style preference.
+	// CARTO's free legacy tile CDN (basemaps.cartocdn.com) started baking
+	// an "API KEY REQUIRED" watermark into every tile image while still
+	// returning HTTP 200 - confirmed live, and not caught by any error
+	// handling since nothing about the response looks like a failure.
+	// OpenFreeMap (openfreemap.org) is the free/no-key replacement, but it
+	// serves vector styles, not raster PNG tiles like every other basemap
+	// here - hence the different shape below (a vector source + a vendored
+	// layer set per style, added/removed the same additive way every other
+	// overlay in this file works, rather than raster tile URLs swapped via
+	// setTiles()). See src/lib/assets/basemap-styles/README.md for exactly
+	// what's vendored and why.
+	const OPENFREEMAP_VECTOR_SOURCE = 'openmaptiles';
+	const OPENFREEMAP_TILES_URL = 'https://tiles.openfreemap.org/planet';
+	const OPENFREEMAP_SPRITE_URL = 'https://tiles.openfreemap.org/sprites/ofm_f384/ofm';
+	const OPENFREEMAP_GLYPHS_URL = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf';
+	// 'default' follows the app theme (dark/light, same pairing CARTO used
+	// to provide) so the map follows the app-wide theme toggle (themeStore)
+	// rather than exposing a second, independent light/dark choice of its
+	// own; a light map under a dark app chrome (or the reverse) was a real,
+	// reported problem, not a style preference. 'roadmap' (OpenFreeMap's
+	// Liberty style) is offered only alongside the light theme (see
+	// mapStyle's own comment below), since its light background would
+	// reintroduce that same mismatch.
 	// Esri World Imagery for satellite - the standard no-key choice for
 	// this, layered on top as an orthogonal on/off (real photography has no
 	// light/dark variant to match the theme against). Esri's tile scheme is
 	// z/y/x, not the usual z/x/y - easy to get backwards.
-	const DARK_TILES = ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'];
-	const LIGHT_TILES = ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'];
-	// CARTO Voyager: a colorful roadmap style, free/no-key like dark_all and
-	// light_all above (same CDN, same terms) - offered only alongside the
-	// light theme (see mapStyle's own comment), since its light background
-	// would reintroduce the exact light-map-under-dark-chrome mismatch
-	// DARK_TILES/LIGHT_TILES already exist to avoid.
-	const ROADMAP_TILES = ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'];
 	// OpenTopoMap: free/no-key elevation-shaded terrain tiles, community-run
 	// (not CARTO/Esri) - three round-robin subdomains, matching their own
 	// published usage guidance for spreading load. Its shading has no real
@@ -174,13 +270,17 @@
 		'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
 	];
 	// One combined attribution covering every basemap this control can
-	// switch to, set once at source creation: MapLibre's RasterTileSource
-	// has no setAttribution() to go with setTiles(), and rewriting it on
-	// every switch isn't worth the complexity this saves - showing all
-	// credits regardless of which is currently active is a common,
-	// acceptable tradeoff other map apps make too.
+	// switch to, set once at source creation on the raster 'basemap' source
+	// only - MapLibre's attribution control aggregates every source's
+	// attribution regardless of that source's current layer visibility, so
+	// this stays correct even while a vector style (which has no
+	// attribution field of its own; deliberately not set on the
+	// openmaptiles source, or OpenFreeMap's credit would show twice) is the
+	// one actually visible. Showing all credits regardless of which is
+	// currently active is a common, acceptable tradeoff other map apps
+	// make too - not worth rewriting on every switch.
 	const BASEMAP_ATTRIBUTION =
-		'&copy; OpenStreetMap contributors &copy; CARTO &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
+		'&copy; OpenStreetMap contributors OpenFreeMap &copy; OpenMapTiles &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
 
 	// 'default' follows the app theme (DARK_TILES/LIGHT_TILES, unchanged
 	// behavior); 'roadmap' is light-only (see ROADMAP_TILES's own comment) -
@@ -236,18 +336,25 @@
 	$effect(() => {
 		if (mapStyle === 'roadmap' && themeStore.current !== 'light') setMapStyle('default');
 	});
-	const basemapTiles = $derived(
+	// undefined for 'default'/'roadmap': those are vector-backed now (see
+	// activeVectorStyle below), not a raster tile source at all.
+	const activeRasterTiles = $derived(
 		mapStyle === 'satellite'
 			? SATELLITE_TILES
 			: mapStyle === 'terrain'
 				? TERRAIN_TILES
 				: mapStyle === 'bathymetry'
 					? BATHYMETRY_TILES
-					: mapStyle === 'roadmap'
-						? ROADMAP_TILES
-						: themeStore.current === 'light'
-							? LIGHT_TILES
-							: DARK_TILES
+					: undefined
+	);
+	const activeVectorStyle = $derived<VectorBasemap | undefined>(
+		mapStyle === 'roadmap'
+			? 'roadmap'
+			: mapStyle === 'default'
+				? themeStore.current === 'light'
+					? 'light'
+					: 'dark'
+				: undefined
 	);
 
 	// Off by default: an operator who configures PUBLIC_OPENAIP_KEY opts
@@ -392,7 +499,17 @@
 		return {
 			update: tryInsert,
 			destroy() {
-				scaleControl?.onRemove();
+				// Not scaleControl?.onRemove() here too: the main map effect
+				// (see its own cleanup below, paired with the `new
+				// ScaleControl` that creates this instance) already owns that
+				// call. This action's node and that effect are torn down
+				// together on every unmount (the legend panel this is nested
+				// in is never conditionally rendered), so calling onRemove()
+				// from both was a real, confirmed-live double-teardown bug:
+				// MapLibre's own onRemove() clears the control's internal
+				// _map reference, so the second call crashed inside it
+				// ("Cannot read properties of undefined (reading 'off')").
+				// Only this action's own local bookkeeping belongs here.
 				scaleBarEl = undefined;
 				scaleControlReady = false;
 			}
@@ -401,8 +518,8 @@
 	const showWardsRow = $derived(fleet.wardIds.length > 0);
 	const showZoneRow = $derived(zoneStore.zoneIds.length > 0 && showZones);
 	const showGeozoneRow = $derived(geozoneStore.active && showGeozones);
-	const showObstacleRow = $derived(obstacleStore.active && showObstacles);
-	const showAirportRow = $derived(airportStore.active && showAirports);
+	const showObstacleRow = $derived(showObstacles);
+	const showAirportRow = $derived(showAirports);
 	const showCityRow = $derived(showCities);
 	const showAircraftRow = $derived(showAircraft);
 	const showEarthquakeRow = $derived(showEarthquakes);
@@ -1183,7 +1300,7 @@
 	// camera state; arrows compensate for bearing, marker elevation for pitch/zoom
 	let bearingDeg = $state(0);
 	let pitchDeg = $state(0);
-	let zoomLevel = $state(INITIAL_ZOOM);
+	let zoomLevel = $state(untrack(() => initialZoom ?? INITIAL_ZOOM));
 
 	function markerElement(wardId: string): Omit<MarkerHandle, 'marker'> & {
 		element: HTMLElement;
@@ -1296,6 +1413,7 @@
 	): { element: HTMLElement; body: HTMLElement; stem: HTMLElement; icon: SVGSVGElement } {
 		const element = document.createElement('div');
 		element.className = 'relative h-0 w-0';
+		element.setAttribute('role', 'img');
 		element.setAttribute('aria-label', `Aircraft ${icao24}`);
 		const markup = aircraftIconMarkup(shape);
 		element.innerHTML = `
@@ -1440,18 +1558,25 @@
 
 	$effect(() => {
 		// untrack: this effect must run exactly once, on mount, never again.
-		// centerLat/centerLon/basemapTiles are only needed to seed the initial
-		// style - reading them normally would make Svelte treat every later
-		// basemap/theme change as a reason to tear the whole map down and
-		// rebuild it from these original values (losing the operator's pan/zoom
-		// and snapping back to whatever centerLat/centerLon were at mount,
-		// e.g. always Zurich for a caller passing FAKE_FLEET_CENTER). The
-		// tile-swap effect further down is the sole thing that should react to
-		// basemapTiles changing.
-		const { lat, lon, tiles } = untrack(() => ({
+		// centerLat/centerLon/the initial basemap choice are only needed to
+		// seed the initial style - reading them normally would make Svelte
+		// treat every later basemap/theme change as a reason to tear the whole
+		// map down and rebuild it from these original values (losing the
+		// operator's pan/zoom and snapping back to whatever centerLat/centerLon
+		// were at mount, e.g. always Zurich for a caller passing
+		// FAKE_FLEET_CENTER). The tile-swap effect further down is the sole
+		// thing that should react to activeRasterTiles/activeVectorStyle
+		// changing.
+		const { lat, lon, zoom, tiles, rasterVisible } = untrack(() => ({
 			lat: centerLat,
 			lon: centerLon,
-			tiles: basemapTiles
+			zoom: initialZoom ?? INITIAL_ZOOM,
+			// TERRAIN_TILES is an arbitrary, harmless placeholder when the
+			// restored mapStyle is actually a vector style - rasterVisible
+			// below keeps this layer hidden in that case, and the tile-swap
+			// effect corrects `tiles` for real on its very first run regardless.
+			tiles: activeRasterTiles ?? TERRAIN_TILES,
+			rasterVisible: activeRasterTiles !== undefined
 		}));
 		// a map init failure (e.g. no WebGL) must not take the rest of the
 		// console down; ward cards keep working without the map
@@ -1460,7 +1585,7 @@
 			created = new maplibregl.Map({
 				container,
 				center: [lon, lat],
-				zoom: INITIAL_ZOOM,
+				zoom,
 				attributionControl: { compact: true },
 				style: {
 					version: 8,
@@ -1472,7 +1597,17 @@
 							attribution: BASEMAP_ATTRIBUTION
 						}
 					},
-					layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }]
+					layers: [
+						{
+							id: 'basemap',
+							type: 'raster',
+							source: 'basemap',
+							// Hidden at mount when the restored mapStyle is actually a
+							// vector style - avoids a flash of the placeholder
+							// TERRAIN_TILES fallback before the vector layers land.
+							layout: { visibility: rasterVisible ? 'visible' : 'none' }
+						}
+					]
 				}
 			});
 		} catch (error) {
@@ -1536,6 +1671,10 @@
 			bearingDeg = created.getBearing();
 			pitchDeg = created.getPitch();
 			zoomLevel = created.getZoom();
+		});
+		created.on('moveend', () => {
+			const center = created.getCenter();
+			onMapMove?.({ lat: center.lat, lon: center.lng, zoom: created.getZoom() });
 		});
 		// Safe to call unconditionally on every moveend: each store's own
 		// requestViewport() no-ops while inactive (no key configured) or not
@@ -1602,6 +1741,22 @@
 		};
 		created.on('moveend', requestThirdPartyLayers);
 		created.on('load', () => {
+			// OpenFreeMap's vector basemap (see loadBasemapLayers's own
+			// comment on why this is additive rather than map.setStyle()).
+			// Added once, unconditionally: all three vendored variants
+			// (dark/light/roadmap) share this one source and these same
+			// sprite/glyphs URLs, and the tile-swap effect below is what
+			// actually adds/removes each variant's own layers on top of it.
+			// sprite/glyphs are whole-style properties with no per-source
+			// equivalent - setSprite()/setGlyphs() are the additive runtime
+			// setters for them, the same reason setTiles() exists for a raster
+			// source instead of a full style replace.
+			created.addSource(OPENFREEMAP_VECTOR_SOURCE, {
+				type: 'vector',
+				url: OPENFREEMAP_TILES_URL
+			});
+			created.setSprite(OPENFREEMAP_SPRITE_URL);
+			created.setGlyphs(OPENFREEMAP_GLYPHS_URL);
 			// right above the raw imagery, below every operational overlay
 			// (geozones, trails, route, measure) added below - place names must
 			// never be the thing blocking a no-fly zone or a flight path.
@@ -1914,22 +2069,35 @@
 				source: MEASURE_SOURCE,
 				paint: { 'line-color': '#e8edf2', 'line-width': 2, 'line-dasharray': [3, 2] }
 			});
-			// MapLibre's own compact-attribution logic (verified directly in its
-			// bundled source, not guessed) initializes already expanded: its
-			// _updateCompact() adds both the "open" attribute AND the
-			// maplibregl-compact-show class on construction. The "open"
-			// attribute is a red herring here - _toggleAttribution's own
-			// open/close branches both set it unconditionally; the class is
-			// what CSS actually keys the visible/hidden state off (see
-			// .maplibregl-compact-show .maplibregl-ctrl-attrib-inner in
-			// maplibre-gl.css). Removing just that class, matching exactly what
-			// _toggleAttribution's own "close" branch does, collapses it and
-			// leaves the control's click handler free to reopen it normally -
-			// removing the "open" attribute instead (an earlier, wrong attempt)
-			// looked like it worked on first paint but didn't survive a click.
-			container
-				.querySelector('.maplibregl-ctrl-attrib')
-				?.classList.remove('maplibregl-compact-show');
+			// MapLibre's own compact-attribution logic (verified directly in
+			// its bundled source, not guessed) ends up expanded by default. A
+			// one-time removal of maplibregl-compact-show here (matching what
+			// _toggleAttribution's own "close" branch does) is not enough on
+			// its own - confirmed live: the control starts as
+			// maplibregl-attrib-empty (no attribution text loaded yet), so
+			// _updateCompact()'s own guard skips adding compact-show at this
+			// point; once real attribution content arrives a moment later,
+			// AttributionControl's own _updateData handler (bound to
+			// 'styledata'/'sourcedata'/'terrain') clears attrib-empty via
+			// _updateAttributions() and _updateCompact() adds compact-show
+			// fresh, after this code already ran.
+			//
+			// Re-removing it on those exact same three events, registered
+			// after the control's own listeners (addControl ran at map
+			// construction, before this 'load' handler), fires after them in
+			// the same event and wins - a plain classList.remove() per event
+			// rather than a MutationObserver watching this node's class
+			// attribute continuously, which measured live as expensive
+			// enough on a busy telemetry map to stall the render thread
+			// (sourcedata alone can fire many times a second).
+			const collapseAttribution = () =>
+				container
+					.querySelector('.maplibregl-ctrl-attrib')
+					?.classList.remove('maplibregl-compact-show');
+			collapseAttribution();
+			created.on('styledata', collapseAttribution);
+			created.on('sourcedata', collapseAttribution);
+			created.on('terrain', collapseAttribution);
 			mapLoaded = true;
 			requestThirdPartyLayers();
 		});
@@ -1950,7 +2118,9 @@
 			// remove it explicitly first, and reset scaleBarEl so a
 			// remounted instance re-inserts a fresh one rather than thinking
 			// it already has (which would otherwise reference a torn-down
-			// node forever after).
+			// node forever after). This effect is the sole owner of this
+			// call - see scaleBarSlot's own destroy() above for why it no
+			// longer also calls onRemove() itself.
 			scaleControl?.onRemove();
 			scaleControl = undefined;
 			scaleBarEl = undefined;
@@ -2001,22 +2171,70 @@
 				: '';
 	});
 
-	// swap the raster tile source in place when the theme or satellite
+	// One vector basemap's layers are resident at a time, removed and
+	// re-added on every switch - the same "one thing active, swapped in
+	// place" shape as the raster setTiles() swap below, and avoids needing
+	// to namespace dark/light/roadmap's own layer ids (they reuse generic
+	// OpenMapTiles ids like "water"/"building" across all three, which only
+	// matters if more than one set could ever coexist). Plain module-scope
+	// state, not $state - purely internal bookkeeping for the effect below
+	// to clean up after itself, never read by anything else.
+	let activeVectorLayerIds: string[] = [];
+
+	// swap the active basemap in place when the theme/style/satellite
 	// choice changes - cheaper than map.setStyle(), which tears down and
 	// rebuilds every source/layer (route, geozones, markers) this component
-	// owns, not just the basemap
+	// owns, not just the basemap. Raster styles (terrain/satellite/
+	// bathymetry) still swap via setTiles(); vector styles (default/roadmap,
+	// now OpenFreeMap-backed) add/remove their own layer set instead, since
+	// a vector source has no equivalent single "which tiles" knob.
 	$effect(() => {
 		const activeMap = map;
-		const tiles = basemapTiles;
+		const rasterTiles = activeRasterTiles;
 		const showLabels = mapStyle === 'satellite';
 		if (!activeMap || !mapLoaded) return;
-		const source = activeMap.getSource<maplibregl.RasterTileSource>('basemap');
-		source?.setTiles(tiles);
+
+		if (rasterTiles) {
+			activeMap.getSource<maplibregl.RasterTileSource>('basemap')?.setTiles(rasterTiles);
+		}
+		activeMap.setLayoutProperty('basemap', 'visibility', rasterTiles ? 'visible' : 'none');
+
 		activeMap.setLayoutProperty(
 			SATELLITE_LABELS_SOURCE,
 			'visibility',
 			showLabels ? 'visible' : 'none'
 		);
+	});
+
+	// Separate from the raster/label effect above: this one has an async
+	// gap (loadBasemapLayers fetching a not-yet-cached style's JSON), so it
+	// can't share a single synchronous effect body with work that has to
+	// run immediately. Old layers stay on screen until the new style's are
+	// actually ready to swap in, rather than removing them first and
+	// leaving a blank basemap for the duration of the fetch.
+	$effect(() => {
+		const activeMap = map;
+		const vectorBasemap = activeVectorStyle;
+		if (!activeMap || !mapLoaded) return;
+
+		if (!vectorBasemap) {
+			for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
+			activeVectorLayerIds = [];
+			return;
+		}
+
+		void loadBasemapLayers(vectorBasemap).then((layers) => {
+			// The map may have been torn down, or a newer style requested,
+			// while this style's JSON was still loading - applying a stale
+			// response here would stomp whatever the operator has selected
+			// since.
+			if (map !== activeMap || activeVectorStyle !== vectorBasemap) return;
+			for (const id of activeVectorLayerIds) activeMap.removeLayer(id);
+			activeVectorLayerIds = layers.map((layer) => {
+				activeMap.addLayer(layer, SATELLITE_LABELS_SOURCE);
+				return layer.id;
+			});
+		});
 	});
 
 	// Keeps the scale bar's own unit in sync with the operator's
@@ -2523,6 +2741,7 @@
 				const element = document.createElement('div');
 				element.className =
 					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Zone vertex ${index + 1}`);
 				element.textContent = String(index + 1);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
@@ -2601,6 +2820,7 @@
 				const element = document.createElement('div');
 				element.className =
 					'border-selected bg-panel text-selected flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px]';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Waypoint ${index + 1}`);
 				element.textContent = String(index + 1);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
@@ -2627,6 +2847,7 @@
 			const element = document.createElement('div');
 			element.className =
 				'border-accent bg-panel text-accent flex h-6 w-6 items-center justify-center rounded-full border-2';
+			element.setAttribute('role', 'img');
 			element.setAttribute('aria-label', 'Selected spawn point');
 			element.innerHTML =
 				'<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
@@ -2648,6 +2869,7 @@
 			if (!marker) {
 				const element = document.createElement('div');
 				element.className = 'border-fg bg-panel h-2.5 w-2.5 rounded-full border-2';
+				element.setAttribute('role', 'img');
 				element.setAttribute('aria-label', `Measurement point ${index + 1}`);
 				marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(activeMap);
 				measureMarkers[index] = marker;
@@ -2767,6 +2989,21 @@
 			const ward = fleet.wards[wardId];
 			const state = ward?.state;
 			if (!state?.position) continue;
+			// (0, 0) - "Null Island" - is a fallback, never a genuine fix: a
+			// real ward's state envelope falls invalid/NaN GPS fields back to
+			// 0 rather than dropping the frame (see karshipta-cloud's
+			// toLiveWardState), which used to crash the whole snapshot instead
+			// of just this one ward's position. Plotting that fallback reads
+			// as a ward in the middle of the ocean - confirmed live. Remove
+			// any existing marker instead; the ward stays visible in the
+			// fleet list regardless, this only affects the map layer.
+			const hasNoRealPosition =
+				state.position.latitudeDeg === 0 && state.position.longitudeDeg === 0;
+			if (hasNoRealPosition) {
+				markers[wardId]?.marker.remove();
+				delete markers[wardId];
+				continue;
+			}
 			// flown-path trail: skip appending when the ward hasn't actually
 			// moved (idle/disarmed on the ground), so the array doesn't grow
 			// for no visual benefit. Kept regardless of clustering - a ward's
@@ -2889,7 +3126,7 @@
 		control divs) and paints over anything already inside it, so overlays
 		must be siblings here, not children of the bound container below.
 	-->
-	<div bind:this={container} class="h-full w-full" aria-label="Fleet map"></div>
+	<div bind:this={container} role="region" class="h-full w-full" aria-label="Fleet map"></div>
 	{#if mapError}
 		<p
 			role="alert"
@@ -2907,11 +3144,11 @@
 	     rather than always showing a generic "Loading map data" that would
 	     lose that distinction. -->
 	<div class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2">
-		{#if (geozoneStore.active && geozoneStore.loadError) || (obstacleStore.active && obstacleStore.loadError) || (airportStore.active && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
+		{#if (geozoneStore.active && geozoneStore.loadError) || (showObstacles && obstacleStore.loadError) || (showAirports && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
 			{@const airspaceLoading =
 				(geozoneStore.active && geozoneStore.loadError) ||
-				(obstacleStore.active && obstacleStore.loadError) ||
-				(airportStore.active && airportStore.loadError)}
+				(showObstacles && obstacleStore.loadError) ||
+				(showAirports && airportStore.loadError)}
 			{@const aircraftLoading = showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
 			<!-- Reassuring, not alarming: airspace errors are almost always
 			     OpenAIP's own shared rate limit (see openaip/request-gate.ts),
@@ -2934,7 +3171,7 @@
 				]
 					.filter(Boolean)
 					.join(' / ') || undefined}
-				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-accent"
+				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-fg"
 			>
 				Loading {airspaceLoading && aircraftLoading
 					? 'airspace and aircraft data'
@@ -2957,6 +3194,7 @@
 		     that needs to compete with the map at full strength until the
 		     operator actually looks at it. -->
 		<div
+			role="group"
 			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
 			aria-label="Current weather at map center"
 		>
@@ -3114,7 +3352,7 @@
 					     exactly one is always active. Plain light/dark isn't offered
 					     here as its own pair: "Map" follows the app-wide theme
 					     toggle (themeStore) rather than exposing a second,
-					     independent choice - see basemapTiles's own comment.
+					     independent choice - see activeVectorStyle's own comment.
 					     Roadmap only appears next to the light theme, for the same
 					     reason. Preview thumbnails are real captures of each style
 					     (see src/lib/assets/map-style-previews/), not swatches -
@@ -3174,39 +3412,34 @@
 					     organized rather than a wall of checkboxes, and the
 					     2-column grid halves the vertical space either group
 					     needs. -->
-						<!-- Always rendered, unlike the individual rows inside it: Aircraft
-						     needs no OpenAIP key (unlike No-fly zones/Obstacles/Airports),
-						     so this section always has at least one row even with no key
-						     configured. Aircraft lives here, not in Data layers below - it
-						     is live traffic occupying the airspace those other three
-						     describe the structure of, not generic geographic reference
-						     data the way Cities/Weather/Earthquakes/Wildfires are. -->
+						<!-- Always rendered, unlike No-fly zones below: Aircraft/Obstacles/
+						     Airports are all proxied through a consuming app's own backend
+						     now (see obstacle-store.svelte.ts's own comment), so none of
+						     them need an OpenAIP key client-side any more - only geozones
+						     still does. Aircraft/Obstacles/Airports live here, not in Data
+						     layers below - they're live traffic and structures occupying
+						     the airspace, not generic geographic reference data the way
+						     Cities/Weather/Earthquakes/Wildfires are. -->
 						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
 						<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
-							{#if airportStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
-									Airports
-								</label>
-							{/if}
-							<!-- No .active gate: the aircraft proxy needs no key (see
-							     aircraft-store.svelte.ts's own comment). -->
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
+								Airports
+							</label>
 							<label
 								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
 							>
 								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
 								Aircraft
 							</label>
-							{#if obstacleStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
-									Obstacles
-								</label>
-							{/if}
+							<label
+								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+							>
+								<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
+								Obstacles
+							</label>
 							{#if geozoneStore.active}
 								<label
 									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"

@@ -10,6 +10,12 @@ import type { Aircraft, AircraftCategory } from './types';
 // CORS check regardless of origin. See proxiedSource.ts (the client half
 // of this pair) for the same-origin route a consuming app wires this into.
 const ADSB_LOL_API_URL = 'https://api.adsb.lol/v2/point';
+// adsb.lol rejects Node's default fetch User-Agent outright with 403
+// "User-Agent too generic; include valid contact info." - confirmed live,
+// curl from the same host succeeds while an identical unmodified fetch()
+// call fails, isolating this as the exact cause. Their own usage policy
+// asks for an identifying UA with contact info, not a rate limit.
+const USER_AGENT = 'Karshipta/1.0 (+https://karshipta.com; karshipta@nikx.one)';
 // Radius is nautical miles. 250nm matches the old airplanes.live-era
 // ceiling; unconfirmed whether adsb.lol enforces the identical cap, kept
 // as the safe assumption.
@@ -125,7 +131,7 @@ export async function fetchAircraftNearPoint(
 ): Promise<Aircraft[]> {
 	const clampedRadiusNm = Math.min(MAX_RADIUS_NM, Math.max(MIN_RADIUS_NM, radiusNm));
 	const url = `${ADSB_LOL_API_URL}/${latitudeDeg}/${longitudeDeg}/${clampedRadiusNm.toFixed(0)}`;
-	const response = await fetch(url);
+	const response = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
 	if (!response.ok) {
 		throw new Error(`adsb.lol request failed: ${response.status} ${response.statusText}`);
 	}
