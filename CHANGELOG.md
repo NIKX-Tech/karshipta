@@ -5,6 +5,185 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.2.0]
+
+### Added
+
+- console-core: an optional `onMapMove` callback on `FleetMap`, bound to
+  MapLibre's `moveend` event (the settled position, not every animation
+  frame). Nothing in this console consumes it yet; it exists so a
+  consuming app can persist an operator's actual last map view across a
+  page reload instead of only ever knowing the fixed center/zoom it
+  passed in at mount.
+- console-core: an optional `statusBadge` prop on `WardCard` (a label plus
+  a muted/warning/critical tone, rendered on its own line rather than
+  squeezed into the existing SIM/ARMED/VIEW ONLY badge row, since a
+  caller-supplied label has no length guarantee the built-in single-word
+  badges do), and a matching `statusBadgeFor` callback prop on `FleetRow`
+  that forwards it to each ward's card - added after wiring the badge
+  into a consuming app's fleet list showed that most real wards are
+  grouped into a named fleet, not sitting in the unassigned bucket, so
+  shipping the `WardCard` prop alone would leave the badge invisible for
+  the common case. Both are inert extensibility hooks: nothing in this
+  console passes either, so there is no visual change here.
+
+### Fixed
+
+- Gateway: three simultaneous MAVLink connections sharing one Mavsdk core
+  could spiral into a reconnect storm. `connect_with_retry`'s own retry
+  delay only applies between failed connection attempts; when a ward's
+  link flapped disconnected immediately after a connect that itself
+  resolved near-instantly (socket and `System` already established),
+  `run_reconnect_loop` had no floor at all between the lost link and the
+  next attempt. One flap became self-sustaining: the resulting log volume
+  competed for the same thread pool processing heartbeats, producing more
+  flaps - confirmed live at over 500,000 log lines in ten seconds, never
+  recovering on its own. Fixed by adding a minimum delay between a lost
+  link and the next reconnect attempt, the one place in the loop that was
+  missing one.
+- deploy: the three-SITL demo's GCS MAVLink stream all silently targeted
+  the same remote port regardless of instance, contradicting the compose
+  file's own comment that each instance uses a distinct target port - the
+  entrypoint script set a distinct local port per instance but never
+  passed the matching remote-port flag for the GCS stream, unlike the
+  offboard stream one command below it which already did. Fixed to match
+  that working pattern, and removed the now-unnecessary host port
+  mappings, which were only creating a bind conflict between Docker's own
+  port-forwarding proxy and a host-native gateway process.
+- deploy: the demo SITL stack only worked on Mac/Windows Docker Desktop.
+  It sent every instance's GCS and offboard MAVLink stream to
+  `192.168.65.254`, Docker Desktop's fixed host-gateway address, which
+  does not exist on native Linux Docker Engine - every packet SITL sent
+  there was silently dropped, making the exact same compose file produce
+  a persistent "link lost"/no-telemetry failure on Ubuntu while working
+  fine on Mac. Switched the target to `host.docker.internal` with an
+  `extra_hosts: host.docker.internal:host-gateway` entry so the name
+  resolves on both platforms - except `px4-mavlink`'s own `-t` flag
+  rejects a hostname outright ("invalid partner ip") and does not resolve
+  one itself, confirmed immediately after the first fix shipped. Resolved
+  by reading the real IP `extra_hosts` already wrote into `/etc/hosts` at
+  container start and passing that literal IP to both `-t` flags instead
+  of the hostname.
+- console-core: a real ward's state envelope falls invalid/NaN GPS fields
+  back to (0, 0) rather than dropping the frame; that used to crash the
+  whole snapshot before it ever reached the map, so the fallback value
+  went unnoticed until the crash itself was fixed. Once it stopped
+  crashing, a ward with no real GPS fix plotted at "Null Island" in the
+  middle of the ocean off the coast of Africa. The map marker sync loop
+  now skips (and removes any existing marker for) that (0, 0) fallback
+  specifically; the ward stays visible in the fleet list, only the map
+  layer is affected.
+- console-core: the aircraft overlay's server-side proxy to adsb.lol
+  (added in 0.1.3) was returning 403 "User-Agent too generic; include
+  valid contact info" in production even though an identical request from
+  the host's own `curl` succeeded. Not a rate limit - adsb.lol's usage
+  policy requires an identifying User-Agent with contact info, and
+  Node's default fetch User-Agent doesn't qualify. Fixed by sending one,
+  verified live against the real API with and without the fix to isolate
+  the exact cause.
+- console-core: CARTO's free legacy tile CDN now bakes an "API KEY
+  REQUIRED" watermark directly into every basemap tile image while still
+  returning HTTP 200, making the entire map background unusable in
+  production with nothing to catch it as an error. Replaced with
+  OpenFreeMap, which serves vector styles rather than CARTO's raster PNG
+  tiles, so the swap was done additively - a new vector source plus a
+  vendored, swappable layer set per style (dark/positron/liberty for the
+  existing default-dark/default-light/roadmap options) rather than a full
+  `map.setStyle()` call, which would tear down and rebuild every
+  source/layer the map owns (ward markers, zones, obstacles, aircraft),
+  not just the basemap. Terrain, Satellite, and Bathymetry, which were
+  already separate raster sources, are unaffected. Style layer arrays are
+  vendored at build time rather than fetched live, so rendering doesn't
+  depend on OpenFreeMap's style JSON shape staying fixed.
+- console-core: after the OpenFreeMap migration, Arabic/Hebrew and other
+  RTL-script place-name labels rendered as disconnected, backwards
+  characters instead of properly shaped, right-to-left text. CARTO's old
+  raster tiles had label text baked into the tile image, so this never
+  came up before; OpenFreeMap's vector styles label places via glyphs
+  rendered at runtime, which needs MapLibre's RTL text plugin
+  (`setRTLTextPlugin`) to shape and bidi-reorder the text. Fixed by
+  vendoring the plugin and registering it, lazily, before map creation.
+- console-core: three Lighthouse-driven fixes bundled together. ARIA:
+  `aria-label`/`aria-labelledby` on elements with an implicit `generic` or
+  `paragraph` role (bare divs/spans) is spec-prohibited; added the correct
+  explicit role everywhere this occurred on the map and in dropdown menus.
+  Performance: the three vendored OpenFreeMap style JSONs (about 109 KiB
+  combined) were statically imported and evaluated on every map load even
+  though only one style is ever active at a time; now loaded on demand per
+  style and cached after first load. Best practices: Obstacles and
+  Airports were fetched directly from the browser against OpenAIP, which
+  sends no CORS headers - the same problem aircraft data already had and
+  was already fixed for - so both now go through the same same-origin
+  proxy pattern, and no longer need a client-side API key, so their layer
+  toggles are unconditional like Aircraft's. `obstacleStore.configure()`
+  and `airportStore.configure()` are removed as a result; any consumer
+  still calling them needs updating. FleetMap also gained an optional
+  `initialZoom` prop (defaults to the existing constant) for a
+  karshipta-cloud follow-up that shows a country-scale view before a
+  visitor grants geolocation, instead of a fixed close-in zoom.
+- console-core: two accessibility bugs found live via axe-core, outside
+  the original Lighthouse audit's scope. `Tabs` always set
+  `aria-controls` to a fixed id regardless of whether a matching tabpanel
+  element actually existed in the DOM, which broke in a collapsible panel
+  layout where the tab buttons stay mounted but the panel content is
+  fully unmounted while collapsed; fixed with an optional `panelsMounted`
+  prop (default `true`, so every existing usage is unaffected) that omits
+  `aria-controls` when the caller's panels genuinely aren't present. The
+  map's "Loading airspace/aircraft data..." banner used an accent color
+  on the panel background that, despite already being darkened once for
+  light-theme contrast, still only reached 3.85:1 against white for 12px
+  text, short of WCAG AA's 4.5:1; switched to the same foreground color
+  already used by the map's cluster-marker button for the same reason.
+- console-core: an intermittent blank map on remount, confirmed via a
+  real browser crash capture ("Cannot read properties of undefined
+  (reading 'off')" deep inside MapLibre's own compiled internals). The
+  `ScaleControl` used for the map's legend-embedded scale bar is created
+  without `addControl()` (its DOM node is inserted into the app's own
+  legend panel rather than MapLibre's corner box), so it needs a manual
+  `onRemove()` call instead of the usual automatic cleanup - that manual
+  call existed in two separate places and both fired on every unmount,
+  so `onRemove()` ran twice on the same control; MapLibre's own
+  `onRemove()` clears the control's internal map reference, so the second
+  call crashed inside it. Fixed by giving the control exactly one owner
+  for that cleanup call. A related, separately real bug surfaced and was
+  fixed on the same branch: `setRTLTextPlugin` was being called
+  unconditionally from the component's instance script, which reruns on
+  every single mount, violating MapLibre's own documented "once per page"
+  contract for that API and corrupting an in-flight worker registration
+  on repeat visits; moved to a `<script module>` block that runs exactly
+  once per page load regardless of how many times the component mounts,
+  with `setWorkerUrl` kept in its original relative order ahead of it to
+  avoid introducing a new ordering bug while fixing this one.
+- console-core: a build-time crash in any consumer app that server-renders
+  (a Node adapter, not static). The module-level `setWorkerUrl`/
+  `setRTLTextPlugin` calls added by the remount fix above run the instant
+  the module is first imported, including during SvelteKit's SSR/build
+  analysis pass in Node, where `document` does not exist - a page that
+  only statically imports `FleetMap` pulled this code in during that
+  analysis regardless of whether the component ever actually renders
+  there. Fixed by guarding the module-level calls behind a
+  `typeof document !== 'undefined'` check, matching the same guard this
+  app's own entry page already used for its instance script.
+- console-core: the events feed redesigned from a single cramped row per
+  event (a dot, timestamp, ward id, message) that got hard to read once
+  the ward id was a full UUID, into a card layout: the event message with
+  a relative "time ago" on the same line, the ward id below as plain
+  descriptive text, and severity shown as a left-border accent instead of
+  a leading dot.
+- console-core: the map's attribution control came up expanded by default
+  instead of staying collapsed. MapLibre's own compact-attribution control
+  starts out empty (no attribution text loaded yet), so its internal
+  guard skips collapsing it at that point; once real attribution content
+  arrives moments later, MapLibre's own update handler clears that empty
+  state and expands the control fresh, after any one-time "collapse it"
+  call had already run - so it ended up open regardless. A `MutationObserver`
+  watching the control's class attribute was tried first and worked, but
+  measured as expensive enough on a busy telemetry map (`sourcedata` can
+  fire many times a second) to risk stalling the render thread. Replaced
+  with a plain class removal re-run on the same three events MapLibre's
+  own code reacts to, registered after its own listeners so it always
+  runs after them and wins.
+
 ## [0.1.3]
 
 ### Fixed
