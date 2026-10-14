@@ -25,6 +25,7 @@ COPY console/package.json console/package-lock.json ./
 RUN npm ci
 
 COPY proto/ ../proto/
+COPY VERSION ../VERSION
 COPY console/ .
 
 ARG PUBLIC_GATEWAY_WS_URL=""

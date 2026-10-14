@@ -29,6 +29,33 @@ release onward.
 
 ### Fixed
 
+- deploy: the console's Docker image has failed to build since v0.1.0,
+  caught live while verifying this release's `docker compose up` demo
+  rather than by CI. `vite.config.ts` reads the repo-root `VERSION` file
+  at build time (`__PRODUCT_VERSION__`, added alongside the About
+  dialog), but `console/Dockerfile` never copied it into the image - only
+  `proto/` and `console/` were. CI's own `npm run build` never caught
+  this because it runs directly inside `console/`, where `../VERSION`
+  already resolves to the real file; only the Docker build (which
+  flattens `console/` into `/src`) was affected. Fixed by copying
+  `VERSION` into the build stage alongside `proto/`, verified by
+  rebuilding the image and confirming the About dialog's real version
+  string (v0.2.0, paired with console v0.18.3) appears in the built
+  bundle instead of the build failing outright.
+- deploy: the gateway's Docker image has failed to build since early
+  August, also caught live while verifying `docker compose up` rather
+  than by CI. `gateway/CMakeLists.txt`'s FetchContent step for
+  ixwebsocket runs a `PATCH_COMMAND` that copies `gateway/patches/
+  ixwebsocket/` over the fetched source whenever no system ixwebsocket
+  install is found, regardless of whether the relay transport is
+  enabled - true on the bare `ubuntu:22.04` base this image builds on.
+  `gateway/Dockerfile` only ever copied `gateway/src/` and `gateway/
+  libs/` into the build stage, never `gateway/patches/`, so the patch
+  step failed outright with a missing source directory. CI's own
+  gateway job never caught this because it builds natively on the
+  runner, not through this Dockerfile. Fixed by copying `gateway/
+  patches/` in alongside the others, verified by rebuilding the image
+  and confirming `karshipta_gateway` links successfully.
 - Gateway: three simultaneous MAVLink connections sharing one Mavsdk core
   could spiral into a reconnect storm. `connect_with_retry`'s own retry
   delay only applies between failed connection attempts; when a ward's
