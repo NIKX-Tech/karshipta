@@ -50,6 +50,7 @@ COPY proto/ proto/
 COPY gateway/CMakeLists.txt gateway/CMakeLists.txt
 COPY gateway/src/ gateway/src/
 COPY gateway/libs/ gateway/libs/
+COPY gateway/patches/ gateway/patches/
 
 RUN cmake -S gateway -B gateway/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && cmake --build gateway/build -j "$(nproc)"
