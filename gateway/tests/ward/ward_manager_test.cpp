@@ -254,6 +254,93 @@ TEST_F(WardManagerTest, DispatchCommandRejectsUnknownWardWithReason) {
     EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
 }
 
+// handle_get_params()/handle_set_param() return their response value
+// directly rather than broadcasting it (karshipta#211, mirrors the Zone/
+// Fleet handler shape, not dispatch_command()'s broadcast-an-ack shape),
+// so these tests assert on the returned ParamList/ParamAck directly - no
+// transport_.broadcast_envelopes() involved.
+TEST_F(WardManagerTest, HandleGetParamsRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetParams request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    const auto response = manager.handle_get_params(request);
+
+    EXPECT_EQ(response.request_id(), "req-1");
+    EXPECT_EQ(response.status(), karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("does-not-exist"), std::string::npos);
+    EXPECT_EQ(response.params_size(), 0);
+}
+
+// A registered-but-never-connected ward's get_all_params() would otherwise
+// return an empty AllParams (WardActions::get_all_params()'s own doc
+// comment) - indistinguishable from "this vehicle genuinely has zero
+// parameters" unless handle_get_params() checks connection state itself
+// first, which this test exercises directly (same "never-started ward"
+// pattern as AddWardRegistersAndListsId).
+TEST_F(WardManagerTest, HandleGetParamsRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24994")));
+
+    karshipta::v1::GetParams request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    const auto response = manager.handle_get_params(request);
+
+    EXPECT_EQ(response.status(), karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleSetParamRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.mutable_param()->set_name("MPC_LAND_SPEED");
+    request.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+    request.mutable_param()->set_float_value(0.5f);
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
+}
+
+// Request-shape check ("does this even carry a param"), deliberately
+// ordered before the connection check in handle_set_param() itself - see
+// that method's own comment - so this is testable without a live
+// connection, same as HandleGetParamsRejectsUnknownWardWithReason above.
+TEST_F(WardManagerTest, HandleSetParamRejectsRequestWithNoParam) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24995")));
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("no param"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleSetParamRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24996")));
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.mutable_param()->set_name("MPC_LAND_SPEED");
+    request.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+    request.mutable_param()->set_float_value(0.5f);
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("not connected"), std::string::npos);
+}
+
 TEST_F(WardManagerTest, HandleMissionUploadRejectsUnknownWardWithEvent) {
     auto manager = make_manager();
 

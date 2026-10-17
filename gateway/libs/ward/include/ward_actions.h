@@ -4,7 +4,9 @@
 #include <mavsdk/plugins/action/action.h>
 #include <mavsdk/plugins/geofence/geofence.h>
 #include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
+#include <mavsdk/plugins/param/param.h>
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,13 +15,16 @@
 #include "ward_connection.h"
 
 // Wraps MAVSDK's Action plugin (plus MavlinkPassthrough for the one command
-// Action doesn't cover, see set_home_position below, and Geofence for
-// upload_geofence) against exactly one connected ward. Scoped to precisely
-// the commands proto/karshipta/v1/command.proto's Command.action oneof can
-// carry (ArmCommand, DisarmCommand, TakeoffCommand, LandCommand,
+// Action doesn't cover, see set_home_position below, Geofence for
+// upload_geofence, and Param for get_all_params/get_param_*/set_param_*)
+// against exactly one connected ward. Scoped to precisely the commands
+// proto/karshipta/v1/command.proto's Command.action oneof can carry
+// (ArmCommand, DisarmCommand, TakeoffCommand, LandCommand,
 // ReturnToLaunchCommand, GotoCommand, SetHomeCommand), plus the
-// WardManager-driven geofence push (karshipta#247) - nothing here exists
-// ahead of a schema field or a documented, scoped feature for it.
+// WardManager-driven geofence push (karshipta#247) and parameter access
+// (karshipta#211, also WardManager-driven, not Command-shaped - see
+// GetParams/SetParam below) - nothing here exists ahead of a schema field
+// or a documented, scoped feature for it.
 class WardActions {
    public:
     // Binds this wrapper to a connection; does not create the Action plugin yet
@@ -38,6 +43,13 @@ class WardActions {
     // same fmt::streamed-via-ostringstream pattern as Action::Result instead
     // of a hand-written switch.
     static std::string result_name(mavsdk::Geofence::Result result);
+    // Overload for Param's own Result type. Its operator<< is exported
+    // (confirmed, same as Geofence::Result) - normal pattern. Carries much
+    // more specific reasons than Action::Result (DoesNotExist,
+    // ValueOutOfRange, PermissionDenied, ReadOnly, TypeMismatch, ...);
+    // WardManager must surface this text as-is in ParamAck.message, never
+    // collapse it to a bare "rejected" (karshipta#211).
+    static std::string result_name(mavsdk::Param::Result result);
 
     // Implements ArmCommand. Arms the ward (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.
@@ -103,6 +115,37 @@ class WardActions {
     // incremental diff.
     [[nodiscard]] mavsdk::Geofence::Result upload_geofence(
         const mavsdk::Geofence::GeofenceData& data) const;
+    // Implements GetParams (karshipta#211). Reads every int and float
+    // parameter currently known to the autopilot. Unlike every other
+    // MAVSDK call this class wraps, get_all_params() has no Result/failure
+    // signal of its own - it returns whatever it collected. Returns an
+    // empty AllParams if the connection isn't up yet (checked via
+    // ensure_param(), same contract as every other ensure_*() here); a
+    // genuine on-wire timeout or partial response is likewise
+    // indistinguishable from "the vehicle has no parameters" at this
+    // layer - WardManager must still check connection state itself before
+    // trusting an empty result as real (see its own doc comment).
+    [[nodiscard]] mavsdk::Param::AllParams get_all_params() const;
+    // Reads one int-valued parameter by its raw MAVLink PARAM_ID. Used by
+    // WardManager::handle_set_param() to read back the vehicle-confirmed
+    // value after a successful set_param_int() - MAVSDK's setter returns
+    // only a Result, not the value the vehicle actually stored, so an
+    // honest "confirmed" value needs this explicit round trip.
+    [[nodiscard]] std::pair<mavsdk::Param::Result, int32_t> get_param_int(
+        const std::string& name) const;
+    // Float counterpart to get_param_int(), same contract.
+    [[nodiscard]] std::pair<mavsdk::Param::Result, float> get_param_float(
+        const std::string& name) const;
+    // Implements SetParam for an int-valued parameter (karshipta#211).
+    // MAVSDK has no single polymorphic setter - get/set_param_int and
+    // get/set_param_float are separate calls, each returning
+    // Result::WrongType if name actually holds the other type; the caller
+    // (WardManager) picks the right one from ParamType.
+    [[nodiscard]] mavsdk::Param::Result set_param_int(const std::string& name,
+                                                       int32_t value) const;
+    // Float counterpart to set_param_int(), same contract.
+    [[nodiscard]] mavsdk::Param::Result set_param_float(const std::string& name,
+                                                         float value) const;
 
    private:
     // The connection this action wrapper sends commands through. Must outlive this object.
@@ -120,14 +163,18 @@ class WardActions {
     // The Geofence plugin, lazily constructed the same way as action_ (see
     // ensure_geofence()) - only upload_geofence uses this.
     mutable std::unique_ptr<mavsdk::Geofence> geofence_;
+    // The Param plugin, lazily constructed the same way as action_ (see
+    // ensure_param()) - only get_all_params/get_param_*/set_param_* use this.
+    mutable std::unique_ptr<mavsdk::Param> param_;
 
     // Serializes the lazy init in ensure_action()/ensure_mavlink_passthrough()/
-    // ensure_geofence(): the CommandExecutor worker, WardManager's own
-    // zone-push call, and WardManager's reconnect_worker threads can all
-    // trigger a first creation concurrently. Once created, action_/
-    // mavlink_passthrough_/geofence_ are never reset, so reads after a
-    // successful ensure_*() need no lock. Shared across all three: none of
-    // them are ever constructed concurrently with each other either.
+    // ensure_geofence()/ensure_param(): the CommandExecutor worker,
+    // WardManager's own zone-push and parameter calls, and WardManager's
+    // reconnect_worker threads can all trigger a first creation
+    // concurrently. Once created, action_/mavlink_passthrough_/geofence_/
+    // param_ are never reset, so reads after a successful ensure_*() need
+    // no lock. Shared across all four: none of them are ever constructed
+    // concurrently with each other either.
     mutable std::mutex init_mutex_;
 
     // Lazily creates `action_` the first time it's needed. Returns false if
@@ -138,6 +185,8 @@ class WardActions {
     bool ensure_mavlink_passthrough() const;
     // Lazily creates `geofence_`, same contract as ensure_action().
     bool ensure_geofence() const;
+    // Lazily creates `param_`, same contract as ensure_action().
+    bool ensure_param() const;
     // Logs the outcome of a command already sent to `action_` and passes the
     // Result through unchanged, so the caller (eventually the M3 CommandAck
     // path) keeps the reason a bool would have erased.
@@ -149,6 +198,9 @@ class WardActions {
     // Overload for Geofence::Result, same contract as log_result above.
     static mavsdk::Geofence::Result log_result(const std::string& label,
                                                 mavsdk::Geofence::Result result);
+    // Overload for Param::Result, same contract as log_result above.
+    static mavsdk::Param::Result log_result(const std::string& label,
+                                             mavsdk::Param::Result result);
 };
 
 #endif  // KARSHIPTA_GATEWAY_WARD_ACTIONS_H

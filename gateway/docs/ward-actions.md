@@ -68,8 +68,13 @@ pattern.
 | `Result set_current_speed(float) const` | Backs `GotoCommand.speed_m_s`. Ephemeral; not stored on the ward. |
 | `MavlinkPassthrough::Result set_home_position(double lat, double lon, float alt_msl_m) const` | Implements `SetHomeCommand`. Sends a raw `MAV_CMD_DO_SET_HOME` - see "Home position" below for why this one method uses a different plugin and a different `Result` type. |
 | `Geofence::Result upload_geofence(const Geofence::GeofenceData&) const` | Not tied to a `Command` - called by `WardManager::push_geofence()` (karshipta#247), on every zone mutation and on this ward's own reconnect. Pushes one `Polygon` per Zone (horizontal boundary only; see "Geofence" below for why altitude isn't included). |
+| `Param::AllParams get_all_params() const` | Implements `GetParams` (karshipta#211). Not tied to a `Command` - called by `WardManager::handle_get_params()`. Unlike every other method here, MAVSDK's `get_all_params()` has no `Result`/failure signal of its own; see "Parameters" below. |
+| `pair<Param::Result, int32_t> get_param_int(const string&) const` | Reads one int-valued parameter by name. Used by `handle_set_param()` to read back the vehicle-confirmed value after a successful write - see "Parameters" below. |
+| `pair<Param::Result, float> get_param_float(const string&) const` | Float counterpart to `get_param_int()`. |
+| `Param::Result set_param_int(const string&, int32_t) const` | Implements `SetParam` for an int-valued parameter (karshipta#211). |
+| `Param::Result set_param_float(const string&, float) const` | Float counterpart to `set_param_int()`. MAVSDK has no single polymorphic setter - the caller (`WardManager`) picks int or float from `ParamType`. |
 
-`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()` and `upload_geofence()` each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`), unrelated to `Action::Result` and to each other.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, and every `Param`-prefixed method each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`), unrelated to `Action::Result` and to each other.
 
 ## Home position: why one method uses a different plugin
 
@@ -109,6 +114,38 @@ its API, so `Zone.altitude_min_m`/`altitude_max_m` cannot be pushed to the
 autopilot through this plugin at all. Only the horizontal shape is
 enforced; altitude bounds stay advisory (console-side warning only),
 tracked separately as karshipta#251.
+
+## Parameters: no failure signal on the read path, no readback on the write path
+
+`get_all_params()`/`get_param_int()`/`get_param_float()`/`set_param_int()`/
+`set_param_float()` wrap MAVSDK's `Param` plugin (karshipta#211), the other
+public methods not tied to a `Command.action` field - `WardManager` calls
+them directly (`handle_get_params()`/`handle_set_param()`), not
+`CommandExecutor`, mirroring `upload_geofence()`'s own shape above.
+
+Two real MAVSDK API gaps shaped this class's own methods and comments, not
+just `WardManager`'s:
+
+- `get_all_params()` returns a bare `Param::AllParams`, no `Result`. A
+  connection-down failure is handled here (`ensure_param()` returns an
+  empty `AllParams`), but a genuine on-wire timeout or partial response has
+  no distinct signal at all - it looks identical to "the vehicle has zero
+  parameters" either way. `WardManager::handle_get_params()` can only
+  check connection state before trusting an empty result as real; it
+  cannot distinguish "connected but the read itself failed" from "really
+  zero params."
+- `set_param_int()`/`set_param_float()` return only a `Result`, never the
+  value the vehicle actually stored. `get_param_int()`/`get_param_float()`
+  exist on this class specifically so `WardManager::handle_set_param()` can
+  read back the confirmed value after a successful write, rather than
+  `ParamAck.param` being a dishonest echo of whatever was requested.
+
+Scoped to int and float parameters only, matching
+`Param::AllParams.int_params`/`.float_params` - MAVSDK's `AllParams` also
+carries `custom_params` (string-valued, extended param protocol, used by
+camera/gimbal components), which `proto/karshipta/v1/parameter.proto`
+deliberately leaves out: not something PX4/ArduPilot's standard autopilot
+parameter set ever uses.
 
 ## Design: Result all the way through
 
@@ -190,7 +227,12 @@ drives every action kind through it) - the same fake-autopilot pattern
 not `Command`-driven, so it isn't exercised there; it's covered instead
 through `gateway/tests/ward/ward_manager_test.cpp`'s
 `PushGeofenceDoesNotCrashWithNoConnectedWards` (no-connection path only -
-see that file's own doc comment).
+see that file's own doc comment). The `Param`-prefixed methods are the
+same: not `Command`-driven, covered instead through that same file's
+`HandleGetParamsRejectsUnconnectedWardWithReason`/
+`HandleSetParamRejectsUnconnectedWardWithReason` (no-connection path
+only - a real parameter read/write round trip needs live SITL, not
+exercised by this test binary).
 
 ## Manual verification
 
