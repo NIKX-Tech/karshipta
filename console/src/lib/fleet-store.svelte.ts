@@ -561,6 +561,8 @@ class FleetStore {
 			case 'stopFleetMission':
 			case 'removeFleetMission':
 			case 'updateFleetMissionRoutes':
+			case 'getParams':
+			case 'setParam':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			case 'fleet':
@@ -592,6 +594,14 @@ class FleetStore {
 			// console fully recognizes and is just choosing not to act on.
 			case 'missionProgress':
 			case 'missionDownload':
+				break;
+			// Wire shapes only exist so far (karshipta#210); the gateway
+			// doesn't send these yet (karshipta#211) and no console UI reads
+			// them yet (karshipta#212) - explicit no-op, not the default's
+			// "unknown payload kind" warning, which this console fully
+			// recognizes and is just choosing not to act on yet.
+			case 'paramList':
+			case 'paramAck':
 				break;
 			default: {
 				const unhandled: never = payload;
