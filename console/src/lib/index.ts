@@ -289,6 +289,7 @@ export { default as ConfirmDialog } from './components/confirm-dialog.svelte';
 // see this file's own doc comment), neither encodes a self-host-vs-hosted
 // opinion.
 export { default as ZonesTab } from './components/zones-tab.svelte';
+export { default as ConfigurationTab } from './components/configuration-tab.svelte';
 export { default as MissionTab } from './components/mission-tab.svelte';
 export { default as FleetMissionWizard } from './components/fleet-mission-wizard.svelte';
 export { default as FleetMissionList } from './components/fleet-mission-list.svelte';

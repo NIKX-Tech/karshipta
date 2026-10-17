@@ -7,6 +7,7 @@
 	import WardControlTab from '$lib/components/ward-control-tab.svelte';
 	import MissionTab from '$lib/components/mission-tab.svelte';
 	import ZonesTab from '$lib/components/zones-tab.svelte';
+	import ConfigurationTab from '$lib/components/configuration-tab.svelte';
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 	import UnitsToggle from '$lib/components/units-toggle.svelte';
 
@@ -19,19 +20,21 @@
 	// The icon rail stays reachable regardless of whether a ward is
 	// selected, which is the whole point of this restructure. Telemetry and
 	// Control used to be one "Ward" tab - split once RTL/Set Home/the
-	// planned Configuration content made that single scrollable tab too
-	// tall (confirmed live). WardStatusStrip (below) stays visible above
-	// every one of these tabs regardless of which is active, so at-a-glance
+	// Configuration content made that single scrollable tab too tall
+	// (confirmed live). WardStatusStrip (below) stays visible above every
+	// one of these tabs regardless of which is active, so at-a-glance
 	// telemetry is never actually hidden by this split - only the deeper
 	// detail is tab-gated. Fleet management itself lives in the left rail
 	// (alongside the ward list it groups); Mission is for assigning a
 	// mission to a Fleet or an ad-hoc set of wards; Zones is the
-	// safety-area drawing tool.
+	// safety-area drawing tool; Configuration is tier-1 safety-critical
+	// MAVLink parameter read/write (karshipta#212) - flight wards only.
 	const TABS: TabItem[] = [
 		{ id: 'telemetry', label: 'Telemetry' },
 		{ id: 'control', label: 'Control' },
 		{ id: 'mission', label: 'Missions' },
-		{ id: 'zones', label: 'Zones' }
+		{ id: 'zones', label: 'Zones' },
+		{ id: 'configuration', label: 'Configuration' }
 	];
 
 	// Auto-switch to the Telemetry tab and auto-expand the moment selection
@@ -135,6 +138,20 @@
 			>
 				<ZonesTab />
 			</div>
+
+			<div
+				role="tabpanel"
+				id="tabpanel-configuration"
+				aria-labelledby="tab-configuration"
+				class="min-h-0 flex-1 overflow-y-auto p-3"
+				hidden={rightPanelUi.activeTab !== 'configuration'}
+			>
+				{#if fleet.selectedWardId}
+					<ConfigurationTab wardId={fleet.selectedWardId} />
+				{:else}
+					<p class="text-xs text-fg-muted">Select a ward to see its configuration.</p>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -219,6 +236,23 @@
 						aria-hidden="true"
 					>
 						<path d="M12 2 21 7.5v9L12 22l-9-5.5v-9Z" />
+					</svg>
+				{:else if tab.id === 'configuration'}
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="12" r="3" />
+						<path
+							d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
+						/>
 					</svg>
 				{/if}
 			{/snippet}

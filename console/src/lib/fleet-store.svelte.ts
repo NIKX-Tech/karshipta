@@ -3,6 +3,13 @@ import type { Event, WardInfo, WardState } from '$lib/gen/karshipta/v1/telemetry
 import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
 import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
 import { Severity, type WardClass } from '$lib/gen/karshipta/v1/common';
+import {
+	ParamAckStatus,
+	ParamListStatus,
+	type Param,
+	type ParamAck,
+	type ParamList
+} from '$lib/gen/karshipta/v1/parameter';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
@@ -48,6 +55,15 @@ export interface WardConfigTracker {
 	sentAtMs: number;
 }
 
+export interface ParamWriteTracker {
+	requestId: string;
+	wardId: string;
+	paramName: string;
+	status: ParamAckStatus;
+	message: string;
+	sentAtMs: number;
+}
+
 const MAX_EVENTS = 50;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
@@ -83,6 +99,13 @@ export function isConfigTerminal(status: WardConfigStatus): boolean {
 	return (
 		status === WardConfigStatus.WARD_CONFIG_STATUS_ACCEPTED ||
 		status === WardConfigStatus.WARD_CONFIG_STATUS_REJECTED
+	);
+}
+
+export function isParamWriteTerminal(status: ParamAckStatus): boolean {
+	return (
+		status === ParamAckStatus.PARAM_ACK_STATUS_SUCCESS ||
+		status === ParamAckStatus.PARAM_ACK_STATUS_REJECTED
 	);
 }
 
@@ -153,6 +176,14 @@ class FleetStore {
 	events = $state<Event[]>([]);
 	commands = $state<Record<string, CommandTracker>>({});
 	wardConfigRequests = $state<Record<string, WardConfigTracker>>({});
+	/** last GetParams response per ward (karshipta#212), keyed by ward_id */
+	paramLists = $state<Record<string, ParamList>>({});
+	paramListLoading = $state<Record<string, boolean>>({});
+	/** the requestId of the most recently sent GetParams per ward, so a
+	 * stale response from an earlier, superseded request can't clobber a
+	 * newer one still in flight */
+	private paramListRequestIds: Record<string, string> = {};
+	paramWrites = $state<Record<string, ParamWriteTracker>>({});
 	selectedWardId = $state<string | undefined>(undefined);
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
@@ -418,6 +449,126 @@ class FleetStore {
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
+	/** Sends GetParams for one ward; the response lands in paramLists[wardId]
+	 * via applyParamList(). Viewer mode is refused client-side too (not just
+	 * by the gateway, see WardManager::reject_viewer_envelope's kGetParams
+	 * case) so a read-only session never even sends the request. */
+	requestGetParams(wardId: string): void {
+		const requestId = crypto.randomUUID();
+		this.paramListRequestIds[wardId] = requestId;
+		this.paramListLoading[wardId] = true;
+		if (this.readonly) {
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: 'read-only session',
+				params: []
+			};
+			return;
+		}
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: 'no active channel',
+				params: []
+			};
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				if (this.paramListRequestIds[wardId] !== requestId) return;
+				this.paramListLoading[wardId] = false;
+				this.paramLists[wardId] = {
+					requestId,
+					wardId,
+					status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+					message: 'no response from gateway',
+					params: []
+				};
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'getParams', getParams: { requestId, wardId } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: reason,
+				params: []
+			};
+		}
+	}
+
+	/** Sends SetParam for one ward; tracked the same request/ack shape as
+	 * sendCommand() above, just against ParamAckStatus instead of
+	 * CommandStatus (SetParam isn't Command.action-shaped - see
+	 * parameter.proto's own comment on ParamAck). */
+	requestSetParam(wardId: string, param: Param): string {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.paramWrites[requestId] = {
+				requestId,
+				wardId,
+				paramName: param.name,
+				status: ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				message: 'read-only session',
+				sentAtMs: Date.now()
+			};
+			return requestId;
+		}
+		this.paramWrites[requestId] = {
+			requestId,
+			wardId,
+			paramName: param.name,
+			status: ParamAckStatus.PARAM_ACK_STATUS_UNSPECIFIED,
+			message: '',
+			sentAtMs: Date.now()
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleParamWrite(
+				requestId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				'no active channel'
+			);
+			return requestId;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleParamWrite(
+					requestId,
+					ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+					'no acknowledgment from gateway'
+				);
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'setParam', setParam: { requestId, wardId, param } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleParamWrite(requestId, ParamAckStatus.PARAM_ACK_STATUS_REJECTED, reason);
+		}
+		return requestId;
+	}
+
+	/** in-flight and recently settled parameter writes for one ward, newest first */
+	paramWritesFor(wardId: string): ParamWriteTracker[] {
+		return Object.values(this.paramWrites)
+			.filter((tracker) => tracker.wardId === wardId)
+			.sort((a, b) => b.sentAtMs - a.sentAtMs);
+	}
+
 	/**
 	 * Adds a ward through the connected gateway (covers both a simulated
 	 * SITL endpoint and real hardware; the gateway sees no difference). No
@@ -595,13 +746,11 @@ class FleetStore {
 			case 'missionProgress':
 			case 'missionDownload':
 				break;
-			// Wire shapes only exist so far (karshipta#210); the gateway
-			// doesn't send these yet (karshipta#211) and no console UI reads
-			// them yet (karshipta#212) - explicit no-op, not the default's
-			// "unknown payload kind" warning, which this console fully
-			// recognizes and is just choosing not to act on yet.
 			case 'paramList':
+				this.applyParamList(payload.paramList);
+				break;
 			case 'paramAck':
+				this.applyParamAck(payload.paramAck);
 				break;
 			default: {
 				const unhandled: never = payload;
@@ -635,6 +784,10 @@ class FleetStore {
 		this.events = [];
 		this.commands = {};
 		this.wardConfigRequests = {};
+		this.paramLists = {};
+		this.paramListLoading = {};
+		this.paramListRequestIds = {};
+		this.paramWrites = {};
 		this.selectedWardId = undefined;
 		this.cancelGoto();
 		this.cancelSetHome();
@@ -719,6 +872,55 @@ class FleetStore {
 			}
 			setTimeout(() => {
 				delete this.wardConfigRequests[requestId];
+			}, TRACKER_LINGER_MS);
+		}
+	}
+
+	/** Resolves a GetParams response. Ignores a response whose request_id no
+	 * longer matches the latest one sent for that ward - a stale answer to a
+	 * superseded "refresh" click. */
+	applyParamList(response: ParamList): void {
+		if (this.paramListRequestIds[response.wardId] !== response.requestId) return;
+		const timer = this.timeoutTimers.get(response.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(response.requestId);
+		}
+		this.paramListLoading[response.wardId] = false;
+		this.paramLists[response.wardId] = response;
+	}
+
+	/** Resolves a SetParam ack. On success, patches the cached ParamList for
+	 * this ward with the vehicle-confirmed value (ParamAck.param - see its
+	 * own doc comment: never an echo of the request) so the panel reflects
+	 * it without a full re-fetch. */
+	applyParamAck(ack: ParamAck): void {
+		this.settleParamWrite(ack.requestId, ack.status, ack.message);
+		if (ack.status !== ParamAckStatus.PARAM_ACK_STATUS_SUCCESS || !ack.param) return;
+		const list = this.paramLists[ack.wardId];
+		if (!list) return;
+		const confirmed = ack.param;
+		const index = list.params.findIndex((candidate) => candidate.name === confirmed.name);
+		if (index >= 0) {
+			list.params[index] = confirmed;
+		} else {
+			list.params.push(confirmed);
+		}
+	}
+
+	private settleParamWrite(requestId: string, status: ParamAckStatus, message: string): void {
+		const tracker = this.paramWrites[requestId];
+		if (!tracker || isParamWriteTerminal(tracker.status)) return;
+		tracker.status = status;
+		tracker.message = message;
+		if (isParamWriteTerminal(status)) {
+			const timer = this.timeoutTimers.get(requestId);
+			if (timer) {
+				clearTimeout(timer);
+				this.timeoutTimers.delete(requestId);
+			}
+			setTimeout(() => {
+				delete this.paramWrites[requestId];
 			}, TRACKER_LINGER_MS);
 		}
 	}
