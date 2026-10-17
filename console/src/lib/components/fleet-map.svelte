@@ -1670,15 +1670,11 @@
 						: [...measurePoints, [event.lngLat.lng, event.lngLat.lat]];
 				return;
 			}
-			// A fleet-wide mission assignment being planned takes priority over
-			// a solo ward's own draft; planRoute() cancels the latter before
-			// starting the former, so in practice at most one is ever active.
 			if (fleetGroups.missionAssignmentDraft) {
 				fleetGroups.addAssignmentWaypoint(event.lngLat.lat, event.lngLat.lng);
-			} else if (fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId) {
-				fleet.addWaypoint(event.lngLat.lat, event.lngLat.lng);
 			} else {
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
+				fleet.requestSetHome(event.lngLat.lat, event.lngLat.lng);
 			}
 			onMapClick?.(event.lngLat.lat, event.lngLat.lng);
 		});
@@ -2170,14 +2166,14 @@
 		});
 	});
 
-	// crosshair cursor while goto targeting, waypoint planning, measuring, or
-	// a consuming app's own click-to-place flow (crosshair prop) is active
+	// crosshair cursor while goto targeting, set-home targeting, fleet
+	// mission route planning, measuring, or a consuming app's own
+	// click-to-place flow (crosshair prop) is active
 	$effect(() => {
 		if (!map) return;
-		const planning = fleet.missionDraft?.wardId === fleet.selectedWardId && fleet.missionDraft;
 		map.getCanvas().style.cursor =
 			fleet.gotoArming ||
-			planning ||
+			fleet.setHomeArming ||
 			fleetGroups.missionAssignmentDraft ||
 			zoneStore.draft ||
 			crosshair ||
@@ -2766,21 +2762,15 @@
 		});
 	});
 
-	// Draw the mission draft of the selected ward, or every ward's own route
-	// from a fleet mission draft, as one colored dashed line per ward - the
-	// actual visual fix over the old design: N distinct lines prove N
-	// distinct routes, not one shared line duplicated onto every marker.
-	// Mutually exclusive (planRoute() cancels the ward-scoped draft before
-	// starting the fleet-scoped one), so at most one ever has routes at a
-	// time. Numbered pins only render for the route currently being edited
-	// (activeWardId, or the solo ward draft) - see waypointMarkers' comment.
+	// Draw every ward's own route from a fleet mission draft, as one colored
+	// dashed line per ward - the actual visual fix over the old design: N
+	// distinct lines prove N distinct routes, not one shared line
+	// duplicated onto every marker. Numbered pins only render for the
+	// route currently being edited (activeWardId) - see waypointMarkers'
+	// comment.
 	$effect(() => {
 		const activeMap = map;
 		if (!activeMap || !mapLoaded) return;
-		const wardDraft =
-			fleet.missionDraft && fleet.missionDraft.wardId === fleet.selectedWardId
-				? fleet.missionDraft
-				: undefined;
 		const fleetDraft = fleetGroups.missionAssignmentDraft;
 
 		const features: GeoJSON.Feature<
@@ -2788,17 +2778,7 @@
 			{ wardId: string; color: string; opacity: number }
 		>[] = [];
 		let activeWaypoints: DraftWaypoint[] = [];
-		if (wardDraft) {
-			activeWaypoints = wardDraft.waypoints;
-			features.push({
-				type: 'Feature',
-				properties: { wardId: wardDraft.wardId, color: routeColorFor(0), opacity: 1 },
-				geometry: {
-					type: 'LineString',
-					coordinates: wardDraft.waypoints.map((wp) => [wp.longitudeDeg, wp.latitudeDeg])
-				}
-			});
-		} else if (fleetDraft) {
+		if (fleetDraft) {
 			activeWaypoints = fleetDraft.routes[fleetDraft.activeWardId] ?? [];
 			fleetDraft.wardIds.forEach((wardId, index) => {
 				features.push({

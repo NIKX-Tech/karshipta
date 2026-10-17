@@ -64,9 +64,9 @@
 <section class="rounded border border-edge bg-panel/90 p-3" aria-label="Commands for {wardId}">
 	<h3 class="text-[10px] font-medium tracking-widest text-fg-muted">COMMANDS</h3>
 
-	<div class="mt-2 grid grid-cols-3 gap-1.5">
+	<div class="mt-2 flex gap-1.5">
 		<button
-			class="command-button"
+			class="command-button flex-1"
 			disabled={!flightState || flightState.armed || inflightKinds.has('arm')}
 			title={!flightState ? 'no telemetry yet' : flightState.armed ? 'already armed' : undefined}
 			onclick={() => send({ $case: 'arm', arm: {} })}
@@ -74,60 +74,7 @@
 			Arm
 		</button>
 		<button
-			class="command-button"
-			disabled={!flightState ||
-				!flightState.armed ||
-				flightState.inAir ||
-				inflightKinds.has('takeoff')}
-			title={!flightState
-				? 'no telemetry yet'
-				: flightState.inAir
-					? 'already in air'
-					: !flightState.armed
-						? 'arm first'
-						: undefined}
-			onclick={() => send({ $case: 'takeoff', takeoff: { altitudeRelM: takeoffAltM } })}
-		>
-			Takeoff
-		</button>
-		<button
-			class="command-button {fleet.gotoArming ? 'border-selected text-selected' : ''}"
-			disabled={!flightState || !flightState.inAir}
-			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
-			onclick={() => (fleet.gotoArming ? fleet.cancelGoto() : fleet.armGoto())}
-		>
-			{fleet.gotoArming ? 'Pick point' : 'Goto'}
-		</button>
-		<button
-			class="command-button"
-			disabled={!flightState || !flightState.inAir}
-			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
-			onclick={() =>
-				confirmThenSend({
-					title: `Land ${wardId}`,
-					body: 'The ward will descend and land at its current position.',
-					confirmLabel: 'Land',
-					action: { $case: 'land', land: {} }
-				})}
-		>
-			Land
-		</button>
-		<button
-			class="command-button"
-			disabled={!flightState || !flightState.inAir}
-			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
-			onclick={() =>
-				confirmThenSend({
-					title: `Return ${wardId} to launch`,
-					body: 'The ward will fly back to its home position and land.',
-					confirmLabel: 'RTL',
-					action: { $case: 'rtl', rtl: {} }
-				})}
-		>
-			RTL
-		</button>
-		<button
-			class="command-button"
+			class="command-button flex-1"
 			disabled={!flightState || !flightState.armed || inflightKinds.has('disarm')}
 			title={!flightState ? 'no telemetry yet' : !flightState.armed ? 'not armed' : undefined}
 			onclick={() => {
@@ -144,6 +91,48 @@
 			}}
 		>
 			Disarm
+		</button>
+	</div>
+
+	<div class="mt-1.5 flex gap-1.5">
+		<button
+			class="command-button flex-1"
+			disabled={!flightState ||
+				!flightState.armed ||
+				flightState.inAir ||
+				inflightKinds.has('takeoff')}
+			title={!flightState
+				? 'no telemetry yet'
+				: flightState.inAir
+					? 'already in air'
+					: !flightState.armed
+						? 'arm first'
+						: undefined}
+			onclick={() => send({ $case: 'takeoff', takeoff: { altitudeRelM: takeoffAltM } })}
+		>
+			Takeoff
+		</button>
+		<button
+			class="command-button flex-1"
+			disabled={!flightState || !flightState.inAir}
+			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
+			onclick={() =>
+				confirmThenSend({
+					title: `Land ${wardId}`,
+					body: 'The ward will descend and land at its current position.',
+					confirmLabel: 'Land',
+					action: { $case: 'land', land: {} }
+				})}
+		>
+			Land
+		</button>
+		<button
+			class="command-button flex-1 {fleet.gotoArming ? 'border-selected text-selected' : ''}"
+			disabled={!flightState || !flightState.inAir}
+			title={!flightState ? 'no telemetry yet' : !flightState.inAir ? 'not in air' : undefined}
+			onclick={() => (fleet.gotoArming ? fleet.cancelGoto() : fleet.armGoto())}
+		>
+			{fleet.gotoArming ? 'Pick point' : 'Goto'}
 		</button>
 	</div>
 

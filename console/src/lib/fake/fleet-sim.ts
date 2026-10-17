@@ -684,7 +684,7 @@ export class FakeGateway implements DemoEngine {
 						? { $case: 'pauseMission', pauseMission: {} }
 						: action === FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_LAND
 							? { $case: 'land', land: {} }
-							: { $case: 'rtl', rtl: {} }
+							: { $case: 'rtl', rtl: { altitudeRelM: 0 } }
 			});
 			dispatched += 1;
 		}
@@ -1031,7 +1031,12 @@ export class FakeGateway implements DemoEngine {
 				} else {
 					this.interruptMission(ward, 'RTL command');
 					ward.mode = FlightMode.FLIGHT_MODE_RETURN;
-					this.setTarget(ward, command, 0, 0, ward.altM, 0, 'land');
+					// 0 means "keep the current configured altitude" (same
+					// meaning as the real gateway's set_return_to_launch_altitude
+					// call) - only override the transit altitude when a real
+					// value was actually requested.
+					const rtlAltM = action.rtl.altitudeRelM > 0 ? action.rtl.altitudeRelM : ward.altM;
+					this.setTarget(ward, command, 0, 0, rtlAltM, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'returning to launch');
 				}
 				break;
@@ -1099,6 +1104,21 @@ export class FakeGateway implements DemoEngine {
 					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'mission paused');
 				}
 				break;
+			case 'setHome': {
+				const target = action.setHome.target;
+				if (!target) {
+					this.reject(command, ward, 'set_home has no target');
+					break;
+				}
+				// Real effect, not a stub: rtl/goto both compute their offsets
+				// from ward.spec.homeLatDeg/homeLonDeg above, so this genuinely
+				// moves where this ward's own RTL returns to, same as the real
+				// gateway's MAV_CMD_DO_SET_HOME.
+				ward.spec.homeLatDeg = target.latitudeDeg;
+				ward.spec.homeLonDeg = target.longitudeDeg;
+				this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'home position set');
+				break;
+			}
 			default: {
 				const unhandled: never = action;
 				this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, `unsupported action ${unhandled}`);

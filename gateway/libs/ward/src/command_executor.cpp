@@ -95,6 +95,8 @@ const char* action_case_name(const karshipta::v1::Command& command) {
             return "start_mission";
         case karshipta::v1::Command::kPauseMission:
             return "pause_mission";
+        case karshipta::v1::Command::kSetHome:
+            return "set_home";
         default:
             return "none";
     }
@@ -190,9 +192,17 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
         case karshipta::v1::Command::kLand:
             mission_.notify_interrupted();
             return action_outcome(actions_.land());
-        case karshipta::v1::Command::kRtl:
+        case karshipta::v1::Command::kRtl: {
             mission_.notify_interrupted();
+            if (command.rtl().altitude_rel_m() > 0.0f) {
+                const auto set_result =
+                    actions_.set_return_to_launch_altitude(command.rtl().altitude_rel_m());
+                if (set_result != Result::Success) {
+                    return {false, "setting return to launch altitude failed: " + describe(set_result)};
+                }
+            }
             return action_outcome(actions_.return_to_launch());
+        }
         case karshipta::v1::Command::kGoto: {
             if (!command.goto_().has_target()) {
                 return {false, "goto has no target"};
@@ -219,6 +229,22 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
             return action_outcome(actions_.goto_location(
                 target.latitude_deg(), target.longitude_deg(), altitude_msl_m,
                 std::numeric_limits<float>::quiet_NaN()));  // NaN keeps the current yaw
+        }
+        case karshipta::v1::Command::kSetHome: {
+            if (!command.set_home().has_target()) {
+                return {false, "set_home has no target"};
+            }
+            const auto& target = command.set_home().target();
+            // Same zero-altitude-means-current fallback as kGoto above - the
+            // console sends a map click (lat/lon only), not an altitude.
+            float altitude_msl_m = target.altitude_msl_m();
+            if (altitude_msl_m <= 0.0f) {
+                altitude_msl_m = telemetry_.get_position().absolute_altitude_m;
+            }
+            const auto result = actions_.set_home_position(target.latitude_deg(),
+                                                             target.longitude_deg(), altitude_msl_m);
+            if (result == mavsdk::MavlinkPassthrough::Result::Success) return {true, ""};
+            return {false, WardActions::result_name(result)};
         }
         case karshipta::v1::Command::kStartMission:
             return dispatch_start_mission(stop_token);
