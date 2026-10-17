@@ -66,7 +66,6 @@
 			? (fleetGroups.fleets[targetFleetId]?.wardIds ?? [])
 			: targetWardIds;
 		if (wardIds.length === 0) return;
-		fleet.cancelPlanning();
 		fleetGroups.startMissionAssignment(targetFleetId, wardIds);
 		step = 2;
 	}

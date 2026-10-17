@@ -1,12 +1,6 @@
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { Event, WardInfo, WardState } from '$lib/gen/karshipta/v1/telemetry';
-import {
-	CommandStatus,
-	MissionAction,
-	type Command,
-	type Mission,
-	type MissionProgress
-} from '$lib/gen/karshipta/v1/command';
+import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
 import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
 import { Severity, type WardClass } from '$lib/gen/karshipta/v1/common';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
@@ -25,20 +19,15 @@ export interface Ward {
 	source: WardSource;
 }
 
+// Shared with fleet-groups-store.svelte.ts's own route-planning draft
+// (FleetMission's per-ward routes) - the per-ward draft this type
+// originally backed here is gone, but the shape itself is still genuinely
+// shared, not exclusive to either store.
 export interface DraftWaypoint {
 	latitudeDeg: number;
 	longitudeDeg: number;
 	altitudeRelM: number;
 }
-
-export interface MissionDraft {
-	wardId: string;
-	waypoints: DraftWaypoint[];
-	repeatCount: number;
-}
-
-const DEFAULT_WAYPOINT_ALT_M = 30;
-const WAYPOINT_ACCEPTANCE_RADIUS_M = 2;
 
 export interface CommandTracker {
 	commandId: string;
@@ -168,6 +157,9 @@ class FleetStore {
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
+	/** set-home targeting: identical shape to goto targeting above, same map-click handoff */
+	setHomeArming = $state(false);
+	pendingSetHome = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
 	/** gateway connection as the operator should read it */
 	link = $state<'live' | 'connecting' | 'down'>('down');
 	gatewayUrl = $state(readStoredGatewayUrl() ?? '');
@@ -180,11 +172,6 @@ class FleetStore {
 	readonly = $state(false);
 	/** how many simulated-ward adds this session has requested; drives the resource warning at C7's UI layer */
 	simulatedWardAddCount = $state(0);
-	/** mission being planned; while set, map clicks add waypoints for its ward */
-	missionDraft = $state<MissionDraft | undefined>(undefined);
-	/** last uploaded mission per ward, so Start knows what it refers to */
-	uploadedMissions = $state<Record<string, Mission>>({});
-	missionProgress = $state<Record<string, MissionProgress>>({});
 
 	readonly wardIds = $derived(Object.keys(this.wards).sort());
 	readonly selectedWard = $derived(
@@ -336,9 +323,7 @@ class FleetStore {
 	select(wardId: string | undefined): void {
 		this.selectedWardId = wardId;
 		this.cancelGoto();
-		if (this.missionDraft && this.missionDraft.wardId !== wardId) {
-			this.cancelPlanning();
-		}
+		this.cancelSetHome();
 	}
 
 	armGoto(): void {
@@ -357,63 +342,20 @@ class FleetStore {
 		this.pendingGoto = { latitudeDeg, longitudeDeg };
 	}
 
-	startPlanning(wardId: string): void {
-		this.cancelGoto();
-		this.missionDraft = { wardId, waypoints: [], repeatCount: 0 };
+	armSetHome(): void {
+		this.setHomeArming = true;
 	}
 
-	cancelPlanning(): void {
-		this.missionDraft = undefined;
+	cancelSetHome(): void {
+		this.setHomeArming = false;
+		this.pendingSetHome = undefined;
 	}
 
-	/** called by the map on click while a mission is being planned */
-	addWaypoint(latitudeDeg: number, longitudeDeg: number): void {
-		const draft = this.missionDraft;
-		if (!draft) return;
-		const previous = draft.waypoints.at(-1);
-		draft.waypoints.push({
-			latitudeDeg,
-			longitudeDeg,
-			altitudeRelM: previous?.altitudeRelM ?? DEFAULT_WAYPOINT_ALT_M
-		});
-	}
-
-	removeWaypoint(index: number): void {
-		this.missionDraft?.waypoints.splice(index, 1);
-	}
-
-	/** sends the draft as a Mission envelope and remembers it for Start */
-	uploadMission(): Mission | undefined {
-		const draft = this.missionDraft;
-		if (!draft || draft.waypoints.length === 0) return undefined;
-		const mission: Mission = {
-			missionId: crypto.randomUUID(),
-			wardId: draft.wardId,
-			name: `mission-${new Date().toISOString().slice(11, 19)}`,
-			repeatCount: draft.repeatCount,
-			items: draft.waypoints.map((waypoint, index) => ({
-				seq: index,
-				action: MissionAction.MISSION_ACTION_WAYPOINT,
-				position: {
-					latitudeDeg: waypoint.latitudeDeg,
-					longitudeDeg: waypoint.longitudeDeg,
-					altitudeMslM: 0,
-					altitudeRelM: waypoint.altitudeRelM
-				},
-				speedMS: 0,
-				holdTimeS: 0,
-				acceptanceRadiusM: WAYPOINT_ACCEPTANCE_RADIUS_M
-			}))
-		};
-		const channel = this.channelFor(draft.wardId);
-		if (!channel) {
-			console.error(`fleet: cannot upload mission, ${draft.wardId} has no active channel`);
-			return undefined;
-		}
-		channel.send({ payload: { $case: 'missionUpload', missionUpload: mission } });
-		this.uploadedMissions[draft.wardId] = mission;
-		delete this.missionProgress[draft.wardId];
-		return mission;
+	/** called by the map on click while set-home targeting is armed */
+	requestSetHome(latitudeDeg: number, longitudeDeg: number): void {
+		if (!this.setHomeArming) return;
+		this.setHomeArming = false;
+		this.pendingSetHome = { latitudeDeg, longitudeDeg };
 	}
 
 	sendCommand(wardId: string, action: NonNullable<Command['action']>): string {
@@ -558,9 +500,10 @@ class FleetStore {
 					// console.warn - surfaced as an Event instead, the same channel
 					// a fleet mission's upload-phase rejection already uses
 					// (MISSION_UPLOAD_REJECTED), so a failure on one ward is never
-					// silently invisible. A success needs no separate surfacing:
-					// missionProgress ticks (start) or the FleetMission's own
-					// ward_states (stop) already show the outcome.
+					// silently invisible. A success needs no separate surfacing: the
+					// FleetMission's own ward_states already cover both outcomes -
+					// WARD_MISSION_STATUS_ACTIVE on a successful start, STOPPED on a
+					// successful stop.
 					if (
 						ack.status === CommandStatus.COMMAND_STATUS_REJECTED ||
 						ack.status === CommandStatus.COMMAND_STATUS_TIMEOUT
@@ -583,15 +526,6 @@ class FleetStore {
 				this.settle(ack.commandId, ack.status, ack.message);
 				break;
 			}
-			case 'missionProgress':
-				this.missionProgress[payload.missionProgress.wardId] = payload.missionProgress;
-				break;
-			case 'missionDownload':
-				// Response to mission_download_request: the mission currently on the
-				// ward. Same slot as an upload, since both represent "what's on the
-				// ward now". No console UI sends mission_download_request yet.
-				this.uploadedMissions[payload.missionDownload.wardId] = payload.missionDownload;
-				break;
 			case 'wardConfigAck': {
 				const ack = payload.wardConfigAck;
 				const tracker = this.wardConfigRequests[ack.requestId];
@@ -647,6 +581,18 @@ class FleetStore {
 			case 'zoneAck':
 				zoneStore.applyZoneAck(payload.zoneAck);
 				break;
+			// Still a real, expected wire message - any actively-flying mission
+			// keeps emitting these regardless of whether it was started via the
+			// old per-ward flow or a FleetMission - just nothing in the console
+			// reads them anymore (removed with the per-ward MissionPanel;
+			// FleetMission's own ward_states push already covers the operator-
+			// visible progress/outcome, see the commandAck case above). Explicit
+			// no-op cases, not left to fall into the default's "unknown payload
+			// kind" warning, which would be a false alarm for a message this
+			// console fully recognizes and is just choosing not to act on.
+			case 'missionProgress':
+			case 'missionDownload':
+				break;
 			default: {
 				const unhandled: never = payload;
 				console.warn('fleet: ignoring unknown payload kind', unhandled);
@@ -680,10 +626,8 @@ class FleetStore {
 		this.commands = {};
 		this.wardConfigRequests = {};
 		this.selectedWardId = undefined;
-		this.missionDraft = undefined;
-		this.uploadedMissions = {};
-		this.missionProgress = {};
 		this.cancelGoto();
+		this.cancelSetHome();
 		fleetGroups.teardown();
 		zoneStore.teardown();
 	}
