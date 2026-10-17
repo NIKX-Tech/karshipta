@@ -211,6 +211,32 @@ TEST_F(WardManagerTest, AddWardRejectsDuplicateSystemId) {
     EXPECT_EQ(manager.list_ward_ids().size(), 1u);
 }
 
+// push_geofence() is called by FleetManager on every zone mutation
+// (karshipta#247) and again by run_reconnect_loop on every reconnect; this
+// test only exercises the no-connection path (same "never-started ward"
+// pattern as AddWardRegistersAndListsId above) - a never-connected ward's
+// WardActions::ensure_geofence() always fails, so the real assertion here is
+// that pushing to it is a logged no-op, never a crash, and that an empty
+// zone list (no zones created yet) is just as safe to push as a populated
+// one.
+TEST_F(WardManagerTest, PushGeofenceDoesNotCrashWithNoConnectedWards) {
+    auto manager = make_manager();
+    EXPECT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24993")));
+
+    EXPECT_NO_THROW(manager.push_geofence({}));
+
+    karshipta::v1::Zone zone;
+    zone.set_zone_id("zone-1");
+    zone.set_name("test keep-in");
+    zone.set_type(karshipta::v1::ZONE_TYPE_KEEP_IN);
+    for (const auto& [lat, lon] : {std::pair{47.0, 8.0}, std::pair{47.0, 8.1}, std::pair{47.1, 8.1}}) {
+        auto* vertex = zone.add_vertices();
+        vertex->set_latitude_deg(lat);
+        vertex->set_longitude_deg(lon);
+    }
+    EXPECT_NO_THROW(manager.push_geofence({zone}));
+}
+
 TEST_F(WardManagerTest, DispatchCommandRejectsUnknownWardWithReason) {
     auto manager = make_manager();
 

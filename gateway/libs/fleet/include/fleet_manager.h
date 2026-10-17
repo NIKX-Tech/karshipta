@@ -117,6 +117,16 @@ class FleetManager {
     // an edit re-plans and re-dispatches, it does not just save a draft.
     [[nodiscard]] karshipta::v1::FleetMissionAck handle_update_fleet_mission_routes(
         const karshipta::v1::UpdateFleetMissionRoutes& request, WardManager& ward_manager);
+
+    // Re-pushes the complete current zone set to every connected ward
+    // (karshipta#247) via ward_manager.push_geofence(). Called by main.cpp
+    // after every successful create/update/delete zone handler above, same
+    // MAVLink-gated WardManager& pattern as the FleetMission handlers right
+    // above it: zones are plain SQLite rows with no MAVSDK dependency of
+    // their own, so this is the one place that dependency enters. Horizontal
+    // boundary only - MAVSDK's Geofence plugin has no altitude field
+    // (karshipta#251 tracks altitude enforcement separately).
+    void push_geofence_to_all_wards(WardManager& ward_manager) const;
 #endif
 
     // Safety-gated: rejects unless every ward_state.status() is

@@ -325,6 +325,14 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                // Re-push the complete zone set (karshipta#247) so the new
+                // boundary takes effect immediately, not just on this ward's
+                // next reconnect.
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kUpdateZone: {
@@ -332,6 +340,11 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kDeleteZone: {
@@ -339,6 +352,11 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kCreateFleetMission: {

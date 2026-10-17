@@ -36,12 +36,21 @@ A Zone is a named polygon: keep-in (operational or safe area) or keep-out
 close the shape), name it, set its type, save it. Zones are visible on
 the map at all times, independent of Fleet or Ward selection.
 
-v0 behavior is advisory, not enforced: if a mission waypoint lands inside
-a keep-out Zone or outside a keep-in Zone, the console shows a warning
-before upload, but does not block it. Enforcement on the ward itself
-(pushing the geofence to the autopilot via MAVSDK) is a later item, tracked
-separately, because it requires per-ward-class handling (a flight ward can
-receive a MAVLink geofence, a non-flight ward cannot).
+Horizontal boundary enforcement is live (karshipta#247): WardManager pushes
+the complete current zone set to every connected MAVLink ward as a MAVSDK
+Geofence (one Polygon per Zone, keep-in -> Inclusion, keep-out -> Exclusion)
+on every zone mutation and again on each ward's own reconnect, so the
+autopilot itself rejects a mission or manual command that would cross a
+boundary, independent of what the console warns about before upload. Only
+flight wards receive this; a non-flight ward (e.g. a livestock tag) has no
+MAVLink geofence to push to, matching the per-ward-class split this
+paragraph originally flagged.
+
+Altitude bounds (Zone.altitude_min_m/altitude_max_m) remain advisory only:
+the console still warns before upload if a waypoint falls outside them, but
+MAVSDK's Geofence plugin has no altitude field anywhere in its API, so
+there is currently no path to enforce them on the autopilot. Tracked
+separately as karshipta#251.
 
 ## Fleet Mission
 
@@ -194,7 +203,11 @@ paper:
 ## What is explicitly out of scope for this phase
 
 - Real multi-agent task allocation or area splitting across a Fleet.
-- Geofence enforcement pushed to the autopilot.
+- Horizontal geofence enforcement pushed to the autopilot shipped as its
+  own later piece of work (karshipta#247), not part of this phase; see the
+  "Zone" section above. Noted here only so this list doesn't read as still
+  accurate on that point. Altitude enforcement is still out of scope
+  (karshipta#251).
 - User accounts or login in OSS, and therefore Team membership in OSS
   (meaningless without login).
 - Any military-specific classification taxonomy (friendly/hostile/etc).

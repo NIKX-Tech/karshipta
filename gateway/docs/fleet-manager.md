@@ -113,10 +113,14 @@ persist to SQLite instead of `WardManager`'s YAML.
   validate the polygon is simple. Geometry is immutable after create -
   `handle_update_zone` can only change name/type/altitude bounds, matching
   the console's editing scope.
-- **Whether a mission actually respects a Zone.** `FleetManager` persists
-  Zones and lets the console/gateway read them; it does not itself check a
-  Fleet Mission's `WardMissionPlan` waypoints against any Zone (advisory,
-  console-side only - see `docs/fleet-mission-model.md`).
+- **Whether a mission actually respects a Zone at plan time.**
+  `FleetManager` does not itself check a Fleet Mission's `WardMissionPlan`
+  waypoints against any Zone before upload (that check is still advisory,
+  console-side only - see `docs/fleet-mission-model.md`). This is distinct
+  from `push_geofence_to_all_wards` below (karshipta#247), which enforces
+  the horizontal boundary on the autopilot itself, independent of whatever
+  mission is running; altitude bounds still have no enforcement path at all
+  (karshipta#251 - MAVSDK's Geofence plugin has no altitude field).
 - **Ward object graph mechanics.** Delegated entirely to `WardManager`; this
   class only calls `dispatch_mission_upload_and_start()`/`dispatch_command()`
   on it, and never touches a ward's `CommandExecutor`/`WardConnection`
@@ -136,6 +140,7 @@ persist to SQLite instead of `WardManager`'s YAML.
 | `handle_create_fleet`/`handle_rename_fleet`/`handle_delete_fleet` | Wire entry points: request in, `FleetAck` out. Never throw - see Error handling below. |
 | `handle_add_ward_to_fleet`/`handle_remove_ward_from_fleet` | Idempotent membership changes; `FleetAck` out. |
 | `handle_create_zone`/`handle_update_zone`/`handle_delete_zone` | Wire entry points: request in, `ZoneAck` out. `handle_create_zone` additionally rejects fewer than 3 vertices before ever calling the store. |
+| `push_geofence_to_all_wards(WardManager&)` | MAVLink builds only. Forwards `store_.list_zones()` into `WardManager::push_geofence()` (karshipta#247). `main.cpp` calls this after every `ACCEPTED` create/update/delete zone ack, so a boundary change takes effect immediately rather than waiting for a ward's next reconnect. |
 | `handle_create_fleet_mission`/`handle_stop_fleet_mission`/`handle_update_fleet_mission_routes` | MAVLink builds only (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK`), each takes a `WardManager&`. See "Fleet Mission handlers" above. `FleetMissionAck` out. |
 | `handle_remove_fleet_mission` | Always available (no `WardManager&` needed). `FleetMissionAck` out. |
 | `handle_command_outcome(CommandAck)` | Registered by `main.cpp` as `WardManager::set_command_outcome_observer`'s target. Only acts on a terminal ack (`SUCCESS`/`REJECTED`/`TIMEOUT`) whose `command_id` matches a `StopFleetMission` dispatch this class issued; anything else is silently ignored. |
@@ -231,3 +236,8 @@ is still `UPLOADING`; Edit rejecting under that same "still active" gate.
 uses a read-only-directory technique against a real file-backed
 `FleetManager` to prove a store failure surfaces as a `REJECTED` ack
 rather than an uncaught exception escaping the handler.
+`PushGeofenceToAllWardsForwardsCurrentZoneSetWithoutThrowing` (karshipta#247)
+only proves the `store_.list_zones()` -> `WardManager::push_geofence()`
+plumbing itself never throws; the `ward_manager_` fixture here has no
+registered wards, so the actual MAVLink upload path is covered separately
+by `ward_manager_test.cpp`'s `PushGeofenceDoesNotCrashWithNoConnectedWards`.
