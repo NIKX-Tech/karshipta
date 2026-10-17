@@ -6,12 +6,14 @@
 
 `WardActions` wraps MAVSDK's `Action` plugin for exactly **one**
 already-connected ward. Its surface is deliberately narrow: every public
-method exists because a field in `Command.action`
-(`proto/karshipta/v1/command.proto`) needs it, and no method exists that a
-field does not back yet. It reads through a `WardConnection&` rather than
-owning a `System` itself, and lazily constructs the underlying
-`mavsdk::Action` plugin the first time any method is called, mirroring
-`TelemetryInfo`'s `ensure_telemetry()` pattern.
+method exists because either a field in `Command.action`
+(`proto/karshipta/v1/command.proto`) needs it, or - the one exception,
+`upload_geofence()` (karshipta#247) - a documented, scoped feature outside
+the `Command` oneof needs it; no method exists ahead of one or the other.
+It reads through a `WardConnection&` rather than owning a `System` itself,
+and lazily constructs each underlying MAVSDK plugin the first time a method
+that needs it is called, mirroring `TelemetryInfo`'s `ensure_telemetry()`
+pattern.
 
 ## Responsibilities
 
@@ -65,8 +67,9 @@ owning a `System` itself, and lazily constructs the underlying
 | `Result kill() const` | Implements `DisarmCommand{force: true}`. Disarms immediately regardless of landed state; the ward falls out of the sky if used while flying. The M3 executor must gate this on `force` and must never call it for a plain `DisarmCommand`. |
 | `Result set_current_speed(float) const` | Backs `GotoCommand.speed_m_s`. Ephemeral; not stored on the ward. |
 | `MavlinkPassthrough::Result set_home_position(double lat, double lon, float alt_msl_m) const` | Implements `SetHomeCommand`. Sends a raw `MAV_CMD_DO_SET_HOME` - see "Home position" below for why this one method uses a different plugin and a different `Result` type. |
+| `Geofence::Result upload_geofence(const Geofence::GeofenceData&) const` | Not tied to a `Command` - called by `WardManager::push_geofence()` (karshipta#247), on every zone mutation and on this ward's own reconnect. Pushes one `Polygon` per Zone (horizontal boundary only; see "Geofence" below for why altitude isn't included). |
 
-`Result` is `mavsdk::Action::Result` for every method above `set_home_position`.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()` and `upload_geofence()` each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`), unrelated to `Action::Result` and to each other.
 
 ## Home position: why one method uses a different plugin
 
@@ -94,6 +97,18 @@ the stable, documented path to a single `COMMAND_LONG` today;
 `MavlinkDirect`'s JSON-based message construction is more involved for one
 command and worth adopting only once more of the gateway needs raw MAVLink
 access, not for this one call.
+
+## Geofence: horizontal boundary only
+
+`upload_geofence()` wraps MAVSDK's `Geofence` plugin, the one public method
+not tied to a `Command.action` field - `WardManager` calls it directly (see
+`gateway/docs/ward-manager.md`'s `push_geofence()` entry for the caching and
+per-ward fan-out), not `CommandExecutor`. Checked the full
+`mavsdk::Geofence::Polygon` header: there is no altitude field anywhere in
+its API, so `Zone.altitude_min_m`/`altitude_max_m` cannot be pushed to the
+autopilot through this plugin at all. Only the horizontal shape is
+enforced; altitude bounds stay advisory (console-side warning only),
+tracked separately as karshipta#251.
 
 ## Design: Result all the way through
 
@@ -166,12 +181,16 @@ created lazily and never rebuilt across a reconnect.
 
 ## Automated tests
 
-No dedicated `ward_actions_test.cpp`; covered indirectly through
-`gateway/tests/ward/command_executor_test.cpp`, which constructs a real
-`WardActions` against a fake-autopilot `WardConnection`
-(`CommandExecutorTest.EveryActionKindAnswersAcceptedThenTerminal` drives
-every action kind through it) - the same fake-autopilot pattern
-`gateway/tests/ward/ward_connection_test.cpp` uses.
+No dedicated `ward_actions_test.cpp`; every `Command.action`-backed method is
+covered indirectly through `gateway/tests/ward/command_executor_test.cpp`,
+which constructs a real `WardActions` against a fake-autopilot
+`WardConnection` (`CommandExecutorTest.EveryActionKindAnswersAcceptedThenTerminal`
+drives every action kind through it) - the same fake-autopilot pattern
+`gateway/tests/ward/ward_connection_test.cpp` uses. `upload_geofence()` is
+not `Command`-driven, so it isn't exercised there; it's covered instead
+through `gateway/tests/ward/ward_manager_test.cpp`'s
+`PushGeofenceDoesNotCrashWithNoConnectedWards` (no-connection path only -
+see that file's own doc comment).
 
 ## Manual verification
 

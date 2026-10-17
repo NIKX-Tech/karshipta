@@ -4,9 +4,11 @@
 
 #include <sstream>
 
-// MAVSDK only offers operator<< for Action::Result, and fmt::streamed needs
-// fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one stringstream keeps the
-// human-readable reason portable.
+// fmt::streamed needs fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one
+// stringstream keeps the human-readable reason portable regardless. Not
+// every MAVSDK Result type actually has this operator<< exported by the
+// linked build, though every one's header declares it - see the
+// MavlinkPassthrough::Result overload below for the one that doesn't.
 std::string WardActions::result_name(const mavsdk::Action::Result result) {
     std::ostringstream stream;
     stream << result;
@@ -54,6 +56,14 @@ std::string WardActions::result_name(const mavsdk::MavlinkPassthrough::Result re
     return "Unknown";
 }
 
+// Geofence::Result's operator<< is exported by the linked build (confirmed,
+// unlike MavlinkPassthrough::Result above) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Geofence::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
 WardActions::WardActions(WardConnection& connection) : connection_(connection) {}
 
 bool WardActions::ensure_action() const {
@@ -76,6 +86,16 @@ bool WardActions::ensure_mavlink_passthrough() const {
     return true;
 }
 
+bool WardActions::ensure_geofence() const {
+    std::lock_guard lock(init_mutex_);
+    if (geofence_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    geofence_ = std::make_unique<mavsdk::Geofence>(connection_.get_system());
+    spdlog::info("geofence plugin created");
+    return true;
+}
+
 mavsdk::Action::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
@@ -89,6 +109,16 @@ mavsdk::Action::Result WardActions::log_result(const std::string& label,
 mavsdk::MavlinkPassthrough::Result WardActions::log_result(
     const std::string& label, const mavsdk::MavlinkPassthrough::Result result) {
     if (result != mavsdk::MavlinkPassthrough::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Geofence::Result WardActions::log_result(const std::string& label,
+                                                  const mavsdk::Geofence::Result result) {
+    if (result != mavsdk::Geofence::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
@@ -200,4 +230,10 @@ mavsdk::MavlinkPassthrough::Result WardActions::set_home_position(
         static_cast<float>(longitude_deg),
         altitude_msl_m};
     return log_result("set home position", mavlink_passthrough_->send_command_long(command));
+}
+
+mavsdk::Geofence::Result WardActions::upload_geofence(
+    const mavsdk::Geofence::GeofenceData& data) const {
+    if (!ensure_geofence()) return mavsdk::Geofence::Result::Error;
+    return log_result("upload geofence", geofence_->upload_geofence(data));
 }

@@ -72,6 +72,7 @@ and fleet persistence are all facade methods on this class.
 | `static unique_ptr<WardManager> create(Transport&, filesystem::path persistence_path = {})` | Builds the shared `Mavsdk` core itself. The entry point every consumer outside this library should use. |
 | `add_ward(const WardConfig&)` | Builds the object graph and registers it; does not connect. Rejects an empty or already-registered `ward_id`, or a nonzero `system_id` already bound elsewhere. |
 | `dispatch_command(const Command&)` | Routes to the ward's `CommandExecutor`; synthesizes a REJECTED `CommandAck` for unknown/stopped/busy wards. |
+| `push_geofence(const vector<Zone>&)` | Builds one `mavsdk::Geofence::GeofenceData` from the full zone set (karshipta#247, horizontal boundary only), caches it, and uploads it to every currently connected ward via `WardActions::upload_geofence()`. Called by `FleetManager::push_geofence_to_all_wards()` after every zone mutation, and again from each ward's own `reconnect_worker` on every reconnect so the cache is what re-applies after a dropped link. |
 | `handle_mission_upload(const Mission&)` | Routes to the ward's `WardMission::enqueue_upload()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards (no `CommandAck`-shaped ack exists for missions). |
 | `handle_mission_file_upload(const MissionFileUpload&)` | Converts via the ward's `MissionImporter::import()` (synchronous - local parsing, not a MAVLink round trip), then routes through `handle_mission_upload()`'s same path on success; a WARNING `Event` on either the ward lookup or the import itself failing. |
 | `handle_mission_download_request(const MissionDownloadRequest&)` | Routes to the ward's `WardMission::enqueue_download()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards. Result surfaces later via the publish tick. |
@@ -139,9 +140,13 @@ generated `fleet_state.yaml` itself is gitignored.
 - Each ward's `reconnect_worker` is an independent `jthread`: connects,
   broadcasts an INFO `LINK_CONNECTED` `Event`, requests the telemetry stream
   rate (re-requested on every reconnect - PX4 forgets it across a link drop),
-  waits while connected, and on drop broadcasts a WARNING `LINK_LOST` `Event`
-  before reconnecting (not on a deliberate `stop()`/`force_stop()` - the loop
-  only emits `LINK_LOST` when the drop wasn't requested).
+  re-uploads the cached geofence (`cached_geofence_`, under `geofence_mutex_`,
+  karshipta#247 - same reasoning as the telemetry rate: there's no way to
+  know whether this ward's FC still holds the last fence it was sent, so it
+  is always re-sent, not just on the first connect), waits while connected,
+  and on drop broadcasts a WARNING `LINK_LOST` `Event` before reconnecting
+  (not on a deliberate `stop()`/`force_stop()` - the loop only emits
+  `LINK_LOST` when the drop wasn't requested).
 - `handle_add_ward()`/`handle_remove_ward()` broadcast an INFO
   `WARD_ADDED`/`WARD_REMOVED` `Event` (`broadcast_fleet_event()`) on
   their accepted path only, same no-lock-held pattern as
@@ -195,6 +200,13 @@ a real socket:
 
 - `AddWardRegistersAndListsId`, `AddWardRejectsEmptyId`,
   `AddWardRejectsDuplicateId`, `AddWardRejectsDuplicateSystemId`.
+- `PushGeofenceDoesNotCrashWithNoConnectedWards` (karshipta#247): against a
+  never-connected ward, `push_geofence()` with both an empty and a populated
+  zone list is a logged no-op, never a crash - `WardActions::ensure_geofence()`
+  always fails without a connection, so this is the limit of what's
+  testable without a live SITL; `fleet_manager_test.cpp`'s
+  `PushGeofenceToAllWardsForwardsCurrentZoneSetWithoutThrowing` covers the
+  `FleetManager` side of the same plumbing.
 - `DispatchCommandRejectsUnknownWardWithReason`: the broadcast `CommandAck`
   carries the offending id in its message.
 - `RemoveWardRemovesNeverStartedWard`.

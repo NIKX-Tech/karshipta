@@ -31,6 +31,28 @@ constexpr std::chrono::milliseconds kReconnectPollInterval{1000};
 // altitude. Named so a config value can override it later (BRIEF.md M4).
 constexpr std::chrono::seconds kForceStopLandingTimeout{120};
 
+// Horizontal boundary only (karshipta#247) - mavsdk::Geofence::Polygon has
+// no altitude field anywhere in its API (checked the full header), so
+// Zone.altitude_min_m/altitude_max_m stay advisory-only here, tracked
+// separately as karshipta#251 (and scoped to flight wards specifically when
+// it lands - a generic tracker has no autopilot to enforce a ceiling on).
+mavsdk::Geofence::GeofenceData build_geofence_data(const std::vector<karshipta::v1::Zone>& zones) {
+    mavsdk::Geofence::GeofenceData data;
+    data.polygons.reserve(zones.size());
+    for (const auto& zone : zones) {
+        mavsdk::Geofence::Polygon polygon;
+        polygon.fence_type = zone.type() == karshipta::v1::ZONE_TYPE_KEEP_OUT
+                                  ? mavsdk::Geofence::FenceType::Exclusion
+                                  : mavsdk::Geofence::FenceType::Inclusion;
+        polygon.points.reserve(zone.vertices_size());
+        for (const auto& vertex : zone.vertices()) {
+            polygon.points.push_back({vertex.latitude_deg(), vertex.longitude_deg()});
+        }
+        data.polygons.push_back(std::move(polygon));
+    }
+    return data;
+}
+
 // BRIEF.md M2's ~5Hz per-ward telemetry target: requested from the
 // autopilot on every (re)connect, and matches
 // WardManager::kDefaultPublishInterval (1000ms / kTelemetryRateHz).
@@ -433,6 +455,33 @@ void WardManager::dispatch_command(const karshipta::v1::Command& command) {
     }
     executor->enqueue(command);
     clear_busy(ward);
+}
+
+void WardManager::push_geofence(const std::vector<karshipta::v1::Zone>& zones) {
+    auto data = build_geofence_data(zones);
+    {
+        std::lock_guard lock(geofence_mutex_);
+        cached_geofence_ = data;
+    }
+
+    // Snapshot-then-release, same shape run_publish_loop already uses:
+    // upload_geofence() is a blocking MAVSDK round trip per ward, so
+    // wards_mutex_ must not be held while it runs.
+    std::vector<std::shared_ptr<ManagedWard>> wards;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards.reserve(managed_wards_.size());
+        for (const auto& [id, ward] : managed_wards_) {
+            wards.push_back(ward);
+        }
+    }
+    for (const auto& ward : wards) {
+        const auto result = ward->actions->upload_geofence(data);
+        if (result != mavsdk::Geofence::Result::Success) {
+            spdlog::warn("geofence push to ward '{}' failed: {}", ward->config.ward_id,
+                         WardActions::result_name(result));
+        }
+    }
 }
 
 void WardManager::set_command_outcome_observer(CommandOutcomeObserver observer) {
@@ -1543,8 +1592,25 @@ void WardManager::run_reconnect_loop(ManagedWard& ward, std::stop_token stop_tok
         spdlog::info("ward connected (system_id={})", ward.config.system_id);
         broadcast_link_event(ward.config.ward_id, /*connected=*/true);
         // PX4 forgets requested stream rates across a link drop, so this is
-        // re-requested on every reconnect, not just the first.
+        // re-requested on every reconnect, not just the first - same
+        // reasoning for the geofence push right below: there is no way to
+        // know whether this specific ward's FC still holds the last fence
+        // it was sent (a reboot, a parameter reset, or simply zones having
+        // changed while this ward was offline all clear it), so it is
+        // always re-sent on every reconnect too, not just the first.
         ward.telemetry->set_telemetry_rate(kTelemetryRateHz);
+        {
+            mavsdk::Geofence::GeofenceData geofence_data;
+            {
+                std::lock_guard lock(geofence_mutex_);
+                geofence_data = cached_geofence_;
+            }
+            const auto result = ward.actions->upload_geofence(geofence_data);
+            if (result != mavsdk::Geofence::Result::Success) {
+                spdlog::warn("geofence push to ward '{}' on reconnect failed: {}",
+                             ward.config.ward_id, WardActions::result_name(result));
+            }
+        }
 
         while (ward.connection->is_connected() && !stop_token.stop_requested()) {
             std::this_thread::sleep_for(kReconnectPollInterval);

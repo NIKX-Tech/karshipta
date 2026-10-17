@@ -586,6 +586,10 @@ karshipta::v1::FleetMissionAck FleetManager::handle_update_fleet_mission_routes(
     }
     return ack;
 }
+
+void FleetManager::push_geofence_to_all_wards(WardManager& ward_manager) const {
+    ward_manager.push_geofence(store_.list_zones());
+}
 #endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
 
 karshipta::v1::FleetMissionAck FleetManager::handle_remove_fleet_mission(

@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <mavsdk/mavsdk.h>
+#include <mavsdk/plugins/geofence/geofence.h>
 #include <karshipta/v1/envelope.pb.h>
 #include <karshipta/v1/fleet.pb.h>
 #include <ward_connection.h>
@@ -213,6 +214,18 @@ public:
     // every other ward's manager calls behind one slow client).
     void dispatch_command(const karshipta::v1::Command& command);
 
+    // Called by FleetManager after every successful zone mutation
+    // (karshipta#247): converts the full current zone set into one
+    // mavsdk::Geofence::GeofenceData (one Polygon per zone, KEEP_IN ->
+    // Inclusion, KEEP_OUT -> Exclusion - horizontal boundary only, see
+    // WardActions::upload_geofence's own comment on why altitude bounds
+    // aren't included), caches it, and pushes it to every currently
+    // connected ward. The cache is what run_reconnect_loop re-sends to a
+    // ward that (re)connects later, so a gateway restart or a dropped link
+    // never leaves a ward's geofence stale relative to zones changed while
+    // it was offline.
+    void push_geofence(const std::vector<karshipta::v1::Zone>& zones);
+
     // Every CommandAck this WardManager ever produces (rejection or real
     // executor outcome) is also handed to this observer, if set - lets
     // FleetManager correlate a fleet mission's Stop dispatch (a synthesized
@@ -398,6 +411,15 @@ private:
     // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
     std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
+    // The geofence push_geofence() most recently built, re-sent to each
+    // ward run_reconnect_loop brings back up. Its own mutex, independent of
+    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
+    // the shared_ptrs it needs) before calling into any ward's
+    // upload_geofence(), the same snapshot-then-release shape
+    // run_publish_loop already uses, so these two locks are never nested
+    // and need no relative ordering rule.
+    mutable std::mutex geofence_mutex_;
+    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Set-once, see the setters' own doc comments. Never reassigned after
     // start_publishing()/the first dispatch_command(), so reading these from
     // the publish thread or a CommandExecutor worker thread needs no lock.
