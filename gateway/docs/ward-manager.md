@@ -84,7 +84,7 @@ and fleet persistence are all facade methods on this class.
 | `load_persisted()` | Reloads every ward from `persistence_path`; 0 if unset or the file doesn't exist. |
 | `restore_and_start()` | `load_persisted()` then `start_all()` - the crash-recovery entry point. |
 | `start_publishing(interval = kDefaultPublishInterval)` | Launches the shared telemetry-publish worker. |
-| `send_ward_info(client)` | Sends one `WardInfo` per discovered ward to a single client (for `Transport::on_connect`). |
+| `send_ward_info(client)` | Sends one `WardInfo` per discovered ward to a single client (for `Transport::on_connect`). `WardInfo.autopilot` ("PX4"/"ArduPilot"/"") comes from `mavsdk::System::autopilot_type()` (the vehicle's own HEARTBEAT, already-cached, no round trip) - fixed from an earlier hardcoded `"PX4"` stub once karshipta#212's console work needed the real value to pick the right per-firmware parameter names. |
 | `is_started`/`is_connected`/`list_status`/`list_ward_ids` | Read-only fleet queries. |
 | `remove_ward(ward_id)` / `remove_all()` | Applies `stop`'s ground-safety rules, then erases. |
 | `handle_add_ward`/`handle_remove_ward` | Wire entry points: `AddWard`/`RemoveWard` in, `WardConfigAck` out. Never throw. |
