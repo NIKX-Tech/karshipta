@@ -43,7 +43,7 @@ Karshipta connects to real or simulated wards over MAVLink (PX4, ArduPilot) and 
 |---|---|
 | `proto/` protobuf contract | `karshipta.v1` schema, the single source of truth for the wire format |
 | `gateway/` MAVLink + Herald edge service | connectivity, telemetry, commands, missions, multi-ward, Fleet/Zone/Fleet-Mission persistence, Herald ingestion (native, vendor-mapped, GT06), relay transport, concurrency-hardened - M1 to M10 in [gateway/BRIEF.md](gateway/BRIEF.md) |
-| `console/` web dashboard | map, commands, missions, Fleet and Zone management, per-ward Fleet Missions, airspace overlay, simulated fleet, published as an embeddable npm package - C1 to C8 in [ROADMAP.md](ROADMAP.md); a demo GIF and a fresh-eyes quickstart pass are still open ([#22](https://github.com/NIKX-Tech/karshipta/issues/22)/[#32](https://github.com/NIKX-Tech/karshipta/issues/32)), not blocking this release |
+| `console/` web dashboard | map, commands, missions, Fleet and Zone management, per-ward Fleet Missions, airspace overlay, simulated fleet, published as an embeddable npm package - C1 to C8 in [ROADMAP.md](ROADMAP.md); a fresh-eyes quickstart pass is still open ([#242](https://github.com/NIKX-Tech/karshipta/issues/242)), not blocking this release |
 | `deploy/` one-command demo | SITL + gateway + console all wired up |
 | Prebuilt gateway binaries | macOS (arm64), Linux, Windows, published to [GitHub Releases](https://github.com/NIKX-Tech/karshipta/releases) on each tagged release |
 
