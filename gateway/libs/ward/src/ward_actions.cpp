@@ -64,6 +64,14 @@ std::string WardActions::result_name(const mavsdk::Geofence::Result result) {
     return stream.str();
 }
 
+// Param::Result's operator<< is exported by the linked build (confirmed,
+// same as Geofence::Result) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Param::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
 WardActions::WardActions(WardConnection& connection) : connection_(connection) {}
 
 bool WardActions::ensure_action() const {
@@ -96,6 +104,16 @@ bool WardActions::ensure_geofence() const {
     return true;
 }
 
+bool WardActions::ensure_param() const {
+    std::lock_guard lock(init_mutex_);
+    if (param_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    param_ = std::make_unique<mavsdk::Param>(connection_.get_system());
+    spdlog::info("param plugin created");
+    return true;
+}
+
 mavsdk::Action::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
@@ -119,6 +137,16 @@ mavsdk::MavlinkPassthrough::Result WardActions::log_result(
 mavsdk::Geofence::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Geofence::Result result) {
     if (result != mavsdk::Geofence::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Param::Result WardActions::log_result(const std::string& label,
+                                               const mavsdk::Param::Result result) {
+    if (result != mavsdk::Param::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
@@ -236,4 +264,41 @@ mavsdk::Geofence::Result WardActions::upload_geofence(
     const mavsdk::Geofence::GeofenceData& data) const {
     if (!ensure_geofence()) return mavsdk::Geofence::Result::Error;
     return log_result("upload geofence", geofence_->upload_geofence(data));
+}
+
+mavsdk::Param::AllParams WardActions::get_all_params() const {
+    if (!ensure_param()) {
+        spdlog::error("get all params failed: not connected");
+        return {};
+    }
+    const auto params = param_->get_all_params();
+    spdlog::info("get all params succeeded ({} int, {} float)", params.int_params.size(),
+                 params.float_params.size());
+    return params;
+}
+
+std::pair<mavsdk::Param::Result, int32_t> WardActions::get_param_int(const std::string& name) const {
+    if (!ensure_param()) return {mavsdk::Param::Result::ConnectionError, 0};
+    const auto [result, value] = param_->get_param_int(name);
+    log_result("get param '" + name + "'", result);
+    return {result, value};
+}
+
+std::pair<mavsdk::Param::Result, float> WardActions::get_param_float(const std::string& name) const {
+    if (!ensure_param()) return {mavsdk::Param::Result::ConnectionError, 0.0f};
+    const auto [result, value] = param_->get_param_float(name);
+    log_result("get param '" + name + "'", result);
+    return {result, value};
+}
+
+mavsdk::Param::Result WardActions::set_param_int(const std::string& name, const int32_t value) const {
+    if (!ensure_param()) return mavsdk::Param::Result::ConnectionError;
+    return log_result("set param '" + name + "' to " + std::to_string(value),
+                       param_->set_param_int(name, value));
+}
+
+mavsdk::Param::Result WardActions::set_param_float(const std::string& name, const float value) const {
+    if (!ensure_param()) return mavsdk::Param::Result::ConnectionError;
+    return log_result("set param '" + name + "' to " + std::to_string(value),
+                       param_->set_param_float(name, value));
 }

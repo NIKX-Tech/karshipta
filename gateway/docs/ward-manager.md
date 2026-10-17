@@ -73,6 +73,8 @@ and fleet persistence are all facade methods on this class.
 | `add_ward(const WardConfig&)` | Builds the object graph and registers it; does not connect. Rejects an empty or already-registered `ward_id`, or a nonzero `system_id` already bound elsewhere. |
 | `dispatch_command(const Command&)` | Routes to the ward's `CommandExecutor`; synthesizes a REJECTED `CommandAck` for unknown/stopped/busy wards. |
 | `push_geofence(const vector<Zone>&)` | Builds one `mavsdk::Geofence::GeofenceData` from the full zone set (karshipta#247, horizontal boundary only), caches it, and uploads it to every currently connected ward via `WardActions::upload_geofence()`. Called by `FleetManager::push_geofence_to_all_wards()` after every zone mutation, and again from each ward's own `reconnect_worker` on every reconnect so the cache is what re-applies after a dropped link. |
+| `handle_get_params(const GetParams&) const` | Implements `GetParams` (karshipta#211). Direct, synchronous `WardActions::get_all_params()` call - no executor queue, no busy flag, same shape as `push_geofence()`. Rejects (empty `params`) if the ward is unknown or registered but not currently connected, never returns an empty list that could be mistaken for "this vehicle genuinely has zero parameters." `main.cpp` sends the response only to the requester, not a broadcast - a param dump isn't shared mutable state other consoles need to learn about. |
+| `handle_set_param(const SetParam&) const` | Implements `SetParam` (karshipta#211). Same direct, synchronous shape. On a successful write, reads the parameter back (`WardActions::get_param_int`/`get_param_float`) so `ParamAck.param` carries the vehicle-confirmed value, not an echo of the request - `set_param_*`'s MAVSDK call returns only a `Result`, never the stored value. `main.cpp` broadcasts the ack (unlike `GetParams`'s response): a confirmed parameter change is real vehicle state other consoles watching this ward should learn about, same as `CommandAck`. |
 | `handle_mission_upload(const Mission&)` | Routes to the ward's `WardMission::enqueue_upload()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards (no `CommandAck`-shaped ack exists for missions). |
 | `handle_mission_file_upload(const MissionFileUpload&)` | Converts via the ward's `MissionImporter::import()` (synchronous - local parsing, not a MAVLink round trip), then routes through `handle_mission_upload()`'s same path on success; a WARNING `Event` on either the ward lookup or the import itself failing. |
 | `handle_mission_download_request(const MissionDownloadRequest&)` | Routes to the ward's `WardMission::enqueue_download()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards. Result surfaces later via the publish tick. |
@@ -207,6 +209,14 @@ a real socket:
   testable without a live SITL; `fleet_manager_test.cpp`'s
   `PushGeofenceToAllWardsForwardsCurrentZoneSetWithoutThrowing` covers the
   `FleetManager` side of the same plumbing.
+- `HandleGetParamsRejectsUnknownWardWithReason`/
+  `HandleGetParamsRejectsUnconnectedWardWithReason`,
+  `HandleSetParamRejectsUnknownWardWithReason`/
+  `HandleSetParamRejectsRequestWithNoParam`/
+  `HandleSetParamRejectsUnconnectedWardWithReason` (karshipta#211): same
+  no-live-SITL limit as the geofence tests above - these assert the
+  returned `ParamList`/`ParamAck` directly (both handlers return their
+  response rather than broadcasting it), not `transport_.broadcast_envelopes()`.
 - `DispatchCommandRejectsUnknownWardWithReason`: the broadcast `CommandAck`
   carries the offending id in its message.
 - `RemoveWardRemovesNeverStartedWard`.

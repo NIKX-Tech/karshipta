@@ -288,6 +288,28 @@ public:
     // take_download_result().
     void handle_mission_download_request(const karshipta::v1::MissionDownloadRequest& request);
 
+    // Implements GetParams (karshipta#211). Unlike mission upload/download,
+    // this is a direct, synchronous WardActions call (MAVSDK's
+    // get_all_params() blocks) - no executor queue, no busy flag, same
+    // "call straight through WardActions" shape push_geofence() already
+    // uses. Rejects with a reason (ward unknown, or registered but not
+    // currently connected - an empty AllParams from an unconnected ward
+    // would otherwise look identical to "this vehicle genuinely has zero
+    // parameters") rather than ever silently returning an empty list.
+    [[nodiscard]] karshipta::v1::ParamList handle_get_params(
+        const karshipta::v1::GetParams& request) const;
+
+    // Implements SetParam (karshipta#211). Same direct, synchronous shape
+    // as handle_get_params() above. On a successful write, reads the
+    // parameter back (WardActions::get_param_int/float) so ParamAck.param
+    // carries the value the vehicle actually confirmed, not just an echo
+    // of what was requested - MAVSDK's set_param_* returns only a Result,
+    // never the stored value. Falls back to echoing the requested value
+    // only if that readback itself fails after a successful write (a rare
+    // double-fault, still reported as SUCCESS since the write did land).
+    [[nodiscard]] karshipta::v1::ParamAck handle_set_param(
+        const karshipta::v1::SetParam& request) const;
+
     // Rejects an upstream envelope from a connection Transport marked
     // ClientRole::kViewer (gateway issue #20: read-only viewer mode). Never
     // forwards the payload; answers instead with the same reasoned

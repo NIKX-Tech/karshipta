@@ -611,6 +611,127 @@ void WardManager::handle_mission_download_request(
     clear_busy(ward);
 }
 
+karshipta::v1::ParamList WardManager::handle_get_params(
+    const karshipta::v1::GetParams& request) const {
+    karshipta::v1::ParamList response;
+    response.set_request_id(request.request_id());
+    response.set_ward_id(request.ward_id());
+
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("get_params rejected: unknown ward_id '{}'", request.ward_id());
+        response.set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+        response.set_message("unknown ward_id: " + request.ward_id());
+        return response;
+    }
+    // An unconnected ward's get_all_params() would just return an empty
+    // AllParams (WardActions::get_all_params()'s own doc comment) -
+    // indistinguishable from "this vehicle genuinely has zero parameters"
+    // unless checked explicitly here first.
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("get_params rejected: ward_id '{}' is not connected", request.ward_id());
+        response.set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+        response.set_message("ward is not connected");
+        return response;
+    }
+
+    const auto all_params = ward->actions->get_all_params();
+    response.mutable_params()->Reserve(
+        static_cast<int>(all_params.int_params.size() + all_params.float_params.size()));
+    for (const auto& int_param : all_params.int_params) {
+        auto* param = response.add_params();
+        param->set_name(int_param.name);
+        param->set_type(karshipta::v1::PARAM_TYPE_INT);
+        param->set_int_value(int_param.value);
+    }
+    for (const auto& float_param : all_params.float_params) {
+        auto* param = response.add_params();
+        param->set_name(float_param.name);
+        param->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+        param->set_float_value(float_param.value);
+    }
+    response.set_status(karshipta::v1::PARAM_LIST_STATUS_SUCCESS);
+    return response;
+}
+
+karshipta::v1::ParamAck WardManager::handle_set_param(const karshipta::v1::SetParam& request) const {
+    karshipta::v1::ParamAck ack;
+    ack.set_request_id(request.request_id());
+    ack.set_ward_id(request.ward_id());
+
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("set_param rejected: unknown ward_id '{}'", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("unknown ward_id: " + request.ward_id());
+        return ack;
+    }
+    // Request-shape check before the connection check below: whether this
+    // request even carries a param to set is independent of whether the
+    // ward happens to be connected right now, same ordering
+    // command_executor.cpp uses for its own "does this command carry what
+    // it needs" checks.
+    if (!request.has_param()) {
+        spdlog::warn("set_param rejected: ward_id '{}' sent no param", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("set_param has no param");
+        return ack;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("set_param rejected: ward_id '{}' is not connected", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("ward is not connected");
+        return ack;
+    }
+
+    const auto& param = request.param();
+    mavsdk::Param::Result write_result;
+    switch (param.type()) {
+        case karshipta::v1::PARAM_TYPE_INT:
+            write_result = ward->actions->set_param_int(param.name(), param.int_value());
+            break;
+        case karshipta::v1::PARAM_TYPE_FLOAT:
+            write_result = ward->actions->set_param_float(param.name(), param.float_value());
+            break;
+        default:
+            spdlog::warn("set_param rejected: ward_id '{}' param '{}' has unspecified type",
+                         request.ward_id(), param.name());
+            ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+            ack.set_message("param has unspecified type");
+            return ack;
+    }
+    if (write_result != mavsdk::Param::Result::Success) {
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message(WardActions::result_name(write_result));
+        return ack;
+    }
+
+    // Read back the value the vehicle actually stored - set_param_* returns
+    // only a Result, never the stored value (see handle_set_param()'s own
+    // header doc comment for why an echo of the request isn't good enough).
+    if (param.type() == karshipta::v1::PARAM_TYPE_INT) {
+        const auto [read_result, confirmed] = ward->actions->get_param_int(param.name());
+        if (read_result == mavsdk::Param::Result::Success) {
+            ack.mutable_param()->set_name(param.name());
+            ack.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_INT);
+            ack.mutable_param()->set_int_value(confirmed);
+        } else {
+            *ack.mutable_param() = param;
+        }
+    } else {
+        const auto [read_result, confirmed] = ward->actions->get_param_float(param.name());
+        if (read_result == mavsdk::Param::Result::Success) {
+            ack.mutable_param()->set_name(param.name());
+            ack.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+            ack.mutable_param()->set_float_value(confirmed);
+        } else {
+            *ack.mutable_param() = param;
+        }
+    }
+    ack.set_status(karshipta::v1::PARAM_ACK_STATUS_SUCCESS);
+    return ack;
+}
+
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                                          const karshipta::v1::Envelope& envelope) {
     switch (envelope.payload_case()) {
@@ -680,6 +801,35 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                 client, request.ward_id());
             broadcast_mission_event(request.ward_id(), "MISSION_DOWNLOAD_REJECTED",
                                     kReadOnlySessionMessage);
+            break;
+        }
+        case karshipta::v1::Envelope::kGetParams: {
+            const auto& request = envelope.get_params();
+            spdlog::warn("viewer client {} attempted get_params on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope response_envelope;
+            auto* response = response_envelope.mutable_param_list();
+            response->set_request_id(request.request_id());
+            response->set_ward_id(request.ward_id());
+            response->set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+            response->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: a param dump is a
+            // read-only response meaningful just to the requester, same
+            // reasoning handle_get_params()'s own caller (main.cpp) uses.
+            transport_.send(client, serialize_envelope(response_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kSetParam: {
+            const auto& request = envelope.set_param();
+            spdlog::warn("viewer client {} attempted set_param on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_param_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
             break;
         }
         default:
