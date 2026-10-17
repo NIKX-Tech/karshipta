@@ -1282,7 +1282,8 @@
 	// index build is fast enough (designed for hundreds of thousands of
 	// points) that rebuilding on every telemetry tick for a self-hosted
 	// deployment's ward count is not a real cost.
-	let clusterIndex: Supercluster<{ wardId: string }> | undefined;
+	let clusterIndex:
+		Supercluster<{ wardId: string; connected: boolean }, { anyOnline: boolean }> | undefined;
 	// Numbered pins only for the ward currently being planned (the fleet
 	// wizard's activeWardId, or the solo ward draft); other wards' routes
 	// still draw as a colored line (see ROUTE_SOURCE below) but without
@@ -1551,9 +1552,23 @@
 	// animation), so a cluster marker kept alive across renders under that
 	// id must have its displayed count refreshed every run, not just at
 	// creation, or it silently shows a stale number.
-	function updateClusterMarkerElement(element: HTMLElement, pointCount: number): void {
+	// anyOnline mirrors markerElement's own sync effect, which fades an
+	// individual disconnected ward's body to 0.4 opacity (see
+	// handle.body.style.opacity below) - a cluster bubble standing in for
+	// several wards needs the same tell once none of them are actually
+	// live, or it keeps reading as "something active in here" at a zoom
+	// level where the individual markers' own fade is invisible (folded
+	// into the bubble). Full strength the moment at least one member is
+	// online, same as the bubble's one open question ("is anything here
+	// worth zooming into") being answered yes.
+	function updateClusterMarkerElement(
+		element: HTMLElement,
+		pointCount: number,
+		anyOnline: boolean
+	): void {
 		element.setAttribute('aria-label', `${pointCount} wards, click to zoom in`);
 		element.textContent = pointCount > 99 ? '99+' : String(pointCount);
+		element.style.opacity = anyOnline ? '1' : '0.4';
 	}
 
 	$effect(() => {
@@ -2912,20 +2927,31 @@
 	$effect(() => {
 		if (!map) return;
 
-		const points: Array<GeoJSON.Feature<GeoJSON.Point, { wardId: string }>> = [];
+		const points: Array<GeoJSON.Feature<GeoJSON.Point, { wardId: string; connected: boolean }>> =
+			[];
 		for (const wardId of fleet.wardIds) {
 			const position = fleet.wards[wardId]?.state?.position;
 			if (!position) continue;
 			points.push({
 				type: 'Feature',
-				properties: { wardId },
+				properties: { wardId, connected: fleet.wards[wardId]?.state?.connected ?? false },
 				geometry: { type: 'Point', coordinates: [position.longitudeDeg, position.latitudeDeg] }
 			});
 		}
-		clusterIndex = new Supercluster<{ wardId: string }>({
-			radius: CLUSTER_RADIUS_PX,
-			maxZoom: CLUSTER_MAX_ZOOM
-		}).load(points);
+		clusterIndex = new Supercluster<{ wardId: string; connected: boolean }, { anyOnline: boolean }>(
+			{
+				radius: CLUSTER_RADIUS_PX,
+				maxZoom: CLUSTER_MAX_ZOOM,
+				// Aggregates "does this cluster have anything live in it" the same
+				// way supercluster aggregates point_count itself - see
+				// updateClusterMarkerElement's own comment on why the bubble needs
+				// this at all.
+				map: (props) => ({ anyOnline: props.connected }),
+				reduce: (accumulated, props) => {
+					accumulated.anyOnline ||= props.anyOnline;
+				}
+			}
+		).load(points);
 		const clusters = clusterIndex.getClusters([-180, -85, 180, 85], Math.floor(zoomLevel));
 
 		// Every point supercluster returns is either the original leaf
@@ -2953,6 +2979,7 @@
 			if (!('cluster' in feature.properties)) continue;
 			const clusterId = feature.properties.cluster_id;
 			const pointCount = feature.properties.point_count;
+			const anyOnline = feature.properties.anyOnline;
 			const [lon, lat] = feature.geometry.coordinates;
 			let clusterMarker = clusterMarkers[clusterId];
 			if (!clusterMarker) {
@@ -2975,7 +3002,7 @@
 				clusterMarkers[clusterId] = clusterMarker;
 			}
 			clusterMarker.setLngLat([lon, lat]);
-			updateClusterMarkerElement(clusterMarker.getElement(), pointCount);
+			updateClusterMarkerElement(clusterMarker.getElement(), pointCount, anyOnline);
 		}
 		for (const [clusterIdKey, clusterMarker] of Object.entries(clusterMarkers)) {
 			const clusterId = Number(clusterIdKey);

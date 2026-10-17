@@ -46,7 +46,22 @@
 		(
 			[
 				modeLabel ? { text: modeLabel, class: 'text-fg' } : undefined,
-				state?.flight?.armed ? { text: 'ARMED', class: 'text-armed' } : undefined,
+				// See ward-card.svelte's own comment on this same distinction:
+				// armed/inAir freezes the instant the link drops, so a bare
+				// "ARMED" here would keep reading as a current fact for a ward
+				// that's been offline for hours. dotState (already computed
+				// above from the same connected flag) is reused rather than a
+				// second ad hoc check, same as this file's own tags already
+				// lean on it for the connectivity dot.
+				state?.flight?.armed
+					? dotState === 'lost'
+						? {
+								text: 'ARMED (STALE)',
+								class: 'text-armed',
+								title: 'Last known state before the link dropped - may be stale'
+							}
+						: { text: 'ARMED', class: 'text-armed' }
+					: undefined,
 				synthetic
 					? {
 							text: 'SIM',
