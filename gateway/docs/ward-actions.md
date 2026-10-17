@@ -58,13 +58,42 @@ owning a `System` itself, and lazily constructs the underlying
 | `Result set_takeoff_altitude(float) const` | Sets the takeoff altitude used by `takeoff()`; backs `TakeoffCommand.altitude_rel_m`. |
 | `Result takeoff() const` | Implements `TakeoffCommand`. Commands takeoff to the configured altitude. Must be armed first. |
 | `Result land() const` | Implements `LandCommand`. Commands landing at the current position. |
+| `Result set_return_to_launch_altitude(float) const` | Sets the RTL altitude (meters above home) used by `return_to_launch()`; backs `ReturnToLaunchCommand.altitude_rel_m`. Same shape as `set_takeoff_altitude()` above. |
 | `Result return_to_launch() const` | Implements `ReturnToLaunchCommand`. Flies back to the home position and lands. |
 | `Result hold() const` | Backs `PauseMissionCommand`, once the M3 mission executor exists. Loiters at the current position and altitude. PX4-specific; not guaranteed on other autopilots. |
 | `Result goto_location(double lat, double lon, float alt_m, float yaw_deg) const` | Implements `GotoCommand`. `lat`/`lon`/`alt_m` come from `GotoCommand.target`; `yaw_deg` is NED yaw. |
 | `Result kill() const` | Implements `DisarmCommand{force: true}`. Disarms immediately regardless of landed state; the ward falls out of the sky if used while flying. The M3 executor must gate this on `force` and must never call it for a plain `DisarmCommand`. |
 | `Result set_current_speed(float) const` | Backs `GotoCommand.speed_m_s`. Ephemeral; not stored on the ward. |
+| `MavlinkPassthrough::Result set_home_position(double lat, double lon, float alt_msl_m) const` | Implements `SetHomeCommand`. Sends a raw `MAV_CMD_DO_SET_HOME` - see "Home position" below for why this one method uses a different plugin and a different `Result` type. |
 
-`Result` is `mavsdk::Action::Result` throughout.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`.
+
+## Home position: why one method uses a different plugin
+
+`return_to_launch()` flies to whatever the flight controller itself
+recorded as home (set automatically at arm/boot time) - MAVSDK's `Action`
+plugin has no method to change that location. It has
+`set_return_to_launch_altitude()`, which only controls the climb altitude
+RTL uses, not the location it returns to (karshipta#246). The only way to
+set a custom home point is a raw `MAV_CMD_DO_SET_HOME` MAVLink command,
+which no higher-level MAVSDK plugin wraps.
+
+`set_home_position()` sends that command via `MavlinkPassthrough`
+(`ensure_mavlink_passthrough()`, lazily constructed the same way
+`ensure_action()` constructs `action_`), with `param1=0` ("use the
+specified location", per the command's own spec). Its `Result` type is
+`mavsdk::MavlinkPassthrough::Result`, unrelated to `mavsdk::Action::Result`
+- `result_name()` is overloaded for both, and the `MavlinkPassthrough`
+overload is a hand-written switch rather than MAVSDK's own `operator<<`:
+that operator is declared in the plugin's header but not actually exported
+by the linked build (confirmed: undefined symbol at link time).
+
+`MavlinkPassthrough` itself is flagged for deprecation in MAVSDK v4 in
+favor of `MavlinkDirect`. Using it anyway here is a conscious choice. It's
+the stable, documented path to a single `COMMAND_LONG` today;
+`MavlinkDirect`'s JSON-based message construction is more involved for one
+command and worth adopting only once more of the gateway needs raw MAVLink
+access, not for this one call.
 
 ## Design: Result all the way through
 

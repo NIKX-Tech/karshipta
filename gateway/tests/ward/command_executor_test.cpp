@@ -126,7 +126,7 @@ TEST_F(CommandExecutorTest, EveryActionKindAnswersAcceptedThenTerminal) {
     expect_accepted_then_rejected("cmd-land");
 
     auto rtl = make_command("cmd-rtl");
-    rtl.mutable_rtl();
+    rtl.mutable_rtl()->set_altitude_rel_m(30.0f);
     executor_.enqueue(rtl);
     expect_accepted_then_rejected("cmd-rtl");
 
@@ -136,6 +136,24 @@ TEST_F(CommandExecutorTest, EveryActionKindAnswersAcceptedThenTerminal) {
     target->set_longitude_deg(8.545594);
     executor_.enqueue(go);
     expect_accepted_then_rejected("cmd-goto");
+
+    auto set_home = make_command("cmd-set-home");
+    auto* home_target = set_home.mutable_set_home()->mutable_target();
+    home_target->set_latitude_deg(47.397742);
+    home_target->set_longitude_deg(8.545594);
+    executor_.enqueue(set_home);
+    expect_accepted_then_rejected("cmd-set-home");
+}
+
+TEST_F(CommandExecutorTest, SetHomeWithoutTargetIsRejected) {
+    auto set_home = make_command("cmd-set-home-empty");
+    set_home.mutable_set_home();  // valid kSetHome action, but no target set
+    executor_.enqueue(set_home);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-set-home-empty"));
+    const auto acks = collector_.for_command("cmd-set-home-empty");
+    ASSERT_GE(acks.size(), 1u);
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_EQ(acks.back().message(), "set_home has no target");
 }
 
 TEST_F(CommandExecutorTest, StartMissionFailsWithoutConnection) {
