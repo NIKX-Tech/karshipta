@@ -77,34 +77,33 @@
 		{/if}
 
 		{#each groups as group (group)}
-			{@const fieldsInGroup = CURATED_FIELDS.filter((field) => field.group === group)}
-			<div>
-				<h3 class="mb-1 text-[10px] font-medium tracking-widest text-fg-muted uppercase">
-					{FIELD_GROUP_LABELS[group]}
-				</h3>
-				<div class="rounded border border-edge px-2">
-					{#each fieldsInGroup as field (field.key)}
-						{@const binding = bindingFor(field, autopilot)}
-						{#if binding}
-							<ParamFieldRow
-								{wardId}
-								{field}
-								{binding}
-								rawValue={rawValueOf(binding.name)}
-								readonly={effectiveReadonly}
-							/>
-						{:else}
-							<div class="border-b border-edge py-2 last:border-b-0">
-								<span class="text-xs font-medium text-fg-muted">{field.label}</span>
-								<p class="text-[10px] text-fg-muted">
-									{field.missingNote?.[autopilot as 'PX4' | 'ArduPilot'] ??
-										'Not available for this autopilot.'}
-								</p>
-							</div>
-						{/if}
-					{/each}
+			<!-- Only fields this ward's own firmware actually has - no mention
+			     of the other firmware or of fields that don't apply here, see
+			     param-spec.ts's own doc comment on why. -->
+			{@const fieldsInGroup = CURATED_FIELDS.filter(
+				(field) => field.group === group && bindingFor(field, autopilot)
+			)}
+			{#if fieldsInGroup.length > 0}
+				<div>
+					<h3 class="mb-1 text-[10px] font-medium tracking-widest text-fg-muted uppercase">
+						{FIELD_GROUP_LABELS[group]}
+					</h3>
+					<div class="rounded border border-edge px-2">
+						{#each fieldsInGroup as field (field.key)}
+							{@const binding = bindingFor(field, autopilot)}
+							{#if binding}
+								<ParamFieldRow
+									{wardId}
+									label={field.label}
+									{binding}
+									rawValue={rawValueOf(binding.name)}
+									readonly={effectiveReadonly}
+								/>
+							{/if}
+						{/each}
+					</div>
 				</div>
-			</div>
+			{/if}
 		{/each}
 	</div>
 {/if}

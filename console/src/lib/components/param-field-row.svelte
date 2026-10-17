@@ -1,18 +1,19 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
 	import { ParamAckStatus, ParamType } from '$lib/gen/karshipta/v1/parameter';
-	import type { CuratedField, ParamBinding } from '$lib/params/param-spec';
+	import type { ParamBinding } from '$lib/params/param-spec';
 
 	interface Props {
 		wardId: string;
-		field: CuratedField;
+		label: string;
+		/** already resolved to this ward's own firmware - see configuration-tab.svelte's bindingFor() call */
 		binding: ParamBinding;
 		/** the live wire value for binding.name, if the last GetParams response included it */
 		rawValue: number | undefined;
 		readonly: boolean;
 	}
 
-	const { wardId, field, binding, rawValue, readonly }: Props = $props();
+	const { wardId, label, binding, rawValue, readonly }: Props = $props();
 
 	const currentDisplayValue = $derived(
 		rawValue !== undefined ? binding.toDisplay(rawValue) : undefined
@@ -58,14 +59,21 @@
 
 <div class="flex flex-col gap-1 border-b border-edge py-2 last:border-b-0">
 	<div class="flex items-baseline justify-between gap-2">
-		<span class="text-xs font-medium">{field.label}</span>
+		<span class="text-xs font-medium">{label}</span>
 		<span class="font-mono text-[10px] text-fg-muted">{binding.name}</span>
 	</div>
-	<p class="text-[10px] text-fg-muted">{field.description}</p>
+	<p class="text-[10px] text-fg-muted">
+		{binding.description}
+		<!-- binding.docUrl is always a hardcoded, fully-qualified external https:// URL from param-spec.ts, never an internal route - resolve() is for this app's own route ids. -->
+		<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+		<a href={binding.docUrl} target="_blank" rel="noreferrer" class="underline hover:text-fg">
+			Docs
+		</a>
+	</p>
 	{#if binding.isAction}
 		<p class="text-[9px] text-fg-muted">
-			Numeric failsafe action code - consult your autopilot's own parameter documentation for what
-			each value means.
+			Numeric failsafe action code - see Docs above for what each value means on this ward's own
+			firmware.
 		</p>
 	{/if}
 	<div class="flex items-center gap-1.5">

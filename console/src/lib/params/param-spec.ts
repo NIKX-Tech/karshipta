@@ -7,28 +7,17 @@ import { ParamType } from '$lib/gen/karshipta/v1/parameter';
  * the raw MAVLink parameter set - a vehicle carries hundreds more, left
  * to tier 3 (karshipta#214).
  *
- * PX4 and ArduPilot name - and in several cases structurally differ on -
- * the same safety concept, verified against each firmware's own docs
- * rather than assumed:
- * - RTL speed has no dedicated PX4 parameter at all (RTL reuses general
- *   cruise-speed settings, not a single confirmed override); ArduPilot
- *   has RTL_SPEED.
- * - Low/warn battery threshold is a 0-1 capacity fraction on PX4
- *   (BAT_LOW_THR) but a plain voltage on ArduPilot (BATT_LOW_VOLT) -
- *   genuinely different physical quantities, not just different units of
- *   the same one.
- * - PX4 has three battery tiers (low/critical/emergency) sharing one
- *   action parameter (COM_LOW_BAT_ACT); ArduPilot has two tiers
- *   (low/critical), each with its own action parameter.
- * - ArduPilot's RC-loss failsafe is a PWM threshold (FS_THR_VALUE), not a
- *   timeout like PX4's COM_RC_LOSS_T; ArduPilot has no separate
- *   configurable data-link-loss timeout PX4's COM_DL_LOSS_T has an
- *   equivalent for.
- *
- * Rather than force every field into a fake 1:1 shape across firmwares,
- * each field's px4/ardupilot binding is independently optional - a field
- * with only one firmware's binding present still renders, just without
- * that other firmware's row (see missingNote).
+ * PX4 and ArduPilot differ structurally here, not just in naming,
+ * verified against each firmware's own docs rather than assumed (see each
+ * field's own comment below for the specific divergence). None of that
+ * ever reaches the UI as cross-firmware text, though: an operator looking
+ * at a PX4 ward has no reason to be told what ArduPilot calls the same
+ * concept, or that it doesn't exist there - confusing and irrelevant to
+ * them (confirmed live, fixed after an initial version did exactly that).
+ * A field with no binding for the connected ward's own firmware is simply
+ * not rendered - see bindingFor() and configuration-tab.svelte's use of
+ * it - and every description/docUrl below is already per-firmware, never
+ * naming the other one.
  */
 
 export type AutopilotFamily = 'PX4' | 'ArduPilot';
@@ -38,13 +27,19 @@ export type FieldGroup = 'rtl' | 'battery' | 'rcLoss' | 'dataLinkLoss';
 /** Action/enum-valued parameters (failsafe actions) are shown as a raw
  * integer, never decoded to a label: the exact meaning of each code
  * varies by firmware and version, and guessing it wrong would be worse
- * than not guessing at all. isAction drives that raw-integer treatment
- * in the UI and adds a "consult your autopilot's docs" hint. */
+ * than not guessing at all. isAction only changes the UI's own hint text;
+ * docUrl (every binding has one, action or not) is what actually answers
+ * "what does this mean" - linked to the specific page of that firmware's
+ * own docs covering this exact parameter, not a generic parameter dump. */
 export interface ParamBinding {
 	name: string;
 	paramType: ParamType;
 	unit: string;
 	isAction?: boolean;
+	/** per-firmware wording - never references the other firmware by name */
+	description: string;
+	/** this firmware's own docs page covering this exact parameter */
+	docUrl: string;
 	/** raw wire value -> value shown/edited in the UI */
 	toDisplay: (raw: number) => number;
 	/** UI value -> raw wire value to send */
@@ -58,11 +53,8 @@ export interface CuratedField {
 	key: string;
 	label: string;
 	group: FieldGroup;
-	description: string;
 	px4?: ParamBinding;
 	ardupilot?: ParamBinding;
-	/** set when one firmware has no equivalent at all, so the UI can say why a row is missing instead of looking broken */
-	missingNote?: Partial<Record<AutopilotFamily, string>>;
 }
 
 // Display-direction conversions are rounded to a couple decimal places:
@@ -83,16 +75,30 @@ const normFromPercent = (display: number) => display / 100;
 const metersFromCm = (raw: number) => roundTo(raw / 100, 2);
 const cmFromMeters = (display: number) => Math.round(display * 100);
 
+// Doc pages, each verified to actually exist and cover the parameters
+// cited against it (fetched directly, not guessed from a URL pattern):
+// PX4's safety-config page covers every PX4 failsafe parameter below in
+// one place; PX4's return-mode page is the separate home for RTL_RETURN_ALT.
+// ArduPilot splits by concern into its own dedicated pages per failsafe
+// kind, so each ArduPilot binding points at a different one.
+const PX4_RETURN_DOCS = 'https://docs.px4.io/main/en/flight_modes_mc/return.html';
+const PX4_SAFETY_DOCS = 'https://docs.px4.io/main/en/config/safety.html';
+const AP_RTL_DOCS = 'https://ardupilot.org/copter/docs/rtl-mode.html';
+const AP_BATTERY_DOCS = 'https://ardupilot.org/copter/docs/failsafe-battery.html';
+const AP_RADIO_DOCS = 'https://ardupilot.org/copter/docs/radio-failsafe.html';
+const AP_GCS_DOCS = 'https://ardupilot.org/copter/docs/gcs-failsafe.html';
+
 export const CURATED_FIELDS: CuratedField[] = [
 	{
 		key: 'rtl_altitude',
 		label: 'RTL altitude',
 		group: 'rtl',
-		description: 'Altitude the ward climbs to (if not already higher) before flying home on RTL.',
 		px4: {
 			name: 'RTL_RETURN_ALT',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: 'm',
+			description: 'Altitude the ward climbs to (if not already higher) before flying home.',
+			docUrl: PX4_RETURN_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 1,
@@ -103,6 +109,8 @@ export const CURATED_FIELDS: CuratedField[] = [
 			name: 'RTL_ALT',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: 'm',
+			description: 'Minimum altitude the ward climbs to before flying home.',
+			docUrl: AP_RTL_DOCS,
 			toDisplay: metersFromCm,
 			toRaw: cmFromMeters,
 			min: 2,
@@ -111,34 +119,39 @@ export const CURATED_FIELDS: CuratedField[] = [
 		}
 	},
 	{
+		// PX4 has no dedicated RTL speed parameter at all - return mode
+		// reuses the vehicle's general cruise-speed setting, no single
+		// confirmed override - so this field has no px4 binding and simply
+		// doesn't render for a PX4 ward.
 		key: 'rtl_speed',
 		label: 'RTL speed',
 		group: 'rtl',
-		description: 'Horizontal speed during the return flight.',
 		ardupilot: {
 			name: 'RTL_SPEED',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: 'm/s',
+			description: 'Horizontal speed during the return flight.',
+			docUrl: AP_RTL_DOCS,
 			toDisplay: metersFromCm,
 			toRaw: cmFromMeters,
 			min: 0,
 			max: 20,
 			step: 0.5
-		},
-		missingNote: {
-			PX4: 'PX4 has no dedicated RTL speed parameter - return mode uses the vehicle’s general cruise speed setting instead.'
 		}
 	},
 	{
+		// Different physical quantities, not just different units of the
+		// same one: PX4's is a 0-1 remaining-capacity fraction, ArduPilot's
+		// is a plain voltage.
 		key: 'battery_low_threshold',
 		label: 'Low/warn battery threshold',
 		group: 'battery',
-		description:
-			'Level that triggers a low-battery warning (PX4) or the low-tier failsafe (ArduPilot).',
 		px4: {
 			name: 'BAT_LOW_THR',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: '%',
+			description: 'Remaining-capacity level that triggers a low-battery warning.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: percentFromNorm,
 			toRaw: normFromPercent,
 			min: 12,
@@ -149,6 +162,8 @@ export const CURATED_FIELDS: CuratedField[] = [
 			name: 'BATT_LOW_VOLT',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: 'V',
+			description: 'Voltage level that triggers the low-tier battery failsafe.',
+			docUrl: AP_BATTERY_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 0,
@@ -160,12 +175,12 @@ export const CURATED_FIELDS: CuratedField[] = [
 		key: 'battery_critical_threshold',
 		label: 'Critical battery threshold',
 		group: 'battery',
-		description:
-			'Level that triggers the Return action on PX4, or ArduPilot’s second (critical) failsafe tier.',
 		px4: {
 			name: 'BAT_CRIT_THR',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: '%',
+			description: 'Remaining-capacity level that triggers the Return action.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: percentFromNorm,
 			toRaw: normFromPercent,
 			min: 5,
@@ -176,6 +191,8 @@ export const CURATED_FIELDS: CuratedField[] = [
 			name: 'BATT_CRT_VOLT',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: 'V',
+			description: 'Voltage level that triggers the critical (second-tier) battery failsafe.',
+			docUrl: AP_BATTERY_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 0,
@@ -184,36 +201,40 @@ export const CURATED_FIELDS: CuratedField[] = [
 		}
 	},
 	{
+		// ArduPilot has two battery failsafe tiers (low, critical), not
+		// PX4's three - no "emergency" level exists there, so this field
+		// has no ardupilot binding.
 		key: 'battery_emergency_threshold',
 		label: 'Emergency battery threshold',
 		group: 'battery',
-		description: 'Level that triggers an immediate land.',
 		px4: {
 			name: 'BAT_EMERGEN_THR',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: '%',
+			description: 'Remaining-capacity level that triggers an immediate land.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: percentFromNorm,
 			toRaw: normFromPercent,
 			min: 3,
 			max: 10,
 			step: 1
-		},
-		missingNote: {
-			ArduPilot:
-				'ArduPilot has two battery failsafe tiers (low, critical), not PX4’s three - there is no third "emergency" level.'
 		}
 	},
 	{
+		// PX4 shares one action across all three battery tiers; ArduPilot
+		// gives the low tier its own action, separate from the critical
+		// tier's (battery_critical_action below) - a real structural
+		// difference, not just a naming one.
 		key: 'battery_low_action',
 		label: 'Battery failsafe action',
 		group: 'battery',
-		description:
-			'What the ward does when a battery threshold trips. PX4 shares one action across all three tiers; ArduPilot’s low-tier action is separate from its critical-tier action below.',
 		px4: {
 			name: 'COM_LOW_BAT_ACT',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description: 'What the ward does when any battery threshold above trips.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		},
@@ -222,6 +243,8 @@ export const CURATED_FIELDS: CuratedField[] = [
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description: 'What the ward does when the low-tier battery threshold trips.',
+			docUrl: AP_BATTERY_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		}
@@ -230,68 +253,67 @@ export const CURATED_FIELDS: CuratedField[] = [
 		key: 'battery_critical_action',
 		label: 'Critical battery failsafe action',
 		group: 'battery',
-		description: 'ArduPilot’s separate action for its critical (second) battery tier.',
 		ardupilot: {
 			name: 'BATT_FS_CRT_ACT',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description: 'What the ward does when the critical (second-tier) battery threshold trips.',
+			docUrl: AP_BATTERY_DOCS,
 			toDisplay: identity,
 			toRaw: identity
-		},
-		missingNote: {
-			PX4: 'PX4 uses the single battery failsafe action above for every tier.'
 		}
 	},
 	{
+		// ArduPilot's RC-loss failsafe triggers on a PWM threshold
+		// (rc_loss_pwm_threshold below), not a timeout - no ardupilot
+		// binding here.
 		key: 'rc_loss_timeout',
 		label: 'RC loss timeout',
 		group: 'rcLoss',
-		description: 'How long the radio link can be missing before the RC-loss failsafe triggers.',
 		px4: {
 			name: 'COM_RC_LOSS_T',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: 's',
+			description: 'How long the radio link can be missing before the RC-loss failsafe triggers.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 0,
 			max: 35,
 			step: 0.1
-		},
-		missingNote: {
-			ArduPilot: 'ArduPilot triggers RC-loss on a PWM threshold (below), not a timeout.'
 		}
 	},
 	{
+		// The ArduPilot counterpart to PX4's timeout above - a threshold,
+		// not a duration, so no px4 binding here.
 		key: 'rc_loss_pwm_threshold',
 		label: 'RC loss PWM threshold',
 		group: 'rcLoss',
-		description: 'Throttle PWM value below which ArduPilot treats the radio link as lost.',
 		ardupilot: {
 			name: 'FS_THR_VALUE',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: 'µs',
+			description: 'Throttle PWM value below which the radio link is treated as lost.',
+			docUrl: AP_RADIO_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 925,
 			max: 1100,
 			step: 1
-		},
-		missingNote: {
-			PX4: 'PX4 uses a timeout (above), not a PWM threshold.'
 		}
 	},
 	{
 		key: 'rc_loss_action',
 		label: 'RC loss failsafe action',
 		group: 'rcLoss',
-		description:
-			'What the ward does on RC loss. On ArduPilot this same parameter also enables/disables the failsafe (0 = disabled).',
 		px4: {
 			name: 'NAV_RCL_ACT',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description: 'What the ward does on RC loss.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		},
@@ -300,6 +322,9 @@ export const CURATED_FIELDS: CuratedField[] = [
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description:
+				'What the ward does on RC loss. This value also enables/disables the failsafe (0 = disabled).',
+			docUrl: AP_RADIO_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		}
@@ -308,34 +333,43 @@ export const CURATED_FIELDS: CuratedField[] = [
 		key: 'data_link_loss_timeout',
 		label: 'Data link loss timeout',
 		group: 'dataLinkLoss',
-		description:
-			'How long the ground station/telemetry link can be missing before the failsafe triggers.',
 		px4: {
 			name: 'COM_DL_LOSS_T',
 			paramType: ParamType.PARAM_TYPE_FLOAT,
 			unit: 's',
+			description:
+				'How long the ground station/telemetry link can be missing before the failsafe triggers.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: identity,
 			toRaw: identity,
 			min: 0,
 			max: 60,
 			step: 0.5
 		},
-		missingNote: {
-			ArduPilot:
-				'No separately configurable timeout was confirmed for ArduPilot’s GCS failsafe; only the enable/action parameter below exists.'
+		ardupilot: {
+			name: 'FS_GCS_TIMEOUT',
+			paramType: ParamType.PARAM_TYPE_FLOAT,
+			unit: 's',
+			description: 'How long the ground station link can be missing before the failsafe triggers.',
+			docUrl: AP_GCS_DOCS,
+			toDisplay: identity,
+			toRaw: identity,
+			min: 1,
+			max: 120,
+			step: 0.5
 		}
 	},
 	{
 		key: 'data_link_loss_action',
 		label: 'Data link loss failsafe action',
 		group: 'dataLinkLoss',
-		description:
-			'What the ward does on data-link loss. On ArduPilot this same parameter also enables/disables the failsafe (0 = disabled).',
 		px4: {
 			name: 'NAV_DLL_ACT',
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description: 'What the ward does on data-link loss.',
+			docUrl: PX4_SAFETY_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		},
@@ -344,6 +378,9 @@ export const CURATED_FIELDS: CuratedField[] = [
 			paramType: ParamType.PARAM_TYPE_INT,
 			unit: '',
 			isAction: true,
+			description:
+				'What the ward does on data-link loss. This value also enables/disables the failsafe (0 = disabled).',
+			docUrl: AP_GCS_DOCS,
 			toDisplay: identity,
 			toRaw: identity
 		}
