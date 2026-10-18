@@ -99,9 +99,17 @@
 				<button type="button" class="refresh-button" disabled={loading} onclick={refresh}>
 					{loading ? 'Loading…' : 'Refresh'}
 				</button>
-				<button type="button" class="refresh-button" onclick={() => (calibrationOpen = true)}>
-					Calibrate sensors
-				</button>
+				<!-- Hidden for a readonly viewer, not just disabled - matching
+				     logs-panel.svelte's own Flight logs trigger: calibration is a
+				     real MAVLink operation on the vehicle's sensors, not a read,
+				     so it gets the same command-surface treatment as the Control
+				     tab rather than Refresh above (a GetParams read, harmless for
+				     a viewer either way). -->
+				{#if !effectiveReadonly}
+					<button type="button" class="refresh-button" onclick={() => (calibrationOpen = true)}>
+						Calibrate sensors
+					</button>
+				{/if}
 			</div>
 		</div>
 
