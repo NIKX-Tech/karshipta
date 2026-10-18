@@ -81,6 +81,14 @@ std::string WardActions::result_name(const mavsdk::LogFiles::Result result) {
     return stream.str();
 }
 
+// Calibration::Result's operator<< is exported by the linked build
+// (confirmed via nm, same as the others above) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Calibration::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
 WardActions::WardActions(WardConnection& connection) : connection_(connection) {}
 
 bool WardActions::ensure_action() const {
@@ -133,6 +141,16 @@ bool WardActions::ensure_log_files() const {
     return true;
 }
 
+bool WardActions::ensure_calibration() const {
+    std::lock_guard lock(init_mutex_);
+    if (calibration_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    calibration_ = std::make_unique<mavsdk::Calibration>(connection_.get_system());
+    spdlog::info("calibration plugin created");
+    return true;
+}
+
 mavsdk::Action::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
@@ -176,6 +194,24 @@ mavsdk::Param::Result WardActions::log_result(const std::string& label,
 mavsdk::LogFiles::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::LogFiles::Result result) {
     if (result != mavsdk::LogFiles::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Calibration::Result WardActions::log_result(const std::string& label,
+                                                     const mavsdk::Calibration::Result result) {
+    // Cancelled is an expected, operator-initiated outcome here, not a
+    // failure - the only log_result overload that needs this distinction,
+    // since none of the other MAVSDK calls this class wraps are
+    // cancellable mid-flight.
+    if (result == mavsdk::Calibration::Result::Cancelled) {
+        spdlog::info("{} cancelled", label);
+        return result;
+    }
+    if (result != mavsdk::Calibration::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
@@ -361,4 +397,83 @@ mavsdk::LogFiles::Result WardActions::download_log_file(const mavsdk::LogFiles::
         });
     const auto result = result_future.get();
     return log_result("download log file id=" + std::to_string(entry.id), result);
+}
+
+namespace {
+
+// Shared body for every calibrate_*() method below: bridges MAVSDK's
+// callback-only calibrate_*_async() to a blocking call the same
+// promise/future way download_log_file_async() is bridged above, except
+// every Result::Next also forwards its ProgressData to on_progress
+// instead of being silently discarded - a calibration's intermediate
+// steps (percentage, and operator instructions like "rotate to the next
+// orientation") are the whole point of this call, unlike a file
+// transfer's progress fraction. on_progress is copied by value into the
+// MAVSDK callback (never captured by reference) - same "no dangling
+// capture in an async MAVSDK callback" rule as download_log_file() above.
+template <typename StartAsync>
+mavsdk::Calibration::Result run_calibration(
+    StartAsync&& start_async, const WardActions::CalibrationProgressCallback& on_progress) {
+    auto result_promise = std::make_shared<std::promise<mavsdk::Calibration::Result>>();
+    auto result_future = result_promise->get_future();
+    start_async([result_promise, on_progress](const mavsdk::Calibration::Result result,
+                                               const mavsdk::Calibration::ProgressData progress) {
+        if (result == mavsdk::Calibration::Result::Next) {
+            if (on_progress) on_progress(progress);
+            return;
+        }
+        result_promise->set_value(result);
+    });
+    return result_future.get();
+}
+
+}  // namespace
+
+mavsdk::Calibration::Result WardActions::calibrate_gyro(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateGyroCallback& callback) {
+            calibration_->calibrate_gyro_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate gyro", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_accelerometer(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateAccelerometerCallback& callback) {
+            calibration_->calibrate_accelerometer_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate accelerometer", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_magnetometer(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateMagnetometerCallback& callback) {
+            calibration_->calibrate_magnetometer_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate magnetometer", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_level_horizon(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateLevelHorizonCallback& callback) {
+            calibration_->calibrate_level_horizon_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate level horizon", result);
+}
+
+mavsdk::Calibration::Result WardActions::cancel_calibration() const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    return log_result("cancel calibration", calibration_->cancel());
 }

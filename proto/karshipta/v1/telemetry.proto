@@ -35,6 +35,16 @@ message FlightState {
   FlightMode flight_mode = 1;
   bool armed = 2;
   bool in_air = 3;
+  // Live per-sensor calibration health (karshipta#248), mirroring
+  // mavsdk::Telemetry::Health directly - a current pass/fail snapshot,
+  // not a calibration history: neither MAVSDK nor the underlying MAVLink
+  // protocol records when a sensor was last calibrated, only whether it
+  // currently passes. No level_horizon_calibration_ok field exists:
+  // MAVSDK's own Health struct has no equivalent for it either - level
+  // horizon is a trim correction, not a pass/fail calibration state.
+  bool gyrometer_calibration_ok = 4;
+  bool accelerometer_calibration_ok = 5;
+  bool magnetometer_calibration_ok = 6;
 }
 
 // Live state of one ward. Published at 2 to 10 Hz per ward.

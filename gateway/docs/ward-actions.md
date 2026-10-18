@@ -75,8 +75,13 @@ pattern.
 | `Param::Result set_param_float(const string&, float) const` | Float counterpart to `set_param_int()`. MAVSDK has no single polymorphic setter - the caller (`WardManager`) picks int or float from `ParamType`. |
 | `pair<LogFiles::Result, vector<LogFiles::Entry>> get_log_entries() const` | Implements flight log listing (karshipta#249). Not tied to a `Command` - called by `LogDownloadExecutor::execute_list()` and, again, by `execute_download()` to resolve a requested `log_id` against the vehicle's current entry list. See "Log files" below. |
 | `LogFiles::Result download_log_file(const LogFiles::Entry&, const string& local_path) const` | Implements flight log download (karshipta#249). Blocks until the transfer finishes or fails, wrapping MAVSDK's callback-only `download_log_file_async()` in a `promise`/`future`; see "Log files" below for why no blocking counterpart exists on the MAVSDK side. |
+| `Calibration::Result calibrate_gyro(const CalibrationProgressCallback&) const` | Implements `StartCalibration{GYRO}` (karshipta#248). Blocks until the calibration finishes, fails, or is cancelled, invoking the callback for every intermediate step; same promise/future bridge as `download_log_file()`, except every `Next` also forwards its `ProgressData` instead of being discarded. See "Calibration" below. |
+| `Calibration::Result calibrate_accelerometer(const CalibrationProgressCallback&) const` | Implements `StartCalibration{ACCELEROMETER}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result calibrate_magnetometer(const CalibrationProgressCallback&) const` | Implements `StartCalibration{MAGNETOMETER}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result calibrate_level_horizon(const CalibrationProgressCallback&) const` | Implements `StartCalibration{LEVEL_HORIZON}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result cancel_calibration() const` | Implements `CancelCalibration`. An ordinary blocking call, unlike the four `calibrate_*` methods above - MAVSDK's `cancel()` has no async-only counterpart to bridge. |
 
-`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, every `Param`-prefixed method, and `get_log_entries()`/`download_log_file()` each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`/`LogFiles`), unrelated to `Action::Result` and to each other.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, every `Param`-prefixed method, `get_log_entries()`/`download_log_file()`, and every `calibrate_*`/`cancel_calibration()` method each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`/`LogFiles`/`Calibration`), unrelated to `Action::Result` and to each other.
 
 ## Home position: why one method uses a different plugin
 
@@ -185,6 +190,50 @@ MAVSDK writes the downloaded bytes to `local_path` on the gateway's own
 filesystem - this method's caller (`LogDownloadExecutor::execute_download()`)
 owns choosing and cleaning up that path, not this class.
 
+## Calibration: progress is the point, not just the terminal result
+
+`calibrate_gyro()`/`calibrate_accelerometer()`/`calibrate_magnetometer()`/
+`calibrate_level_horizon()`/`cancel_calibration()` wrap MAVSDK's
+`Calibration` plugin (karshipta#248), the same "not tied to a
+`Command.action` field, called by a dedicated worker thread, not
+`CommandExecutor`" shape as `get_log_entries()`/`download_log_file()`
+above - the caller here is `CalibrationExecutor`'s own worker thread (see
+`calibration-executor.md`), for the same "too slow for any thread a
+transport frame is received on" reason, except a calibration is slower
+still: it is a guided, operator-paced procedure (rotate the vehicle
+through several orientations, hold still, etc), not a fixed-size file
+transfer.
+
+Each `calibrate_*_async(Callback)` method has no blocking counterpart,
+same gap as `download_log_file_async()`. Unlike that one call though, the
+intermediate `Result::Next` updates are not discarded here - each one
+carries a `ProgressData` (a progress fraction, an operator-facing
+instruction string, or both, independently optional per MAVSDK's own
+message) that the console needs to actually guide the operator through
+the procedure, so every `calibrate_*` method takes a
+`CalibrationProgressCallback` and invokes it for every `Next` before the
+terminal (non-`Next`) result resolves the same
+`shared_ptr<promise<Result>>` bridge `download_log_file()` uses. The
+callback is copied by value into the MAVSDK callback, never captured by
+reference - same rule every async MAVSDK callback in this class follows.
+
+`cancel()` is the one method here that is already a normal blocking
+call - no `_async` counterpart to bridge at all. It tells whichever
+`calibrate_*_async` is currently in flight on this `System` to stop,
+which is what eventually resolves that call's own blocking wrapper with
+`Result::Cancelled` - `cancel_calibration()` itself only reports whether
+the cancel request was accepted, never the calibration's own final
+outcome.
+
+`Result::Cancelled` and `Result::FailedArmed` are both real, expected
+outcomes this plugin defines that none of the other plugins this class
+wraps have an equivalent for: `Cancelled` is logged as info, not error,
+by `log_result()`'s own `Calibration::Result` overload (the only one of
+the six overloads with this distinction - see that method's own comment);
+`FailedArmed` means MAVSDK itself already refuses to calibrate an armed
+vehicle, so neither this class nor `CalibrationExecutor` adds any
+duplicate flight-safety gating on top of it.
+
 ## Design: Result all the way through
 
 Every command wrapper returns the `mavsdk::Action::Result` MAVSDK gave back,
@@ -275,7 +324,13 @@ are the same again: covered through `ward_manager_test.cpp`'s
 `HandleGetLogEntriesRejectsUnconnectedWardWithReason`/
 `HandleDownloadLogFileRejectsUnconnectedWardWithReason` (no-connection path
 only - a real log listing/download needs live SITL that has actually
-flown, not exercised by this test binary).
+flown, not exercised by this test binary). The `calibrate_*`/
+`cancel_calibration()` methods are the same once more: covered through
+`ward_manager_test.cpp`'s `HandleStartCalibrationRejectsUnconnectedWardWithReason`/
+`HandleCancelCalibrationOnUnknownWardSendsNothing` (no-connection path
+only - a real calibration is a guided, operator-paced procedure, the
+least exercisable of any method here without live SITL and a human
+following along).
 
 ## Manual verification
 

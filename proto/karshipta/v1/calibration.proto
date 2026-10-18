@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package karshipta.v1;
+
+// ---------- Pre-flight sensor calibration (console <-> gateway) ----------
+//
+// karshipta#248: MAVSDK's Calibration plugin runs gyro/accelerometer/
+// magnetometer/level-horizon calibration, each a guided multi-step
+// process (rotate the vehicle through several orientations, hold still,
+// etc) that streams progress and operator instructions back in real
+// time - closer in shape to mission upload/download's own progress
+// reporting than to a Command.action, and unlike those, cancellable
+// mid-flight. gimbal_accelerometer is deliberately excluded: no ward
+// class with a gimbal exists yet (same "needs a capability flag first"
+// reasoning karshipta#256 already gives for camera/gimbal features).
+//
+// ward_id-scoped like Command/GetParams, not fleet-scoped.
+
+enum CalibrationType {
+  CALIBRATION_TYPE_UNSPECIFIED = 0;
+  CALIBRATION_TYPE_GYRO = 1;
+  CALIBRATION_TYPE_ACCELEROMETER = 2;
+  CALIBRATION_TYPE_MAGNETOMETER = 3;
+  CALIBRATION_TYPE_LEVEL_HORIZON = 4;
+}
+
+message StartCalibration {
+  string request_id = 1;
+  string ward_id = 2;
+  CalibrationType calibration_type = 3;
+}
+
+enum CalibrationStatus {
+  CALIBRATION_STATUS_UNSPECIFIED = 0;
+  // Could not even start: unknown/unconnected ward, unspecified type, or
+  // a calibration is already running for this ward. No further
+  // CalibrationProgress follows for this request_id.
+  CALIBRATION_STATUS_REJECTED = 1;
+  // One update of an in-progress calibration; has_progress/has_instruction
+  // say which of progress/instruction below are meaningful on this
+  // message (MAVSDK's own ProgressData carries each independently).
+  CALIBRATION_STATUS_RUNNING = 2;
+  CALIBRATION_STATUS_SUCCESS = 3;
+  CALIBRATION_STATUS_FAILED = 4;
+  CALIBRATION_STATUS_CANCELLED = 5;
+}
+
+// Every update for one StartCalibration, correlated by request_id: zero
+// or more RUNNING messages, then exactly one of
+// SUCCESS/FAILED/CANCELLED/REJECTED as the terminal message.
+message CalibrationProgress {
+  string request_id = 1;
+  string ward_id = 2;
+  CalibrationType calibration_type = 3;
+  CalibrationStatus status = 4;
+  // Reason, only meaningful for REJECTED/FAILED.
+  string message = 5;
+  bool has_progress = 6;
+  float progress = 7;  // 0.0 to 1.0
+  bool has_instruction = 8;
+  string instruction = 9;  // operator-facing text, e.g. "rotate to the next orientation"
+}
+
+// calibration_request_id names which running calibration to cancel (the
+// request_id from its own StartCalibration) - MAVSDK's cancel() itself
+// has no concept of "which one", but a stray CancelCalibration arriving
+// just as a different calibration starts on the same ward must not
+// cancel the wrong one.
+message CancelCalibration {
+  string request_id = 1;
+  string ward_id = 2;
+  string calibration_request_id = 3;
+}

@@ -169,6 +169,9 @@ karshipta::v1::WardState build_ward_state(const std::string& ward_id,
         ward_manager_internal::to_proto_flight_mode(telemetry.get_flight_mode()));
     flight->set_armed(telemetry.is_armed());
     flight->set_in_air(telemetry.is_in_air());
+    flight->set_gyrometer_calibration_ok(telemetry.is_gyrometer_calibration_ok());
+    flight->set_accelerometer_calibration_ok(telemetry.is_accelerometer_calibration_ok());
+    flight->set_magnetometer_calibration_ok(telemetry.is_magnetometer_calibration_ok());
     state.set_health_ok(telemetry.is_health_ok());
     state.set_connected(connection.is_connected());
 
@@ -263,6 +266,18 @@ void emit_log_file_chunk(Transport& transport, const Transport::ClientId client,
                           const karshipta::v1::LogFileChunk& chunk) {
     karshipta::v1::Envelope envelope;
     *envelope.mutable_log_file_chunk() = chunk;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+// Free-function counterpart for the calibration family (karshipta#248),
+// same reasoning as emit_log_entry_list above: make_calibration_executor()'s
+// callback captures &transport_, never `this`. Sent to `client` only,
+// never broadcast - a calibration run is meaningful just to whoever
+// started it.
+void emit_calibration_progress(Transport& transport, const Transport::ClientId client,
+                                const karshipta::v1::CalibrationProgress& progress) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_calibration_progress() = progress;
     transport.send(client, serialize_envelope(envelope));
 }
 
@@ -384,6 +399,17 @@ std::unique_ptr<LogDownloadExecutor> WardManager::make_log_executor(ManagedWard&
         });
 }
 
+std::unique_ptr<CalibrationExecutor> WardManager::make_calibration_executor(ManagedWard& ward) {
+    // Same "capture &transport_, never `this`" reasoning as make_executor()
+    // above.
+    Transport* transport = &transport_;
+    return std::make_unique<CalibrationExecutor>(
+        *ward.actions,
+        [transport](const Transport::ClientId client, const karshipta::v1::CalibrationProgress& progress) {
+            emit_calibration_progress(*transport, client, progress);
+        });
+}
+
 std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, bool should_persist) {
     if (cfg.ward_id.empty()) {
         return "ward_id is empty";
@@ -425,6 +451,7 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, boo
     managed->mission = std::move(mission);
     managed->mission_importer = std::move(mission_importer);
     managed->log_executor = make_log_executor(*managed);
+    managed->calibration_executor = make_calibration_executor(*managed);
     managed->executor = make_executor(*managed);
 
     std::lock_guard lock(wards_mutex_);
@@ -853,6 +880,48 @@ void WardManager::handle_download_log_file(const Transport::ClientId client,
     ward->log_executor->enqueue_download(client, request);
 }
 
+void WardManager::handle_start_calibration(const Transport::ClientId client,
+                                           const karshipta::v1::StartCalibration& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("start_calibration rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::CalibrationProgress progress;
+        progress.set_request_id(request.request_id());
+        progress.set_ward_id(request.ward_id());
+        progress.set_calibration_type(request.calibration_type());
+        progress.set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+        progress.set_message("unknown ward_id: " + request.ward_id());
+        emit_calibration_progress(transport_, client, progress);
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("start_calibration rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::CalibrationProgress progress;
+        progress.set_request_id(request.request_id());
+        progress.set_ward_id(request.ward_id());
+        progress.set_calibration_type(request.calibration_type());
+        progress.set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+        progress.set_message("ward is not connected");
+        emit_calibration_progress(transport_, client, progress);
+        return;
+    }
+    ward->calibration_executor->enqueue_start(client, request);
+}
+
+void WardManager::handle_cancel_calibration(const Transport::ClientId client,
+                                            const karshipta::v1::CancelCalibration& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("cancel_calibration rejected: unknown ward_id '{}'", request.ward_id());
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("cancel_calibration rejected: ward_id '{}' is not connected", request.ward_id());
+        return;
+    }
+    ward->calibration_executor->cancel(client, request);
+}
+
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                                          const karshipta::v1::Envelope& envelope) {
     switch (envelope.payload_case()) {
@@ -982,6 +1051,30 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
             transport_.send(client, serialize_envelope(ack_envelope));
             break;
         }
+        case karshipta::v1::Envelope::kStartCalibration: {
+            const auto& request = envelope.start_calibration();
+            spdlog::warn("viewer client {} attempted start_calibration on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope progress_envelope;
+            auto* progress = progress_envelope.mutable_calibration_progress();
+            progress->set_request_id(request.request_id());
+            progress->set_ward_id(request.ward_id());
+            progress->set_calibration_type(request.calibration_type());
+            progress->set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+            progress->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: same reasoning as
+            // kGetLogEntries above.
+            transport_.send(client, serialize_envelope(progress_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kCancelCalibration:
+            // No ack channel exists for Cancel even on the normal path
+            // (CalibrationExecutor::cancel()'s own doc comment) - a
+            // viewer's attempt gets the same silent-no-op treatment as a
+            // stale/mistargeted cancel from a real operator, just logged.
+            spdlog::warn("viewer client {} attempted cancel_calibration on ward_id '{}', ignoring",
+                         client, envelope.cancel_calibration().ward_id());
+            break;
         default:
             spdlog::warn("viewer client {} sent unexpected upstream payload kind {}, ignoring",
                          client, static_cast<int>(envelope.payload_case()));

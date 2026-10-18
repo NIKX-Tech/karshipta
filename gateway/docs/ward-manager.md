@@ -77,6 +77,8 @@ and fleet persistence are all facade methods on this class.
 | `handle_set_param(const SetParam&) const` | Implements `SetParam` (karshipta#211). Same direct, synchronous shape. On a successful write, reads the parameter back (`WardActions::get_param_int`/`get_param_float`) so `ParamAck.param` carries the vehicle-confirmed value, not an echo of the request - `set_param_*`'s MAVSDK call returns only a `Result`, never the stored value. `main.cpp` broadcasts the ack (unlike `GetParams`'s response): a confirmed parameter change is real vehicle state other consoles watching this ward should learn about, same as `CommandAck`. |
 | `handle_get_log_entries(client, const GetLogEntries&) const` | Implements flight log listing (karshipta#249). Unlike `handle_get_params()`, NOT direct/synchronous: queues onto the ward's `LogDownloadExecutor` worker thread (a log listing round trip can be slow), which sends the resulting `LogEntryList` to `client` only once ready. Answers synchronously, also to `client` only, for the two cases resolvable without the worker: unknown ward_id, or registered-but-not-connected. See `log-download-executor.md`. |
 | `handle_download_log_file(client, const DownloadLogFile&) const` | Implements flight log download (karshipta#249). Same queued shape as `handle_get_log_entries()` above; the accept/reject `DownloadLogFileAck` and every following `LogFileChunk` are sent to `client` only, from the worker thread. See `log-download-executor.md`. |
+| `handle_start_calibration(client, const StartCalibration&) const` | Implements pre-flight sensor calibration (karshipta#248). Queues onto the ward's `CalibrationExecutor` worker thread; zero or more `RUNNING` `CalibrationProgress` messages then one terminal message are sent to `client` only. Answers synchronously, also to `client` only, for unknown ward_id or registered-but-not-connected; `CalibrationExecutor::enqueue_start()` itself answers the third synchronous case (a calibration already running for this ward). See `calibration-executor.md`. |
+| `handle_cancel_calibration(client, const CancelCalibration&) const` | Implements calibration cancellation (karshipta#248). Same unknown/unconnected-ward checks as `handle_start_calibration()`; otherwise routes to `CalibrationExecutor::cancel()`, which runs on the calling thread and reports nothing back directly - a successful cancel surfaces as the running job's own terminal `CalibrationProgress{CANCELLED}`. See `calibration-executor.md`. |
 | `handle_mission_upload(const Mission&)` | Routes to the ward's `WardMission::enqueue_upload()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards (no `CommandAck`-shaped ack exists for missions). |
 | `handle_mission_file_upload(const MissionFileUpload&)` | Converts via the ward's `MissionImporter::import()` (synchronous - local parsing, not a MAVLink round trip), then routes through `handle_mission_upload()`'s same path on success; a WARNING `Event` on either the ward lookup or the import itself failing. |
 | `handle_mission_download_request(const MissionDownloadRequest&)` | Routes to the ward's `WardMission::enqueue_download()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards. Result surfaces later via the publish tick. |
@@ -227,6 +229,15 @@ a real socket:
   real result comes back later, from `LogDownloadExecutor`'s worker
   thread), so these assert `transport_.sent_envelopes(client)` instead of
   a return value - see `log-download-executor.md`.
+- `HandleStartCalibrationRejectsUnknownWardWithReason`/
+  `HandleStartCalibrationRejectsUnconnectedWardWithReason`,
+  `HandleCancelCalibrationOnUnknownWardSendsNothing` (karshipta#248): same
+  no-live-SITL limit again - `handle_start_calibration()` asserts
+  `transport_.sent_envelopes(client)` a `CalibrationProgress{REJECTED}`,
+  same shape as the log-file handlers above; `handle_cancel_calibration()`
+  has no ack channel at all even on its happy path, so its only testable
+  assertion is that nothing gets sent for an unknown ward. See
+  `calibration-executor.md`.
 - `DispatchCommandRejectsUnknownWardWithReason`: the broadcast `CommandAck`
   carries the offending id in its message.
 - `RemoveWardRemovesNeverStartedWard`.
@@ -269,6 +280,12 @@ a real socket:
   assert `transport_.sent_envelopes(client)` (not `broadcast_envelopes()`),
   matching the live `kGetLogEntries`/`kDownloadLogFile` handlers' own
   send-to-requester-only delivery.
+- `RejectViewerEnvelopeRejectsStartCalibrationWithProgress`: same
+  send-to-requester-only pattern, asserting a `CalibrationProgress{
+  REJECTED}`. `RejectViewerEnvelopeIgnoresCancelCalibrationSilently`:
+  `CancelCalibration` has no ack channel at all, so this only asserts
+  nothing gets sent or broadcast - same as a stale/mistargeted cancel
+  from a real operator.
 
 ## Manual verification
 

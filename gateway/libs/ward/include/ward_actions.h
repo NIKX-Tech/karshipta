@@ -2,12 +2,14 @@
 #define KARSHIPTA_GATEWAY_WARD_ACTIONS_H
 
 #include <mavsdk/plugins/action/action.h>
+#include <mavsdk/plugins/calibration/calibration.h>
 #include <mavsdk/plugins/geofence/geofence.h>
 #include <mavsdk/plugins/log_files/log_files.h>
 #include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
 #include <mavsdk/plugins/param/param.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -56,6 +58,10 @@ class WardActions {
     // Overload for LogFiles' own Result type. Its operator<< is exported
     // (confirmed, same as Geofence::Result/Param::Result) - normal pattern.
     static std::string result_name(mavsdk::LogFiles::Result result);
+    // Overload for Calibration's own Result type. Its operator<< is
+    // exported (confirmed via nm, same as the others above) - normal
+    // pattern.
+    static std::string result_name(mavsdk::Calibration::Result result);
 
     // Implements ArmCommand. Arms the ward (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.
@@ -171,6 +177,48 @@ class WardActions {
     [[nodiscard]] mavsdk::LogFiles::Result download_log_file(const mavsdk::LogFiles::Entry& entry,
                                                               const std::string& local_path) const;
 
+    // Receives every intermediate ProgressData from a calibrate_* call
+    // below (karshipta#248) - MAVSDK's own callback fires once per
+    // Result::Next with progress and/or an operator-facing instruction
+    // string, before the terminal Result resolves the call. Copied by
+    // value into the MAVSDK callback (never captured by reference), same
+    // "no dangling capture in an async MAVSDK callback" rule this class
+    // already follows elsewhere (see download_log_file()'s own comment).
+    using CalibrationProgressCallback = std::function<void(mavsdk::Calibration::ProgressData)>;
+
+    // Implements StartCalibration{GYRO} (karshipta#248). Blocks until the
+    // calibration finishes, fails, or is cancelled, invoking on_progress
+    // for every intermediate step along the way - same promise/future
+    // bridge over MAVSDK's callback-only calibrate_gyro_async() as
+    // download_log_file() uses for download_log_file_async(), the only
+    // other MAVSDK call this class wraps with no blocking counterpart of
+    // its own. The caller (a dedicated worker thread, never the network
+    // thread) must already expect to block here, potentially for the
+    // whole guided, operator-paced calibration procedure.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_gyro(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{ACCELEROMETER}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_accelerometer(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{MAGNETOMETER}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_magnetometer(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{LEVEL_HORIZON}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_level_horizon(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements CancelCalibration. Unlike the calibrate_* methods above,
+    // MAVSDK's cancel() is already a normal blocking call (no _async
+    // counterpart to bridge) - it tells whichever calibrate_*_async is
+    // currently in flight on this System to stop, which is what
+    // eventually resolves that call's own blocking wrapper with
+    // Result::Cancelled; this method itself only reports whether the
+    // cancel request was accepted, not the calibration's own final
+    // outcome.
+    [[nodiscard]] mavsdk::Calibration::Result cancel_calibration() const;
+
    private:
     // The connection this action wrapper sends commands through. Must outlive this object.
     WardConnection& connection_;
@@ -193,16 +241,20 @@ class WardActions {
     // The LogFiles plugin, lazily constructed the same way as action_ (see
     // ensure_log_files()) - only get_log_entries/download_log_file use this.
     mutable std::unique_ptr<mavsdk::LogFiles> log_files_;
+    // The Calibration plugin, lazily constructed the same way as action_
+    // (see ensure_calibration()) - only the calibrate_*/cancel_calibration
+    // methods use this.
+    mutable std::unique_ptr<mavsdk::Calibration> calibration_;
 
     // Serializes the lazy init in ensure_action()/ensure_mavlink_passthrough()/
-    // ensure_geofence()/ensure_param()/ensure_log_files(): the
-    // CommandExecutor worker, WardManager's own zone-push and parameter
-    // calls, the LogDownloadExecutor worker, and WardManager's
-    // reconnect_worker threads can all trigger a first creation
-    // concurrently. Once created, action_/mavlink_passthrough_/geofence_/
-    // param_/log_files_ are never reset, so reads after a successful
-    // ensure_*() need no lock. Shared across all five: none of them are
-    // ever constructed concurrently with each other either.
+    // ensure_geofence()/ensure_param()/ensure_log_files()/ensure_calibration():
+    // the CommandExecutor worker, WardManager's own zone-push and parameter
+    // calls, the LogDownloadExecutor and CalibrationExecutor workers, and
+    // WardManager's reconnect_worker threads can all trigger a first
+    // creation concurrently. Once created, action_/mavlink_passthrough_/
+    // geofence_/param_/log_files_/calibration_ are never reset, so reads
+    // after a successful ensure_*() need no lock. Shared across all six:
+    // none of them are ever constructed concurrently with each other either.
     mutable std::mutex init_mutex_;
 
     // Lazily creates `action_` the first time it's needed. Returns false if
@@ -217,6 +269,8 @@ class WardActions {
     bool ensure_param() const;
     // Lazily creates `log_files_`, same contract as ensure_action().
     bool ensure_log_files() const;
+    // Lazily creates `calibration_`, same contract as ensure_action().
+    bool ensure_calibration() const;
     // Logs the outcome of a command already sent to `action_` and passes the
     // Result through unchanged, so the caller (eventually the M3 CommandAck
     // path) keeps the reason a bool would have erased.
@@ -234,6 +288,9 @@ class WardActions {
     // Overload for LogFiles::Result, same contract as log_result above.
     static mavsdk::LogFiles::Result log_result(const std::string& label,
                                                 mavsdk::LogFiles::Result result);
+    // Overload for Calibration::Result, same contract as log_result above.
+    static mavsdk::Calibration::Result log_result(const std::string& label,
+                                                   mavsdk::Calibration::Result result);
 };
 
 #endif  // KARSHIPTA_GATEWAY_WARD_ACTIONS_H
