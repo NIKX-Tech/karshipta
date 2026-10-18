@@ -260,7 +260,21 @@ function defaultDemoParams(): Map<string, Param> {
 			floatParam('COM_RC_LOSS_T', 0.5),
 			intParam('NAV_RCL_ACT', 2),
 			floatParam('COM_DL_LOSS_T', 10),
-			intParam('NAV_DLL_ACT', 2)
+			intParam('NAV_DLL_ACT', 2),
+			// Tier 2 (karshipta#213): plausible PX4 PID defaults, same
+			// "not a claim of real firmware defaults" caveat as above.
+			floatParam('MC_ROLLRATE_P', 0.15),
+			floatParam('MC_ROLLRATE_I', 0.2),
+			floatParam('MC_ROLLRATE_D', 0.003),
+			floatParam('MC_ROLL_P', 6.5),
+			floatParam('MC_PITCHRATE_P', 0.15),
+			floatParam('MC_PITCHRATE_I', 0.2),
+			floatParam('MC_PITCHRATE_D', 0.003),
+			floatParam('MC_PITCH_P', 6.5),
+			floatParam('MC_YAWRATE_P', 0.2),
+			floatParam('MC_YAWRATE_I', 0.1),
+			floatParam('MC_YAWRATE_D', 0),
+			floatParam('MC_YAW_P', 2.8)
 		].map((param) => [param.name, param])
 	);
 }
