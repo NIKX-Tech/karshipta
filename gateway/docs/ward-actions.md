@@ -73,8 +73,10 @@ pattern.
 | `pair<Param::Result, float> get_param_float(const string&) const` | Float counterpart to `get_param_int()`. |
 | `Param::Result set_param_int(const string&, int32_t) const` | Implements `SetParam` for an int-valued parameter (karshipta#211). |
 | `Param::Result set_param_float(const string&, float) const` | Float counterpart to `set_param_int()`. MAVSDK has no single polymorphic setter - the caller (`WardManager`) picks int or float from `ParamType`. |
+| `pair<LogFiles::Result, vector<LogFiles::Entry>> get_log_entries() const` | Implements flight log listing (karshipta#249). Not tied to a `Command` - called by `LogDownloadExecutor::execute_list()` and, again, by `execute_download()` to resolve a requested `log_id` against the vehicle's current entry list. See "Log files" below. |
+| `LogFiles::Result download_log_file(const LogFiles::Entry&, const string& local_path) const` | Implements flight log download (karshipta#249). Blocks until the transfer finishes or fails, wrapping MAVSDK's callback-only `download_log_file_async()` in a `promise`/`future`; see "Log files" below for why no blocking counterpart exists on the MAVSDK side. |
 
-`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, and every `Param`-prefixed method each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`), unrelated to `Action::Result` and to each other.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, every `Param`-prefixed method, and `get_log_entries()`/`download_log_file()` each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`/`LogFiles`), unrelated to `Action::Result` and to each other.
 
 ## Home position: why one method uses a different plugin
 
@@ -146,6 +148,42 @@ carries `custom_params` (string-valued, extended param protocol, used by
 camera/gimbal components), which `proto/karshipta/v1/parameter.proto`
 deliberately leaves out: not something PX4/ArduPilot's standard autopilot
 parameter set ever uses.
+
+## Log files: no blocking counterpart to the download call
+
+`get_log_entries()`/`download_log_file()` wrap MAVSDK's `LogFiles` plugin
+(karshipta#249), the same "not tied to a `Command.action` field, called
+directly by a `WardManager`-owned worker, not `CommandExecutor`" shape as
+`upload_geofence()`/the `Param`-prefixed methods above - except here the
+caller is `LogDownloadExecutor`'s own worker thread, not `WardManager`
+itself (see `log-download-executor.md`), since a multi-MB log transfer is
+categorically too slow to run on any thread a transport frame is received
+on, params/geofence's own direct-call shape included.
+
+`get_entries() const -> pair<Result, vector<Entry>>` is a normal blocking
+call. `download_log_file_async(Entry, string path, DownloadLogFileCallback)`
+is not: MAVSDK's `LogFiles` plugin has no blocking download method at all,
+only this callback-driven one, which fires repeatedly with
+`Result::Next` plus progress and once more with a terminal `Result` when
+the transfer finishes or fails. `download_log_file()` bridges this into a
+blocking call the same way `command_executor.cpp`'s
+`wait_for_mission_result()` bridges `start_async()`/`pause_async()`: a
+`shared_ptr<promise<Result>>`, resolved only on the terminal (non-`Next`)
+result, with the calling thread blocking on the matching `future::get()`.
+Unlike `wait_for_mission_result()`, this is not stop_token-aware - it is
+only ever called from `LogDownloadExecutor`'s own worker thread, which
+checks its stop_token between chunks afterward instead (see
+`log-download-executor.md`'s Threading section), not during this call
+itself. The same accepted risk every other blocking MAVSDK call in this
+class already carries applies here too: if MAVSDK's internal timeout
+handling never fires the terminal callback, this blocks forever. Nothing in
+this codebase wraps that with a novel timeout of its own; this is
+consistent with that existing convention, not a new gap introduced for log
+files specifically.
+
+MAVSDK writes the downloaded bytes to `local_path` on the gateway's own
+filesystem - this method's caller (`LogDownloadExecutor::execute_download()`)
+owns choosing and cleaning up that path, not this class.
 
 ## Design: Result all the way through
 
@@ -232,7 +270,12 @@ same: not `Command`-driven, covered instead through that same file's
 `HandleGetParamsRejectsUnconnectedWardWithReason`/
 `HandleSetParamRejectsUnconnectedWardWithReason` (no-connection path
 only - a real parameter read/write round trip needs live SITL, not
-exercised by this test binary).
+exercised by this test binary). `get_log_entries()`/`download_log_file()`
+are the same again: covered through `ward_manager_test.cpp`'s
+`HandleGetLogEntriesRejectsUnconnectedWardWithReason`/
+`HandleDownloadLogFileRejectsUnconnectedWardWithReason` (no-connection path
+only - a real log listing/download needs live SITL that has actually
+flown, not exercised by this test binary).
 
 ## Manual verification
 

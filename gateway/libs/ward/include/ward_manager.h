@@ -25,6 +25,7 @@
 #include <mission_importer.h>
 #include <telemetry.h>
 #include <command_executor.h>
+#include <log_download_executor.h>
 #include <transport.h>
 
 struct WardConfig {
@@ -81,6 +82,19 @@ struct ManagedWard {
     // so its position relative to `mission`/`executor` doesn't matter for
     // build order, unlike the rest of this quartet.
     std::unique_ptr<MissionImporter> mission_importer;
+    // Owns GetLogEntries/DownloadLogFile for this ward (karshipta#249).
+    // Unlike executor below, this is never retired/rebuilt by stop()/
+    // force_stop()/remove_ward(): those three exist to safely ground and
+    // disarm a ward before taking it offline, and log access is read-only,
+    // orthogonal to flight safety - interrupting an in-flight log listing
+    // or download just because the ward is being stopped would serve no
+    // purpose. Built once in add_ward_impl(), alongside mission_importer,
+    // and destroyed only when the ward itself is destroyed - same lifetime
+    // as connection/telemetry/actions/mission/mission_importer. Declared
+    // after mission_importer so it is destroyed before actions/telemetry/
+    // connection (its worker thread calls into *actions), but after
+    // executor (whose own worker is stopped and joined first).
+    std::unique_ptr<LogDownloadExecutor> log_executor;
 
     // Guards executor/busy/pending_auto_start_mission_id/reconnect_worker
     // below: this ward's own transition state, independent of every other
@@ -310,6 +324,28 @@ public:
     [[nodiscard]] karshipta::v1::ParamAck handle_set_param(
         const karshipta::v1::SetParam& request) const;
 
+    // Implements GetLogEntries (karshipta#249). Unlike handle_get_params()
+    // above, this is NOT a direct synchronous WardActions call: MAVSDK's
+    // get_entries() round trip can be slow on a large log set or a weak
+    // link, so it is queued onto the ward's own LogDownloadExecutor worker
+    // thread instead of blocking whatever thread received the request.
+    // The result is sent later, to `client` only (never broadcast - same
+    // "meaningful just to the requester" reasoning as GetParams/SetParam),
+    // as a LogEntryList Envelope. This method only answers synchronously,
+    // via `client`, for the two cases it can resolve without ever touching
+    // the worker thread: unknown ward_id, or a ward that is registered but
+    // not currently connected (same is_connected() check and reasoning as
+    // handle_get_params()).
+    void handle_get_log_entries(Transport::ClientId client,
+                                 const karshipta::v1::GetLogEntries& request) const;
+
+    // Implements DownloadLogFile (karshipta#249). Same queued shape and
+    // requester-only delivery as handle_get_log_entries() above; the
+    // accept/reject DownloadLogFileAck and every following LogFileChunk
+    // are sent later, to `client` only, from the worker thread.
+    void handle_download_log_file(Transport::ClientId client,
+                                   const karshipta::v1::DownloadLogFile& request) const;
+
     // Rejects an upstream envelope from a connection Transport marked
     // ClientRole::kViewer (gateway issue #20: read-only viewer mode). Never
     // forwards the payload; answers instead with the same reasoned
@@ -493,6 +529,15 @@ private:
     // system's construction order (main.cpp builds Transport before
     // WardManager) to outlive it regardless.
     [[nodiscard]] std::unique_ptr<CommandExecutor> make_executor(ManagedWard& ward);
+
+    // Builds the LogDownloadExecutor wired to send its results to whichever
+    // client asked (never broadcast, see handle_get_log_entries()'s own doc
+    // comment); shared by add_ward_impl() only, since (unlike make_executor())
+    // this is never rebuilt after a stop()/force_stop()/remove_ward()
+    // transition - log_executor's lifetime matches actions/telemetry/
+    // connection, not executor. Same "capture &transport_, never `this`"
+    // safety reasoning as make_executor().
+    [[nodiscard]] std::unique_ptr<LogDownloadExecutor> make_log_executor(ManagedWard& ward);
 
     // Clears ward's busy flag under ward->mutex_. Takes the shared_ptr
     // directly (not a ward_id to re-look-up): the caller already holds a

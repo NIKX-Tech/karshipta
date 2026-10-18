@@ -70,6 +70,24 @@ public:
         return envelopes;
     }
 
+    // Every Envelope send() to this specific client so far, parsed, in
+    // order - the send()-to-requester counterpart of broadcast_envelopes()
+    // above, for GetLogEntries/DownloadLogFile (karshipta#249), which are
+    // answered via send(), not broadcast() (see
+    // WardManager::handle_get_log_entries()'s own doc comment for why).
+    [[nodiscard]] std::vector<karshipta::v1::Envelope> sent_envelopes(ClientId client) const {
+        std::lock_guard lock(mutex_);
+        std::vector<karshipta::v1::Envelope> envelopes;
+        for (const auto& [sent_client, bytes] : sent_) {
+            if (sent_client != client) continue;
+            karshipta::v1::Envelope envelope;
+            if (envelope.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
+                envelopes.push_back(envelope);
+            }
+        }
+        return envelopes;
+    }
+
 private:
     mutable std::mutex mutex_;
     bool running_ = false;
@@ -338,6 +356,85 @@ TEST_F(WardManagerTest, HandleSetParamRejectsUnconnectedWardWithReason) {
     const auto ack = manager.handle_set_param(request);
 
     EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("not connected"), std::string::npos);
+}
+
+// handle_get_log_entries()/handle_download_log_file() are void, not
+// value-returning like handle_get_params()/handle_set_param() above: a
+// result only ever comes back later, asynchronously, from the ward's own
+// LogDownloadExecutor worker thread (karshipta#249). Only the two
+// synchronous-reject cases below (unknown ward, unconnected ward) are
+// testable without a live connection - same limitation as the exercised
+// GetParams/SetParam rejection tests above - so these inspect what
+// FakeTransport's send() captured for the requesting client instead of a
+// return value.
+TEST_F(WardManagerTest, HandleGetLogEntriesRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    manager.handle_get_log_entries(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_log_entry_list());
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.request_id(), "req-1");
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("does-not-exist"), std::string::npos);
+    EXPECT_EQ(response.entries_size(), 0);
+}
+
+TEST_F(WardManagerTest, HandleGetLogEntriesRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24997")));
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    manager.handle_get_log_entries(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleDownloadLogFileRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_log_id(3);
+    manager.handle_download_log_file(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_download_log_file_ack());
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.log_id(), 3U);
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleDownloadLogFileRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24998")));
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.set_log_id(3);
+    manager.handle_download_log_file(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
     EXPECT_NE(ack.message().find("not connected"), std::string::npos);
 }
 
@@ -789,6 +886,52 @@ TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsMissionDownloadRequestWithEve
     ASSERT_TRUE(event.has_value());
     EXPECT_EQ(event->ward_id(), "alpha-1");
     EXPECT_EQ(event->message(), "read-only session");
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsGetLogEntriesWithResponse) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_get_log_entries() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    // Sent only to the viewer client, not broadcast - same reasoning as the
+    // live kGetLogEntries case this mirrors.
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_log_entry_list());
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.request_id(), "req-viewer");
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_EQ(response.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsDownloadLogFileWithAck) {
+    auto manager = make_manager();
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_log_id(2);
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_download_log_file() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_download_log_file_ack());
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.request_id(), "req-viewer");
+    EXPECT_EQ(ack.log_id(), 2u);
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+    EXPECT_EQ(ack.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
 }
 
 // ---------- Flight mode mapping ----------

@@ -238,6 +238,34 @@ void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck&
     transport.broadcast(serialize_envelope(envelope));
 }
 
+// Free-function counterparts for the log-file family (karshipta#249),
+// same reasoning as emit_command_ack/emit_rejection_event above:
+// make_log_executor()'s callbacks capture &transport_, never `this`, so
+// they call these instead of a WardManager member of the same name. Sent
+// to `client` only, never broadcast - a log listing or download is
+// meaningful just to whoever asked for it, the same reasoning GetParams/
+// SetParam already use.
+void emit_log_entry_list(Transport& transport, const Transport::ClientId client,
+                          const karshipta::v1::LogEntryList& response) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_log_entry_list() = response;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+void emit_download_log_file_ack(Transport& transport, const Transport::ClientId client,
+                                 const karshipta::v1::DownloadLogFileAck& ack) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_download_log_file_ack() = ack;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+void emit_log_file_chunk(Transport& transport, const Transport::ClientId client,
+                          const karshipta::v1::LogFileChunk& chunk) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_log_file_chunk() = chunk;
+    transport.send(client, serialize_envelope(envelope));
+}
+
 }  // namespace
 
 namespace ward_manager_internal {
@@ -338,6 +366,24 @@ std::unique_ptr<CommandExecutor> WardManager::make_executor(ManagedWard& ward) {
         });
 }
 
+std::unique_ptr<LogDownloadExecutor> WardManager::make_log_executor(ManagedWard& ward) {
+    // Same "capture &transport_, never `this`" reasoning as make_executor()
+    // above: this callback must stay safe to invoke even if a
+    // LogDownloadExecutor outlives WardManager itself.
+    Transport* transport = &transport_;
+    return std::make_unique<LogDownloadExecutor>(
+        *ward.actions,
+        [transport](const Transport::ClientId client, const karshipta::v1::LogEntryList& response) {
+            emit_log_entry_list(*transport, client, response);
+        },
+        [transport](const Transport::ClientId client, const karshipta::v1::DownloadLogFileAck& ack) {
+            emit_download_log_file_ack(*transport, client, ack);
+        },
+        [transport](const Transport::ClientId client, const karshipta::v1::LogFileChunk& chunk) {
+            emit_log_file_chunk(*transport, client, chunk);
+        });
+}
+
 std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, bool should_persist) {
     if (cfg.ward_id.empty()) {
         return "ward_id is empty";
@@ -378,6 +424,7 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, boo
     managed->actions = std::move(actions);
     managed->mission = std::move(mission);
     managed->mission_importer = std::move(mission_importer);
+    managed->log_executor = make_log_executor(*managed);
     managed->executor = make_executor(*managed);
 
     std::lock_guard lock(wards_mutex_);
@@ -749,6 +796,63 @@ karshipta::v1::ParamAck WardManager::handle_set_param(const karshipta::v1::SetPa
     return ack;
 }
 
+void WardManager::handle_get_log_entries(const Transport::ClientId client,
+                                         const karshipta::v1::GetLogEntries& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("get_log_entries rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::LogEntryList response;
+        response.set_request_id(request.request_id());
+        response.set_ward_id(request.ward_id());
+        response.set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+        response.set_message("unknown ward_id: " + request.ward_id());
+        emit_log_entry_list(transport_, client, response);
+        return;
+    }
+    // Same reasoning as handle_get_params(): an unconnected ward's
+    // get_entries() would otherwise just surface as a MAVSDK Timeout/
+    // NoSystem result later, a less clear reason than this upfront check.
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("get_log_entries rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::LogEntryList response;
+        response.set_request_id(request.request_id());
+        response.set_ward_id(request.ward_id());
+        response.set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+        response.set_message("ward is not connected");
+        emit_log_entry_list(transport_, client, response);
+        return;
+    }
+    ward->log_executor->enqueue_get_entries(client, request);
+}
+
+void WardManager::handle_download_log_file(const Transport::ClientId client,
+                                           const karshipta::v1::DownloadLogFile& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("download_log_file rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::DownloadLogFileAck ack;
+        ack.set_request_id(request.request_id());
+        ack.set_ward_id(request.ward_id());
+        ack.set_log_id(request.log_id());
+        ack.set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+        ack.set_message("unknown ward_id: " + request.ward_id());
+        emit_download_log_file_ack(transport_, client, ack);
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("download_log_file rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::DownloadLogFileAck ack;
+        ack.set_request_id(request.request_id());
+        ack.set_ward_id(request.ward_id());
+        ack.set_log_id(request.log_id());
+        ack.set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+        ack.set_message("ward is not connected");
+        emit_download_log_file_ack(transport_, client, ack);
+        return;
+    }
+    ward->log_executor->enqueue_download(client, request);
+}
+
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                                          const karshipta::v1::Envelope& envelope) {
     switch (envelope.payload_case()) {
@@ -847,6 +951,35 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
             ack->set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
             ack->set_message(kReadOnlySessionMessage);
             transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kGetLogEntries: {
+            const auto& request = envelope.get_log_entries();
+            spdlog::warn("viewer client {} attempted get_log_entries on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope response_envelope;
+            auto* response = response_envelope.mutable_log_entry_list();
+            response->set_request_id(request.request_id());
+            response->set_ward_id(request.ward_id());
+            response->set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+            response->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: same reasoning as
+            // kGetParams above.
+            transport_.send(client, serialize_envelope(response_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kDownloadLogFile: {
+            const auto& request = envelope.download_log_file();
+            spdlog::warn("viewer client {} attempted download_log_file on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_download_log_file_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_log_id(request.log_id());
+            ack->set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.send(client, serialize_envelope(ack_envelope));
             break;
         }
         default:

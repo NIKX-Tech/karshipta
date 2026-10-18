@@ -9,6 +9,7 @@
 	} from '$lib/ward-format';
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import { formatAltitude, formatSpeed } from '$lib/units/format';
+	import LogsPanel from '$lib/components/logs-panel.svelte';
 
 	interface Props {
 		wardId: string;
@@ -53,10 +54,21 @@
 	     tab wants the full, labeled picture, not just what fits in a
 	     header strip. -->
 	{#if info}
-		<p class="text-[10px] text-fg-muted">
-			{info.autopilot}
-			{info.firmwareVersion} &middot; {wardClassLabel}
-		</p>
+		<div class="flex items-center justify-between gap-2">
+			<p class="text-[10px] text-fg-muted">
+				{info.autopilot}
+				{info.firmwareVersion} &middot; {wardClassLabel}
+			</p>
+			<!-- Only a flight ward ever has a MAVLink log to pull (MAVSDK's
+			     LogFiles plugin, karshipta#249) - same state.flight gate the
+			     Mode/Airborne rows below use. Placed right on this identity
+			     line, not a separate section further down: it's the one
+			     lightweight trigger for the dialog that holds the actual
+			     list, not a growing block of its own. -->
+			{#if state?.flight}
+				<LogsPanel {wardId} />
+			{/if}
+		</div>
 	{/if}
 
 	{#if state}
