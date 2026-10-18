@@ -13,9 +13,14 @@
 
 	interface Props {
 		wardId: string;
+		/** See WardControlTab's own Props comment: per-instance override of
+		 * fleet.readonly. Telemetry itself stays visible regardless (it's
+		 * read-only by nature); this only gates the Flight logs trigger it
+		 * hosts, which isn't. */
+		readonly?: boolean;
 	}
 
-	const { wardId }: Props = $props();
+	const { wardId, readonly }: Props = $props();
 
 	const WARD_CLASS_PREFIX = 'WARD_CLASS_';
 
@@ -66,7 +71,7 @@
 			     lightweight trigger for the dialog that holds the actual
 			     list, not a growing block of its own. -->
 			{#if state?.flight}
-				<LogsPanel {wardId} />
+				<LogsPanel {wardId} {readonly} />
 			{/if}
 		</div>
 	{/if}
