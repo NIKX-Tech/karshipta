@@ -5,6 +5,86 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.3.0]
+
+### Added
+
+- Gateway/console: enforced horizontal geofence boundaries (karshipta#247).
+  Zones used to exist as app data with zero enforcement against the flight
+  controller; every zone mutation now rebuilds one
+  `mavsdk::Geofence::GeofenceData` (one polygon per zone, KEEP_IN as an
+  Inclusion fence, KEEP_OUT as an Exclusion fence) and pushes it to every
+  connected ward, re-sent on reconnect since there is no way to know
+  whether a ward's flight controller still holds the last fence it was
+  sent. Altitude bounds remain advisory only (console-side warning,
+  karshipta#251): checked the full `mavsdk::Geofence::Polygon` header,
+  there is no altitude field anywhere in that plugin's API.
+- Gateway/console: custom home position and RTL altitude control
+  (karshipta#246). RTL had no path to a user-defined home position
+  anywhere in the stack - no higher-level MAVSDK plugin wraps
+  `MAV_CMD_DO_SET_HOME`, so the gateway now sends it directly via
+  `MavlinkPassthrough`. The console's single Ward tab split into
+  Telemetry and Control (a compact status strip stays visible above both
+  regardless of which is active); the per-ward Mission panel was dropped
+  in favor of the fleet-wide mission wizard's existing single-ward
+  support, which already covered the same ground with a persisted
+  record. **Breaking for consumers:** `WardTab` is now
+  `WardTelemetryTab` and `WardControlTab` - karshipta-cloud's own
+  `right-panel.svelte` imports the old name directly and needs a
+  matching update.
+- Console: parameter read/write (karshipta#211), a new `GetParams`/
+  `SetParam` wire contract and a curated, per-firmware (PX4/ArduPilot
+  only - a field simply isn't shown if the connected firmware doesn't
+  have it, never a cross-firmware mention) Configuration tab. Tier 1
+  covers safety-critical failsafes (RTL return altitude, battery/RC-loss/
+  data-link-loss thresholds and actions); tier 2 adds PID rate and angle
+  gains for roll/pitch/yaw. Every curated field links to a verified real
+  firmware doc page, one link per group rather than repeated per field.
+  Full raw parameter access (tier 3, karshipta#214) is intentionally not
+  included yet. `docs/parameter-catalog.md` tracks every configuration
+  value researched for both firmwares, implemented or not.
+- Gateway/console: flight log listing and download (karshipta#249).
+  MAVSDK's `LogFiles` plugin, streamed in chunks over the existing wire
+  by a dedicated per-ward worker thread rather than a separate HTTP
+  endpoint - relayly only proxies its own encrypted message channel,
+  never arbitrary HTTP, so an HTTP download would silently not work at
+  all for an operator connected through the relay transport, exactly the
+  self-hosted-behind-NAT case that transport exists for.
+- Gateway/console: pre-flight sensor calibration (karshipta#248).
+  MAVSDK's `Calibration` plugin, a guided gyro/accelerometer/
+  magnetometer/level-horizon flow with live progress (percentage and
+  operator-facing instruction text) streamed back per step, cancellable
+  mid-run. The console shows a read-only description plus a verified
+  real per-firmware doc link before anything is sent, live per-sensor
+  calibration health badges (from `mavsdk::Telemetry::Health` - a
+  current pass/fail snapshot, not a history; neither MAVSDK nor MAVLink
+  records when a sensor was last calibrated), and locks the dialog
+  against Escape/backdrop dismissal while a calibration is actually
+  running, since the operator may be mid-procedure with the vehicle in
+  hand.
+
+### Fixed
+
+- Console: armed/`inAir` state used to freeze the instant a ward's link
+  dropped, with nothing ever refreshing it short of the gateway
+  reconnecting - a ward offline for hours still blocked its own removal
+  on a stale `armed: true` reading, and its ARMED badge kept asserting
+  that as current fact. Both now key off the same connectivity signal
+  already driving each component's own link dot: removal is only
+  blocked while actually connected, and the badge reads "ARMED (STALE)"
+  with an explanatory tooltip once the link is down. Ward removal also
+  gained a confirmation step, matching every other destructive action in
+  the library. Map cluster bubbles now fade once nothing folded into
+  them is actually online, matching individual markers' own offline
+  fade - previously a cluster of entirely dead wards still read as full
+  strength at a zoom level where any one marker's own fade is invisible.
+- Console: a dropped console-gateway link used to leave an in-flight
+  calibration or log download dialog stuck for up to ten seconds before
+  its own stall timer caught it, with no indication anything was wrong.
+  Both now settle immediately on disconnect with a clear "lost
+  connection to the gateway" message, reusing the same terminal-state
+  view every other failure reason already renders through.
+
 ## [0.2.0]
 
 ### Added
