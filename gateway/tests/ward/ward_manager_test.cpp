@@ -438,6 +438,64 @@ TEST_F(WardManagerTest, HandleDownloadLogFileRejectsUnconnectedWardWithReason) {
     EXPECT_NE(ack.message().find("not connected"), std::string::npos);
 }
 
+// handle_start_calibration()/handle_cancel_calibration() are void, same
+// shape as handle_get_log_entries()/handle_download_log_file() above and
+// for the same reason: the real result (zero or more RUNNING
+// CalibrationProgress messages, then one terminal one) only ever comes
+// back later, from the ward's own CalibrationExecutor worker thread
+// (karshipta#248). Only the synchronous-reject cases below (unknown
+// ward, unconnected ward) are testable without a live connection.
+TEST_F(WardManagerTest, HandleStartCalibrationRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_GYRO);
+    manager.handle_start_calibration(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_calibration_progress());
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.request_id(), "req-1");
+    EXPECT_EQ(progress.calibration_type(), karshipta::v1::CALIBRATION_TYPE_GYRO);
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_NE(progress.message().find("does-not-exist"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleStartCalibrationRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24999")));
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_LEVEL_HORIZON);
+    manager.handle_start_calibration(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_NE(progress.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleCancelCalibrationOnUnknownWardSendsNothing) {
+    auto manager = make_manager();
+
+    karshipta::v1::CancelCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_calibration_request_id("original-req");
+    // No ack channel exists for Cancel at all (see CalibrationExecutor::
+    // cancel()'s own doc comment) - this only needs to not crash and not
+    // send anything for an unknown ward.
+    manager.handle_cancel_calibration(/*client=*/1, request);
+
+    EXPECT_TRUE(transport_.sent_envelopes(1).empty());
+}
+
 TEST_F(WardManagerTest, HandleMissionUploadRejectsUnknownWardWithEvent) {
     auto manager = make_manager();
 
@@ -931,6 +989,49 @@ TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsDownloadLogFileWithAck) {
     EXPECT_EQ(ack.log_id(), 2u);
     EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
     EXPECT_EQ(ack.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsStartCalibrationWithProgress) {
+    auto manager = make_manager();
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_MAGNETOMETER);
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_start_calibration() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_calibration_progress());
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.request_id(), "req-viewer");
+    EXPECT_EQ(progress.calibration_type(), karshipta::v1::CALIBRATION_TYPE_MAGNETOMETER);
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_EQ(progress.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeIgnoresCancelCalibrationSilently) {
+    auto manager = make_manager();
+
+    karshipta::v1::CancelCalibration request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_request_id("some-run");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_cancel_calibration() = request;
+
+    // No ack channel exists for Cancel at all - a viewer's attempt is
+    // logged and otherwise silently ignored, same as a stale/mistargeted
+    // cancel from a real operator (CalibrationExecutor::cancel()'s own
+    // doc comment).
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    EXPECT_TRUE(transport_.sent_envelopes(7).empty());
     EXPECT_TRUE(transport_.broadcast_envelopes().empty());
 }
 

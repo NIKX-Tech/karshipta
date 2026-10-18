@@ -317,6 +317,15 @@ int main() {
                 // from the worker thread.
                 ward_manager->handle_download_log_file(client, envelope.download_log_file());
                 break;
+            case karshipta::v1::Envelope::kStartCalibration:
+                // Same queued shape again (karshipta#248): every
+                // CalibrationProgress update is sent to `client` later,
+                // from the ward's own CalibrationExecutor worker thread.
+                ward_manager->handle_start_calibration(client, envelope.start_calibration());
+                break;
+            case karshipta::v1::Envelope::kCancelCalibration:
+                ward_manager->handle_cancel_calibration(client, envelope.cancel_calibration());
+                break;
 #endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             case karshipta::v1::Envelope::kCreateFleet: {
                 const auto ack = fleet_manager->handle_create_fleet(envelope.create_fleet());

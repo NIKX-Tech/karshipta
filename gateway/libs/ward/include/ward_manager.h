@@ -26,6 +26,7 @@
 #include <telemetry.h>
 #include <command_executor.h>
 #include <log_download_executor.h>
+#include <calibration_executor.h>
 #include <transport.h>
 
 struct WardConfig {
@@ -95,6 +96,14 @@ struct ManagedWard {
     // connection (its worker thread calls into *actions), but after
     // executor (whose own worker is stopped and joined first).
     std::unique_ptr<LogDownloadExecutor> log_executor;
+    // Owns StartCalibration/CancelCalibration for this ward (karshipta#248).
+    // Same never-retired lifetime as log_executor above, for a related but
+    // distinct reason: MAVSDK itself already refuses to calibrate an armed
+    // vehicle (Calibration::Result::FailedArmed), so there is no extra
+    // flight-safety gating this class needs to add on top, and being able
+    // to cancel a stuck calibration even while a stop()/force_stop()
+    // transition is also in flight is actively useful, not a hazard.
+    std::unique_ptr<CalibrationExecutor> calibration_executor;
 
     // Guards executor/busy/pending_auto_start_mission_id/reconnect_worker
     // below: this ward's own transition state, independent of every other
@@ -346,6 +355,31 @@ public:
     void handle_download_log_file(Transport::ClientId client,
                                    const karshipta::v1::DownloadLogFile& request) const;
 
+    // Implements StartCalibration (karshipta#248). Same queued shape as
+    // handle_download_log_file() above: queued onto the ward's own
+    // CalibrationExecutor worker thread, not direct/synchronous - a
+    // calibration is a guided, operator-paced, multi-step process, the
+    // slowest and most interactive MAVLink round trip this gateway
+    // issues. Every CalibrationProgress update (zero or more RUNNING,
+    // then one terminal) is sent later, to `client` only. This method
+    // only answers synchronously, via `client`, for unknown ward_id or a
+    // registered-but-not-connected ward (same reasoning as
+    // handle_get_log_entries()); CalibrationExecutor::enqueue_start()
+    // itself handles the third synchronous-reject case (a calibration
+    // already running for this ward).
+    void handle_start_calibration(Transport::ClientId client,
+                                   const karshipta::v1::StartCalibration& request) const;
+
+    // Implements CancelCalibration (karshipta#248). Same unknown/
+    // unconnected-ward synchronous checks as handle_start_calibration()
+    // above; otherwise routes straight to CalibrationExecutor::cancel(),
+    // which runs on the calling thread (MAVSDK's cancel() is its own
+    // short blocking call) and reports nothing back on this path - a
+    // successful cancel surfaces as the running job's own terminal
+    // CalibrationProgress{CANCELLED} shortly after.
+    void handle_cancel_calibration(Transport::ClientId client,
+                                    const karshipta::v1::CancelCalibration& request) const;
+
     // Rejects an upstream envelope from a connection Transport marked
     // ClientRole::kViewer (gateway issue #20: read-only viewer mode). Never
     // forwards the payload; answers instead with the same reasoned
@@ -538,6 +572,13 @@ private:
     // connection, not executor. Same "capture &transport_, never `this`"
     // safety reasoning as make_executor().
     [[nodiscard]] std::unique_ptr<LogDownloadExecutor> make_log_executor(ManagedWard& ward);
+
+    // Builds the CalibrationExecutor wired to send its progress to
+    // whichever client asked (never broadcast); shared by add_ward_impl()
+    // only, same never-rebuilt lifetime as make_log_executor() above.
+    // Same "capture &transport_, never `this`" safety reasoning as
+    // make_executor().
+    [[nodiscard]] std::unique_ptr<CalibrationExecutor> make_calibration_executor(ManagedWard& ward);
 
     // Clears ward's busy flag under ward->mutex_. Takes the shared_ptr
     // directly (not a ward_id to re-look-up): the caller already holds a

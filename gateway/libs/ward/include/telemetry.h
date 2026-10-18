@@ -66,6 +66,15 @@ class TelemetryInfo {
     [[nodiscard]] bool is_in_air() const;
     // True if every MAVSDK health check currently passes.
     [[nodiscard]] bool is_health_ok() const;
+    // Per-sensor calibration health (karshipta#248's picker badges) -
+    // false (never true, matching every other getter's "not connected
+    // yet" default) if the Telemetry plugin isn't available. No
+    // level-horizon equivalent exists in mavsdk::Telemetry::Health - a
+    // trim correction isn't tracked as a pass/fail calibration state the
+    // way gyro/accel/mag are.
+    [[nodiscard]] bool is_gyrometer_calibration_ok() const;
+    [[nodiscard]] bool is_accelerometer_calibration_ok() const;
+    [[nodiscard]] bool is_magnetometer_calibration_ok() const;
 
    private:
     // Guards telemetry_/mavsdk_keepalive_ construction in ensure_telemetry(), plus
