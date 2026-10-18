@@ -9,6 +9,7 @@
 		type FieldGroup
 	} from '$lib/params/param-spec';
 	import ParamFieldRow from '$lib/components/param-field-row.svelte';
+	import CalibrationDialog from '$lib/components/calibration-dialog.svelte';
 
 	interface Props {
 		wardId: string;
@@ -17,6 +18,7 @@
 	}
 
 	const { wardId, readonly }: Props = $props();
+	let calibrationOpen = $state(false);
 	const effectiveReadonly = $derived(readonly ?? fleet.readonly);
 	const hasFlight = $derived(fleet.wards[wardId]?.state?.flight !== undefined);
 	const autopilot = $derived(fleet.wards[wardId]?.info?.autopilot ?? '');
@@ -93,9 +95,14 @@
 	<div class="flex flex-col gap-3">
 		<div class="flex items-center justify-between gap-2">
 			<span class="font-mono text-[10px] text-fg-muted">{autopilot}</span>
-			<button type="button" class="refresh-button" disabled={loading} onclick={refresh}>
-				{loading ? 'Loading…' : 'Refresh'}
-			</button>
+			<div class="flex items-center gap-2">
+				<button type="button" class="refresh-button" disabled={loading} onclick={refresh}>
+					{loading ? 'Loading…' : 'Refresh'}
+				</button>
+				<button type="button" class="refresh-button" onclick={() => (calibrationOpen = true)}>
+					Calibrate sensors
+				</button>
+			</div>
 		</div>
 
 		{#if paramList?.status === ParamListStatus.PARAM_LIST_STATUS_REJECTED}
@@ -197,6 +204,10 @@
 			{/if}
 		{/each}
 	</div>
+{/if}
+
+{#if calibrationOpen}
+	<CalibrationDialog {wardId} {autopilot} onclose={() => (calibrationOpen = false)} />
 {/if}
 
 <style>

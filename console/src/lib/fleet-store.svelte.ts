@@ -17,6 +17,11 @@ import {
 	type LogEntryList,
 	type LogFileChunk
 } from '$lib/gen/karshipta/v1/log_file';
+import {
+	CalibrationStatus,
+	CalibrationType,
+	type CalibrationProgress
+} from '$lib/gen/karshipta/v1/calibration';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
@@ -89,6 +94,27 @@ export interface LogDownloadTracker {
 	sentAtMs: number;
 }
 
+/** State of the one calibration run active (or just-settled) for a ward
+ * (karshipta#248) - at most one at a time, gateway-enforced
+ * (CalibrationExecutor rejects a second StartCalibration outright), so
+ * this is keyed by wardId directly, not by requestId like
+ * LogDownloadTracker above (which supports several concurrent downloads
+ * per ward). 'running' covers every CalibrationProgress the gateway
+ * sends before its one terminal message; hasProgress/progress and
+ * hasInstruction/instruction mirror CalibrationProgress's own
+ * independently-optional fields. */
+export interface CalibrationRunState {
+	requestId: string;
+	wardId: string;
+	calibrationType: CalibrationType;
+	status: 'running' | 'success' | 'failed' | 'cancelled' | 'rejected';
+	message: string;
+	hasProgress: boolean;
+	progress: number;
+	hasInstruction: boolean;
+	instruction: string;
+}
+
 const MAX_EVENTS = 50;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
@@ -136,6 +162,32 @@ export function isParamWriteTerminal(status: ParamAckStatus): boolean {
 
 export function isLogDownloadTerminal(status: LogDownloadTracker['status']): boolean {
 	return status === 'success' || status === 'rejected';
+}
+
+export function isCalibrationTerminal(status: CalibrationRunState['status']): boolean {
+	return status !== 'running';
+}
+
+function calibrationRunStatus(status: CalibrationStatus): CalibrationRunState['status'] {
+	switch (status) {
+		case CalibrationStatus.CALIBRATION_STATUS_SUCCESS:
+			return 'success';
+		case CalibrationStatus.CALIBRATION_STATUS_FAILED:
+			return 'failed';
+		case CalibrationStatus.CALIBRATION_STATUS_CANCELLED:
+			return 'cancelled';
+		case CalibrationStatus.CALIBRATION_STATUS_REJECTED:
+			return 'rejected';
+		// RUNNING and the proto-required UNSPECIFIED/UNRECOGNIZED fallback
+		// both read as "still going" here - the gateway never actually
+		// sends UNSPECIFIED, but TypeScript needs every CalibrationStatus
+		// covered, not just the ones currently defined in the schema.
+		case CalibrationStatus.CALIBRATION_STATUS_RUNNING:
+		case CalibrationStatus.CALIBRATION_STATUS_UNSPECIFIED:
+		case CalibrationStatus.UNRECOGNIZED:
+		default:
+			return 'running';
+	}
 }
 
 /**
@@ -260,6 +312,8 @@ class FleetStore {
 	 * multi-MB transfers through Svelte's reactivity proxy on every chunk
 	 * would be pure overhead. */
 	private logDownloadChunks: Record<string, (Uint8Array | undefined)[]> = {};
+	/** the one active (or just-settled) calibration run per ward (karshipta#248), keyed by ward_id */
+	calibrationRuns = $state<Record<string, CalibrationRunState>>({});
 	selectedWardId = $state<string | undefined>(undefined);
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
@@ -422,6 +476,35 @@ class FleetStore {
 			for (const ward of Object.values(this.wards)) {
 				if (ward.source === 'gateway' && ward.state) {
 					ward.state.connected = false;
+				}
+			}
+			// A dropped console<->gateway link means no further
+			// CalibrationProgress/DownloadLogFileAck/LogFileChunk for a
+			// gateway-sourced ward will ever arrive - settle any in-flight
+			// one immediately rather than leaving its dialog stuck for up
+			// to REQUEST_TIMEOUT_MS until its own stall timer would
+			// eventually catch this. Both dialogs are deliberately
+			// non-dismissible while a run is active (karshipta#248/#249 -
+			// "calibrate state is sensitive") specifically so the operator
+			// is never stuck with no way out; this is that same rule
+			// applied to the one cause neither tracker's stall timer
+			// reacts to on its own. Demo wards are untouched: the demo
+			// engine never actually disconnects, so nothing of theirs
+			// should be cut short by a real gateway link dropping.
+			const isGatewayWard = (wardId: string) => this.wards[wardId]?.source === 'gateway';
+			for (const run of Object.values(this.calibrationRuns)) {
+				if (run.status === 'running' && isGatewayWard(run.wardId)) {
+					this.settleCalibration(
+						run.wardId,
+						run.requestId,
+						'failed',
+						'lost connection to the gateway'
+					);
+				}
+			}
+			for (const tracker of Object.values(this.logDownloads)) {
+				if (!isLogDownloadTerminal(tracker.status) && isGatewayWard(tracker.wardId)) {
+					this.settleLogDownload(tracker.requestId, 'lost connection to the gateway');
 				}
 			}
 		}
@@ -768,6 +851,115 @@ class FleetStore {
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
+	/** Sends StartCalibration for one ward (karshipta#248); progress lands
+	 * in calibrationRuns[wardId] via applyCalibrationProgress(). At most
+	 * one run per ward - the gateway itself rejects a second concurrent
+	 * start (CalibrationExecutor's own one-job-at-a-time guarantee), so
+	 * this store doesn't need to guard against it client-side either;
+	 * a stale in-flight run for this ward (if any) is simply overwritten,
+	 * matching what the gateway would do anyway. */
+	requestStartCalibration(wardId: string, calibrationType: CalibrationType): void {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.calibrationRuns[wardId] = {
+				requestId,
+				wardId,
+				calibrationType,
+				status: 'rejected',
+				message: 'read-only session',
+				hasProgress: false,
+				progress: 0,
+				hasInstruction: false,
+				instruction: ''
+			};
+			return;
+		}
+		this.calibrationRuns[wardId] = {
+			requestId,
+			wardId,
+			calibrationType,
+			status: 'running',
+			message: '',
+			hasProgress: false,
+			progress: 0,
+			hasInstruction: false,
+			instruction: ''
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleCalibration(wardId, requestId, 'rejected', 'no active channel');
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleCalibration(wardId, requestId, 'rejected', 'no response from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({
+				payload: {
+					$case: 'startCalibration',
+					startCalibration: { requestId, wardId, calibrationType }
+				}
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleCalibration(wardId, requestId, 'rejected', reason);
+		}
+	}
+
+	/** Sends CancelCalibration for the currently running calibration on one
+	 * ward, if any (karshipta#248). No-op if nothing is running. There is
+	 * no ack channel for Cancel at all (gateway/docs/calibration-executor.md's
+	 * own doc comment) - a successful cancel surfaces as the run's own
+	 * terminal CalibrationProgress{CANCELLED} shortly after, via the
+	 * normal applyCalibrationProgress() path; a failed or lost cancel
+	 * simply leaves the run showing RUNNING, same as the gateway side. */
+	requestCancelCalibration(wardId: string): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run || run.status !== 'running') return;
+		const channel = this.channelFor(wardId);
+		if (!channel) return;
+		try {
+			channel.send({
+				payload: {
+					$case: 'cancelCalibration',
+					cancelCalibration: {
+						requestId: crypto.randomUUID(),
+						wardId,
+						calibrationRequestId: run.requestId
+					}
+				}
+			});
+		} catch {
+			// Best-effort, matching the "no ack channel" contract above - a
+			// failed send just means the operator can try again or wait it
+			// out; nothing to settle client-side.
+		}
+	}
+
+	/** Removes a ward's calibration run from local state immediately,
+	 * regardless of whether it's still 'running' or already terminal -
+	 * the single "go back to the sensor list" action calibration-dialog.svelte's
+	 * Cancel button uses (karshipta#248). Deliberately does not wait for a
+	 * CANCELLED confirmation: a running calibration's own cancel request
+	 * (requestCancelCalibration, called alongside this) is fire-and-forget
+	 * with no ack channel, so waiting for confirmation here would mean
+	 * "going back" might never actually complete if that message is lost.
+	 * Clears any pending stall/settle timer tied to this run so it can't
+	 * fire against an already-cleared entry afterward. */
+	clearCalibrationRun(wardId: string): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run) return;
+		const timer = this.timeoutTimers.get(run.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(run.requestId);
+		}
+		delete this.calibrationRuns[wardId];
+	}
+
 	/**
 	 * Adds a ward through the connected gateway (covers both a simulated
 	 * SITL endpoint and real hardware; the gateway sees no difference). No
@@ -915,6 +1107,8 @@ class FleetStore {
 			case 'setParam':
 			case 'getLogEntries':
 			case 'downloadLogFile':
+			case 'startCalibration':
+			case 'cancelCalibration':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			case 'fleet':
@@ -962,6 +1156,9 @@ class FleetStore {
 			case 'logFileChunk':
 				this.applyLogFileChunk(payload.logFileChunk);
 				break;
+			case 'calibrationProgress':
+				this.applyCalibrationProgress(payload.calibrationProgress);
+				break;
 			default: {
 				const unhandled: never = payload;
 				console.warn('fleet: ignoring unknown payload kind', unhandled);
@@ -1003,6 +1200,7 @@ class FleetStore {
 		this.logEntriesRequestIds = {};
 		this.logDownloads = {};
 		this.logDownloadChunks = {};
+		this.calibrationRuns = {};
 		this.selectedWardId = undefined;
 		this.cancelGoto();
 		this.cancelSetHome();
@@ -1271,6 +1469,74 @@ class FleetStore {
 		tracker.message = message;
 		setTimeout(() => {
 			delete this.logDownloads[requestId];
+		}, TRACKER_LINGER_MS);
+	}
+
+	/** Resolves a CalibrationProgress update: RUNNING (re-arms the stall
+	 * timer - a calibration is operator-paced, so only silence between
+	 * updates is a failure, not total elapsed time, same reasoning as
+	 * armLogChunkStallTimer()) or one of the terminal statuses (settles
+	 * and lingers before clearing, same TRACKER_LINGER_MS every other
+	 * tracker uses). Ignores a message whose request_id no longer matches
+	 * this ward's current run (stale/superseded) or that arrives after
+	 * the run already settled. */
+	applyCalibrationProgress(progress: CalibrationProgress): void {
+		const run = this.calibrationRuns[progress.wardId];
+		if (!run || run.requestId !== progress.requestId || isCalibrationTerminal(run.status)) return;
+		const timer = this.timeoutTimers.get(progress.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(progress.requestId);
+		}
+
+		const status = calibrationRunStatus(progress.status);
+		run.status = status;
+		run.message = progress.message;
+		run.hasProgress = progress.hasProgress;
+		run.progress = progress.progress;
+		run.hasInstruction = progress.hasInstruction;
+		run.instruction = progress.instruction;
+
+		if (status === 'running') {
+			this.timeoutTimers.set(
+				progress.requestId,
+				setTimeout(() => {
+					this.settleCalibration(
+						progress.wardId,
+						progress.requestId,
+						'failed',
+						'no further progress from gateway'
+					);
+				}, REQUEST_TIMEOUT_MS)
+			);
+			return;
+		}
+		setTimeout(() => {
+			if (this.calibrationRuns[progress.wardId]?.requestId === progress.requestId) {
+				delete this.calibrationRuns[progress.wardId];
+			}
+		}, TRACKER_LINGER_MS);
+	}
+
+	private settleCalibration(
+		wardId: string,
+		requestId: string,
+		status: 'failed' | 'rejected',
+		message: string
+	): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run || run.requestId !== requestId || isCalibrationTerminal(run.status)) return;
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		run.status = status;
+		run.message = message;
+		setTimeout(() => {
+			if (this.calibrationRuns[wardId]?.requestId === requestId) {
+				delete this.calibrationRuns[wardId];
+			}
 		}, TRACKER_LINGER_MS);
 	}
 

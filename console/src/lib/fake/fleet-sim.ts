@@ -51,6 +51,12 @@ import {
 	type GetLogEntries,
 	type LogEntry
 } from '$lib/gen/karshipta/v1/log_file';
+import {
+	CalibrationStatus,
+	CalibrationType,
+	type CancelCalibration,
+	type StartCalibration
+} from '$lib/gen/karshipta/v1/calibration';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 import type { LatLon } from '$lib/geolocation';
@@ -247,6 +253,40 @@ interface SimWard {
 	/** demo stand-in for a real vehicle's flight log list (karshipta#249) -
 	 * fixed, not generated per flight; see defaultDemoLogs(). */
 	logs: LogEntry[];
+	/** The one calibration this ward is currently simulating, if any
+	 * (karshipta#248) - at most one at a time, same gateway-enforced
+	 * guarantee CalibrationExecutor provides for real. Advanced once per
+	 * tick() in FakeGateway.tick(); undefined when nothing is running. */
+	calibration: DemoCalibration | undefined;
+}
+
+/** DEMO_CALIBRATION_TOTAL_STEPS ticks of simulated progress, one
+ * CalibrationProgress sent per DEMO_CALIBRATION_TICKS_PER_STEP real
+ * ticks (TICK_HZ apart) so a demo run takes a few real seconds and
+ * genuinely exercises the console's progress bar/instruction text, not
+ * an instant no-op. */
+interface DemoCalibration {
+	requestId: string;
+	calibrationType: CalibrationType;
+	/** ticks elapsed since this calibration started */
+	ticksElapsed: number;
+}
+
+const DEMO_CALIBRATION_TOTAL_STEPS = 5;
+const DEMO_CALIBRATION_TICKS_PER_STEP = TICK_HZ; // one simulated step per real second
+
+/** Plausible, not a claim of real MAVSDK/firmware wording - matches
+ * calibration-dialog.svelte's own expectation of an operator-facing
+ * instruction string per RUNNING update. */
+function demoCalibrationInstruction(stepIndex: number): string {
+	const steps = [
+		'Place the vehicle on a flat, level surface',
+		'Hold still',
+		'Rotate to the next orientation',
+		'Hold still',
+		'Finishing up'
+	];
+	return steps[Math.min(stepIndex, steps.length - 1)];
 }
 
 /** One small (fits in one demo chunk) and one larger (spans several, at
@@ -338,7 +378,8 @@ function initialWard(spec: WardSpec): SimWard {
 		target: undefined,
 		missionRun: undefined,
 		params: defaultDemoParams(),
-		logs: defaultDemoLogs()
+		logs: defaultDemoLogs(),
+		calibration: undefined
 	};
 }
 
@@ -502,6 +543,12 @@ export class FakeGateway implements DemoEngine {
 				break;
 			case 'downloadLogFile':
 				this.handleDownloadLogFile(envelope.payload.downloadLogFile);
+				break;
+			case 'startCalibration':
+				this.handleStartCalibration(envelope.payload.startCalibration);
+				break;
+			case 'cancelCalibration':
+				this.handleCancelCalibration(envelope.payload.cancelCalibration);
 				break;
 			default:
 				console.warn(
@@ -1596,7 +1643,119 @@ export class FakeGateway implements DemoEngine {
 			this.advance(ward);
 			this.drainBattery(ward);
 			this.onEnvelope(stateEnvelope(ward, nowMs));
+			this.advanceCalibration(ward);
 		}
+	}
+
+	/** Advances this ward's simulated calibration, if one is running, by
+	 * one tick - sends a RUNNING CalibrationProgress once per
+	 * DEMO_CALIBRATION_TICKS_PER_STEP ticks (not every tick: TICK_HZ is
+	 * 5Hz, far faster than a real calibration's own step cadence), ending
+	 * in SUCCESS after DEMO_CALIBRATION_TOTAL_STEPS steps. */
+	private advanceCalibration(ward: SimWard): void {
+		if (!ward.calibration) return;
+		ward.calibration.ticksElapsed += 1;
+		if (ward.calibration.ticksElapsed % DEMO_CALIBRATION_TICKS_PER_STEP !== 0) return;
+
+		const stepIndex = ward.calibration.ticksElapsed / DEMO_CALIBRATION_TICKS_PER_STEP - 1;
+		const { requestId, calibrationType } = ward.calibration;
+
+		if (stepIndex >= DEMO_CALIBRATION_TOTAL_STEPS) {
+			ward.calibration = undefined;
+			this.calibrationProgress(
+				ward.spec.wardId,
+				requestId,
+				calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_SUCCESS,
+				''
+			);
+			return;
+		}
+		this.calibrationProgress(
+			ward.spec.wardId,
+			requestId,
+			calibrationType,
+			CalibrationStatus.CALIBRATION_STATUS_RUNNING,
+			'',
+			true,
+			stepIndex / DEMO_CALIBRATION_TOTAL_STEPS,
+			true,
+			demoCalibrationInstruction(stepIndex)
+		);
+	}
+
+	private calibrationProgress(
+		wardId: string,
+		requestId: string,
+		calibrationType: CalibrationType,
+		status: CalibrationStatus,
+		message: string,
+		hasProgress = false,
+		progress = 0,
+		hasInstruction = false,
+		instruction = ''
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'calibrationProgress',
+				calibrationProgress: {
+					requestId,
+					wardId,
+					calibrationType,
+					status,
+					message,
+					hasProgress,
+					progress,
+					hasInstruction,
+					instruction
+				}
+			}
+		});
+	}
+
+	private handleStartCalibration(request: StartCalibration): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.calibrationProgress(
+				request.wardId,
+				request.requestId,
+				request.calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`
+			);
+			return;
+		}
+		if (ward.calibration) {
+			this.calibrationProgress(
+				request.wardId,
+				request.requestId,
+				request.calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_REJECTED,
+				'a calibration is already running for this ward, retry once it finishes'
+			);
+			return;
+		}
+		ward.calibration = {
+			requestId: request.requestId,
+			calibrationType: request.calibrationType,
+			ticksElapsed: 0
+		};
+	}
+
+	private handleCancelCalibration(request: CancelCalibration): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward?.calibration || ward.calibration.requestId !== request.calibrationRequestId) {
+			return;
+		}
+		const { requestId, calibrationType } = ward.calibration;
+		ward.calibration = undefined;
+		this.calibrationProgress(
+			request.wardId,
+			requestId,
+			calibrationType,
+			CalibrationStatus.CALIBRATION_STATUS_CANCELLED,
+			''
+		);
 	}
 
 	private advance(ward: SimWard): void {
@@ -1778,7 +1937,13 @@ function stateEnvelope(ward: SimWard, nowMs: number): Envelope {
 				flight: {
 					flightMode: ward.mode,
 					armed: ward.armed,
-					inAir: ward.inAir
+					inAir: ward.inAir,
+					// A healthy demo fleet is already calibrated, same
+					// "plausible working baseline" convention as healthOk
+					// above - karshipta#248's picker badges.
+					gyrometerCalibrationOk: true,
+					accelerometerCalibrationOk: true,
+					magnetometerCalibrationOk: true
 				},
 				tags: []
 			}
