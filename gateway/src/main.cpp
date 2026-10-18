@@ -283,6 +283,49 @@ int main() {
             case karshipta::v1::Envelope::kMissionDownloadRequest:
                 ward_manager->handle_mission_download_request(envelope.mission_download_request());
                 break;
+            case karshipta::v1::Envelope::kGetParams: {
+                const auto response = ward_manager->handle_get_params(envelope.get_params());
+                karshipta::v1::Envelope response_envelope;
+                *response_envelope.mutable_param_list() = response;
+                // Sent only to the requester, not broadcast: a param dump
+                // is a read-only response meaningful just to the client
+                // that asked, unlike a Zone/Fleet mutation every console
+                // needs to learn about.
+                transport->send(client, serialize_envelope(response_envelope));
+                break;
+            }
+            case karshipta::v1::Envelope::kSetParam: {
+                const auto ack = ward_manager->handle_set_param(envelope.set_param());
+                karshipta::v1::Envelope ack_envelope;
+                *ack_envelope.mutable_param_ack() = ack;
+                // Broadcast, not send-to-requester: a confirmed parameter
+                // change is real vehicle state other consoles watching
+                // this ward should learn about too, same as CommandAck.
+                transport->broadcast(serialize_envelope(ack_envelope));
+                break;
+            }
+            case karshipta::v1::Envelope::kGetLogEntries:
+                // Unlike GetParams above, the result does not come back
+                // here: WardManager queues this onto the ward's own
+                // LogDownloadExecutor worker thread (karshipta#249), which
+                // sends the LogEntryList to `client` itself once ready.
+                ward_manager->handle_get_log_entries(client, envelope.get_log_entries());
+                break;
+            case karshipta::v1::Envelope::kDownloadLogFile:
+                // Same queued shape as kGetLogEntries above: the accept/
+                // reject ack and every chunk are sent to `client` later,
+                // from the worker thread.
+                ward_manager->handle_download_log_file(client, envelope.download_log_file());
+                break;
+            case karshipta::v1::Envelope::kStartCalibration:
+                // Same queued shape again (karshipta#248): every
+                // CalibrationProgress update is sent to `client` later,
+                // from the ward's own CalibrationExecutor worker thread.
+                ward_manager->handle_start_calibration(client, envelope.start_calibration());
+                break;
+            case karshipta::v1::Envelope::kCancelCalibration:
+                ward_manager->handle_cancel_calibration(client, envelope.cancel_calibration());
+                break;
 #endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             case karshipta::v1::Envelope::kCreateFleet: {
                 const auto ack = fleet_manager->handle_create_fleet(envelope.create_fleet());
@@ -325,6 +368,14 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                // Re-push the complete zone set (karshipta#247) so the new
+                // boundary takes effect immediately, not just on this ward's
+                // next reconnect.
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kUpdateZone: {
@@ -332,6 +383,11 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kDeleteZone: {
@@ -339,6 +395,11 @@ int main() {
                 karshipta::v1::Envelope ack_envelope;
                 *ack_envelope.mutable_zone_ack() = ack;
                 transport->broadcast(serialize_envelope(ack_envelope));
+#ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
+                if (ack.status() == karshipta::v1::ZONE_ACK_STATUS_ACCEPTED) {
+                    fleet_manager->push_geofence_to_all_wards(*ward_manager);
+                }
+#endif
                 break;
             }
             case karshipta::v1::Envelope::kCreateFleetMission: {

@@ -1,14 +1,27 @@
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { Event, WardInfo, WardState } from '$lib/gen/karshipta/v1/telemetry';
-import {
-	CommandStatus,
-	MissionAction,
-	type Command,
-	type Mission,
-	type MissionProgress
-} from '$lib/gen/karshipta/v1/command';
+import { CommandStatus, type Command } from '$lib/gen/karshipta/v1/command';
 import { WardConfigStatus, type AddWard } from '$lib/gen/karshipta/v1/fleet';
 import { Severity, type WardClass } from '$lib/gen/karshipta/v1/common';
+import {
+	ParamAckStatus,
+	ParamListStatus,
+	type Param,
+	type ParamAck,
+	type ParamList
+} from '$lib/gen/karshipta/v1/parameter';
+import {
+	LogDownloadStatus,
+	LogEntryListStatus,
+	type DownloadLogFileAck,
+	type LogEntryList,
+	type LogFileChunk
+} from '$lib/gen/karshipta/v1/log_file';
+import {
+	CalibrationStatus,
+	CalibrationType,
+	type CalibrationProgress
+} from '$lib/gen/karshipta/v1/calibration';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
@@ -25,20 +38,15 @@ export interface Ward {
 	source: WardSource;
 }
 
+// Shared with fleet-groups-store.svelte.ts's own route-planning draft
+// (FleetMission's per-ward routes) - the per-ward draft this type
+// originally backed here is gone, but the shape itself is still genuinely
+// shared, not exclusive to either store.
 export interface DraftWaypoint {
 	latitudeDeg: number;
 	longitudeDeg: number;
 	altitudeRelM: number;
 }
-
-export interface MissionDraft {
-	wardId: string;
-	waypoints: DraftWaypoint[];
-	repeatCount: number;
-}
-
-const DEFAULT_WAYPOINT_ALT_M = 30;
-const WAYPOINT_ACCEPTANCE_RADIUS_M = 2;
 
 export interface CommandTracker {
 	commandId: string;
@@ -57,6 +65,54 @@ export interface WardConfigTracker {
 	status: WardConfigStatus;
 	message: string;
 	sentAtMs: number;
+}
+
+export interface ParamWriteTracker {
+	requestId: string;
+	wardId: string;
+	paramName: string;
+	status: ParamAckStatus;
+	message: string;
+	sentAtMs: number;
+}
+
+/** A DownloadLogFile request's progress (karshipta#249): 'pending' until
+ * the DownloadLogFileAck arrives, 'downloading' while LogFileChunk
+ * messages are still coming in, then 'success' (triggers the browser
+ * download) or 'rejected'. Unlike ParamWriteTracker/CommandTracker, this
+ * is not a single request/response - see fleet-store.svelte.ts's own
+ * applyDownloadLogFileAck()/applyLogFileChunk(). */
+export interface LogDownloadTracker {
+	requestId: string;
+	wardId: string;
+	logId: number;
+	status: 'pending' | 'downloading' | 'success' | 'rejected';
+	message: string;
+	totalSizeBytes: number;
+	chunkCount: number;
+	receivedBytes: number;
+	sentAtMs: number;
+}
+
+/** State of the one calibration run active (or just-settled) for a ward
+ * (karshipta#248) - at most one at a time, gateway-enforced
+ * (CalibrationExecutor rejects a second StartCalibration outright), so
+ * this is keyed by wardId directly, not by requestId like
+ * LogDownloadTracker above (which supports several concurrent downloads
+ * per ward). 'running' covers every CalibrationProgress the gateway
+ * sends before its one terminal message; hasProgress/progress and
+ * hasInstruction/instruction mirror CalibrationProgress's own
+ * independently-optional fields. */
+export interface CalibrationRunState {
+	requestId: string;
+	wardId: string;
+	calibrationType: CalibrationType;
+	status: 'running' | 'success' | 'failed' | 'cancelled' | 'rejected';
+	message: string;
+	hasProgress: boolean;
+	progress: number;
+	hasInstruction: boolean;
+	instruction: string;
 }
 
 const MAX_EVENTS = 50;
@@ -95,6 +151,77 @@ export function isConfigTerminal(status: WardConfigStatus): boolean {
 		status === WardConfigStatus.WARD_CONFIG_STATUS_ACCEPTED ||
 		status === WardConfigStatus.WARD_CONFIG_STATUS_REJECTED
 	);
+}
+
+export function isParamWriteTerminal(status: ParamAckStatus): boolean {
+	return (
+		status === ParamAckStatus.PARAM_ACK_STATUS_SUCCESS ||
+		status === ParamAckStatus.PARAM_ACK_STATUS_REJECTED
+	);
+}
+
+export function isLogDownloadTerminal(status: LogDownloadTracker['status']): boolean {
+	return status === 'success' || status === 'rejected';
+}
+
+export function isCalibrationTerminal(status: CalibrationRunState['status']): boolean {
+	return status !== 'running';
+}
+
+function calibrationRunStatus(status: CalibrationStatus): CalibrationRunState['status'] {
+	switch (status) {
+		case CalibrationStatus.CALIBRATION_STATUS_SUCCESS:
+			return 'success';
+		case CalibrationStatus.CALIBRATION_STATUS_FAILED:
+			return 'failed';
+		case CalibrationStatus.CALIBRATION_STATUS_CANCELLED:
+			return 'cancelled';
+		case CalibrationStatus.CALIBRATION_STATUS_REJECTED:
+			return 'rejected';
+		// RUNNING and the proto-required UNSPECIFIED/UNRECOGNIZED fallback
+		// both read as "still going" here - the gateway never actually
+		// sends UNSPECIFIED, but TypeScript needs every CalibrationStatus
+		// covered, not just the ones currently defined in the schema.
+		case CalibrationStatus.CALIBRATION_STATUS_RUNNING:
+		case CalibrationStatus.CALIBRATION_STATUS_UNSPECIFIED:
+		case CalibrationStatus.UNRECOGNIZED:
+		default:
+			return 'running';
+	}
+}
+
+/**
+ * PX4's own log format is ULog (.ulg); ArduPilot's is a binary dataflash
+ * log, whose own native extension is .bin. Guessing the wrong one for the
+ * connected firmware would be worse than a plain fallback - same "know
+ * your client" rule configuration-tab.svelte's per-firmware fields
+ * already follow - so this only ever claims the firmware-specific
+ * extension when WardInfo.autopilot actually says which firmware
+ * produced the bytes; anything else (unknown, empty) gets the generic
+ * fallback.
+ */
+function logFileName(wardId: string, logId: number, autopilot: string | undefined): string {
+	const extension = autopilot === 'PX4' ? 'ulg' : 'bin';
+	return `${wardId}-log-${logId}.${extension}`;
+}
+
+/** Hands the reassembled file to the browser the only way a page can
+ * trigger a save without a server endpoint: an object URL plus a
+ * transient, never-appended <a download> click. Safe here specifically
+ * because this is the real console app, not a sandboxed preview - not a
+ * pattern to reuse inside an Artifact. */
+function triggerBrowserDownload(filename: string, bytes: Uint8Array): void {
+	// bytes.buffer is typed ArrayBufferLike (could in principle be a
+	// SharedArrayBuffer), which Blob's constructor type doesn't accept;
+	// copying into a fresh Uint8Array (always backed by a plain
+	// ArrayBuffer) satisfies that without changing the actual bytes sent.
+	const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' });
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement('a');
+	link.href = url;
+	link.download = filename;
+	link.click();
+	URL.revokeObjectURL(url);
 }
 
 function readStoredGatewayUrl(): string | undefined {
@@ -164,10 +291,36 @@ class FleetStore {
 	events = $state<Event[]>([]);
 	commands = $state<Record<string, CommandTracker>>({});
 	wardConfigRequests = $state<Record<string, WardConfigTracker>>({});
+	/** last GetParams response per ward (karshipta#212), keyed by ward_id */
+	paramLists = $state<Record<string, ParamList>>({});
+	paramListLoading = $state<Record<string, boolean>>({});
+	/** the requestId of the most recently sent GetParams per ward, so a
+	 * stale response from an earlier, superseded request can't clobber a
+	 * newer one still in flight */
+	private paramListRequestIds: Record<string, string> = {};
+	paramWrites = $state<Record<string, ParamWriteTracker>>({});
+	/** last GetLogEntries response per ward (karshipta#249), keyed by ward_id - same shape as paramLists above */
+	logEntries = $state<Record<string, LogEntryList>>({});
+	logEntriesLoading = $state<Record<string, boolean>>({});
+	/** same stale-response guard as paramListRequestIds above */
+	private logEntriesRequestIds: Record<string, string> = {};
+	logDownloads = $state<Record<string, LogDownloadTracker>>({});
+	/** Chunks received so far per in-flight download, indexed by
+	 * chunk_index, sparse until every slot fills. Deliberately NOT $state:
+	 * Uint8Array chunks are write-once binary payloads no component reads
+	 * reactively (logDownloads above is what the UI watches), and routing
+	 * multi-MB transfers through Svelte's reactivity proxy on every chunk
+	 * would be pure overhead. */
+	private logDownloadChunks: Record<string, (Uint8Array | undefined)[]> = {};
+	/** the one active (or just-settled) calibration run per ward (karshipta#248), keyed by ward_id */
+	calibrationRuns = $state<Record<string, CalibrationRunState>>({});
 	selectedWardId = $state<string | undefined>(undefined);
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
+	/** set-home targeting: identical shape to goto targeting above, same map-click handoff */
+	setHomeArming = $state(false);
+	pendingSetHome = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
 	/** gateway connection as the operator should read it */
 	link = $state<'live' | 'connecting' | 'down'>('down');
 	gatewayUrl = $state(readStoredGatewayUrl() ?? '');
@@ -180,11 +333,6 @@ class FleetStore {
 	readonly = $state(false);
 	/** how many simulated-ward adds this session has requested; drives the resource warning at C7's UI layer */
 	simulatedWardAddCount = $state(0);
-	/** mission being planned; while set, map clicks add waypoints for its ward */
-	missionDraft = $state<MissionDraft | undefined>(undefined);
-	/** last uploaded mission per ward, so Start knows what it refers to */
-	uploadedMissions = $state<Record<string, Mission>>({});
-	missionProgress = $state<Record<string, MissionProgress>>({});
 
 	readonly wardIds = $derived(Object.keys(this.wards).sort());
 	readonly selectedWard = $derived(
@@ -330,15 +478,42 @@ class FleetStore {
 					ward.state.connected = false;
 				}
 			}
+			// A dropped console<->gateway link means no further
+			// CalibrationProgress/DownloadLogFileAck/LogFileChunk for a
+			// gateway-sourced ward will ever arrive - settle any in-flight
+			// one immediately rather than leaving its dialog stuck for up
+			// to REQUEST_TIMEOUT_MS until its own stall timer would
+			// eventually catch this. Both dialogs are deliberately
+			// non-dismissible while a run is active (karshipta#248/#249 -
+			// "calibrate state is sensitive") specifically so the operator
+			// is never stuck with no way out; this is that same rule
+			// applied to the one cause neither tracker's stall timer
+			// reacts to on its own. Demo wards are untouched: the demo
+			// engine never actually disconnects, so nothing of theirs
+			// should be cut short by a real gateway link dropping.
+			const isGatewayWard = (wardId: string) => this.wards[wardId]?.source === 'gateway';
+			for (const run of Object.values(this.calibrationRuns)) {
+				if (run.status === 'running' && isGatewayWard(run.wardId)) {
+					this.settleCalibration(
+						run.wardId,
+						run.requestId,
+						'failed',
+						'lost connection to the gateway'
+					);
+				}
+			}
+			for (const tracker of Object.values(this.logDownloads)) {
+				if (!isLogDownloadTerminal(tracker.status) && isGatewayWard(tracker.wardId)) {
+					this.settleLogDownload(tracker.requestId, 'lost connection to the gateway');
+				}
+			}
 		}
 	}
 
 	select(wardId: string | undefined): void {
 		this.selectedWardId = wardId;
 		this.cancelGoto();
-		if (this.missionDraft && this.missionDraft.wardId !== wardId) {
-			this.cancelPlanning();
-		}
+		this.cancelSetHome();
 	}
 
 	armGoto(): void {
@@ -357,63 +532,20 @@ class FleetStore {
 		this.pendingGoto = { latitudeDeg, longitudeDeg };
 	}
 
-	startPlanning(wardId: string): void {
-		this.cancelGoto();
-		this.missionDraft = { wardId, waypoints: [], repeatCount: 0 };
+	armSetHome(): void {
+		this.setHomeArming = true;
 	}
 
-	cancelPlanning(): void {
-		this.missionDraft = undefined;
+	cancelSetHome(): void {
+		this.setHomeArming = false;
+		this.pendingSetHome = undefined;
 	}
 
-	/** called by the map on click while a mission is being planned */
-	addWaypoint(latitudeDeg: number, longitudeDeg: number): void {
-		const draft = this.missionDraft;
-		if (!draft) return;
-		const previous = draft.waypoints.at(-1);
-		draft.waypoints.push({
-			latitudeDeg,
-			longitudeDeg,
-			altitudeRelM: previous?.altitudeRelM ?? DEFAULT_WAYPOINT_ALT_M
-		});
-	}
-
-	removeWaypoint(index: number): void {
-		this.missionDraft?.waypoints.splice(index, 1);
-	}
-
-	/** sends the draft as a Mission envelope and remembers it for Start */
-	uploadMission(): Mission | undefined {
-		const draft = this.missionDraft;
-		if (!draft || draft.waypoints.length === 0) return undefined;
-		const mission: Mission = {
-			missionId: crypto.randomUUID(),
-			wardId: draft.wardId,
-			name: `mission-${new Date().toISOString().slice(11, 19)}`,
-			repeatCount: draft.repeatCount,
-			items: draft.waypoints.map((waypoint, index) => ({
-				seq: index,
-				action: MissionAction.MISSION_ACTION_WAYPOINT,
-				position: {
-					latitudeDeg: waypoint.latitudeDeg,
-					longitudeDeg: waypoint.longitudeDeg,
-					altitudeMslM: 0,
-					altitudeRelM: waypoint.altitudeRelM
-				},
-				speedMS: 0,
-				holdTimeS: 0,
-				acceptanceRadiusM: WAYPOINT_ACCEPTANCE_RADIUS_M
-			}))
-		};
-		const channel = this.channelFor(draft.wardId);
-		if (!channel) {
-			console.error(`fleet: cannot upload mission, ${draft.wardId} has no active channel`);
-			return undefined;
-		}
-		channel.send({ payload: { $case: 'missionUpload', missionUpload: mission } });
-		this.uploadedMissions[draft.wardId] = mission;
-		delete this.missionProgress[draft.wardId];
-		return mission;
+	/** called by the map on click while set-home targeting is armed */
+	requestSetHome(latitudeDeg: number, longitudeDeg: number): void {
+		if (!this.setHomeArming) return;
+		this.setHomeArming = false;
+		this.pendingSetHome = { latitudeDeg, longitudeDeg };
 	}
 
 	sendCommand(wardId: string, action: NonNullable<Command['action']>): string {
@@ -474,6 +606,358 @@ class FleetStore {
 		return Object.values(this.commands)
 			.filter((tracker) => tracker.wardId === wardId)
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
+	}
+
+	/** Sends GetParams for one ward; the response lands in paramLists[wardId]
+	 * via applyParamList(). Viewer mode is refused client-side too (not just
+	 * by the gateway, see WardManager::reject_viewer_envelope's kGetParams
+	 * case) so a read-only session never even sends the request. */
+	requestGetParams(wardId: string): void {
+		const requestId = crypto.randomUUID();
+		this.paramListRequestIds[wardId] = requestId;
+		this.paramListLoading[wardId] = true;
+		if (this.readonly) {
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: 'read-only session',
+				params: []
+			};
+			return;
+		}
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: 'no active channel',
+				params: []
+			};
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				if (this.paramListRequestIds[wardId] !== requestId) return;
+				this.paramListLoading[wardId] = false;
+				this.paramLists[wardId] = {
+					requestId,
+					wardId,
+					status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+					message: 'no response from gateway',
+					params: []
+				};
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'getParams', getParams: { requestId, wardId } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.paramListLoading[wardId] = false;
+			this.paramLists[wardId] = {
+				requestId,
+				wardId,
+				status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+				message: reason,
+				params: []
+			};
+		}
+	}
+
+	/** Sends SetParam for one ward; tracked the same request/ack shape as
+	 * sendCommand() above, just against ParamAckStatus instead of
+	 * CommandStatus (SetParam isn't Command.action-shaped - see
+	 * parameter.proto's own comment on ParamAck). */
+	requestSetParam(wardId: string, param: Param): string {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.paramWrites[requestId] = {
+				requestId,
+				wardId,
+				paramName: param.name,
+				status: ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				message: 'read-only session',
+				sentAtMs: Date.now()
+			};
+			return requestId;
+		}
+		this.paramWrites[requestId] = {
+			requestId,
+			wardId,
+			paramName: param.name,
+			status: ParamAckStatus.PARAM_ACK_STATUS_UNSPECIFIED,
+			message: '',
+			sentAtMs: Date.now()
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleParamWrite(
+				requestId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				'no active channel'
+			);
+			return requestId;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleParamWrite(
+					requestId,
+					ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+					'no acknowledgment from gateway'
+				);
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'setParam', setParam: { requestId, wardId, param } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleParamWrite(requestId, ParamAckStatus.PARAM_ACK_STATUS_REJECTED, reason);
+		}
+		return requestId;
+	}
+
+	/** in-flight and recently settled parameter writes for one ward, newest first */
+	paramWritesFor(wardId: string): ParamWriteTracker[] {
+		return Object.values(this.paramWrites)
+			.filter((tracker) => tracker.wardId === wardId)
+			.sort((a, b) => b.sentAtMs - a.sentAtMs);
+	}
+
+	/** Sends GetLogEntries for one ward (karshipta#249); the response lands
+	 * in logEntries[wardId] via applyLogEntryList(). Same request/response
+	 * shape as requestGetParams() above, including being refused
+	 * client-side in a read-only session before it ever reaches the wire. */
+	requestGetLogEntries(wardId: string): void {
+		const requestId = crypto.randomUUID();
+		this.logEntriesRequestIds[wardId] = requestId;
+		this.logEntriesLoading[wardId] = true;
+		if (this.readonly) {
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: 'read-only session',
+				entries: []
+			};
+			return;
+		}
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: 'no active channel',
+				entries: []
+			};
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				if (this.logEntriesRequestIds[wardId] !== requestId) return;
+				this.logEntriesLoading[wardId] = false;
+				this.logEntries[wardId] = {
+					requestId,
+					wardId,
+					status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+					message: 'no response from gateway',
+					entries: []
+				};
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'getLogEntries', getLogEntries: { requestId, wardId } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: reason,
+				entries: []
+			};
+		}
+	}
+
+	/** Sends DownloadLogFile for one ward (karshipta#249); progress and
+	 * completion land in logDownloads[requestId] via
+	 * applyDownloadLogFileAck()/applyLogFileChunk(). Unlike GetParams/
+	 * SetParam's single request/response, a successful download is a
+	 * DownloadLogFileAck followed by chunkCount LogFileChunk messages
+	 * (gateway/docs/log-download-executor.md); this store reassembles them
+	 * and triggers a real browser download once the last one lands. */
+	requestDownloadLogFile(wardId: string, logId: number): string {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.logDownloads[requestId] = {
+				requestId,
+				wardId,
+				logId,
+				status: 'rejected',
+				message: 'read-only session',
+				totalSizeBytes: 0,
+				chunkCount: 0,
+				receivedBytes: 0,
+				sentAtMs: Date.now()
+			};
+			return requestId;
+		}
+		this.logDownloads[requestId] = {
+			requestId,
+			wardId,
+			logId,
+			status: 'pending',
+			message: '',
+			totalSizeBytes: 0,
+			chunkCount: 0,
+			receivedBytes: 0,
+			sentAtMs: Date.now()
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleLogDownload(requestId, 'no active channel');
+			return requestId;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleLogDownload(requestId, 'no acknowledgment from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({
+				payload: { $case: 'downloadLogFile', downloadLogFile: { requestId, wardId, logId } }
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleLogDownload(requestId, reason);
+		}
+		return requestId;
+	}
+
+	/** in-flight and recently settled log downloads for one ward, newest first */
+	logDownloadsFor(wardId: string): LogDownloadTracker[] {
+		return Object.values(this.logDownloads)
+			.filter((tracker) => tracker.wardId === wardId)
+			.sort((a, b) => b.sentAtMs - a.sentAtMs);
+	}
+
+	/** Sends StartCalibration for one ward (karshipta#248); progress lands
+	 * in calibrationRuns[wardId] via applyCalibrationProgress(). At most
+	 * one run per ward - the gateway itself rejects a second concurrent
+	 * start (CalibrationExecutor's own one-job-at-a-time guarantee), so
+	 * this store doesn't need to guard against it client-side either;
+	 * a stale in-flight run for this ward (if any) is simply overwritten,
+	 * matching what the gateway would do anyway. */
+	requestStartCalibration(wardId: string, calibrationType: CalibrationType): void {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.calibrationRuns[wardId] = {
+				requestId,
+				wardId,
+				calibrationType,
+				status: 'rejected',
+				message: 'read-only session',
+				hasProgress: false,
+				progress: 0,
+				hasInstruction: false,
+				instruction: ''
+			};
+			return;
+		}
+		this.calibrationRuns[wardId] = {
+			requestId,
+			wardId,
+			calibrationType,
+			status: 'running',
+			message: '',
+			hasProgress: false,
+			progress: 0,
+			hasInstruction: false,
+			instruction: ''
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleCalibration(wardId, requestId, 'rejected', 'no active channel');
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleCalibration(wardId, requestId, 'rejected', 'no response from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({
+				payload: {
+					$case: 'startCalibration',
+					startCalibration: { requestId, wardId, calibrationType }
+				}
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleCalibration(wardId, requestId, 'rejected', reason);
+		}
+	}
+
+	/** Sends CancelCalibration for the currently running calibration on one
+	 * ward, if any (karshipta#248). No-op if nothing is running. There is
+	 * no ack channel for Cancel at all (gateway/docs/calibration-executor.md's
+	 * own doc comment) - a successful cancel surfaces as the run's own
+	 * terminal CalibrationProgress{CANCELLED} shortly after, via the
+	 * normal applyCalibrationProgress() path; a failed or lost cancel
+	 * simply leaves the run showing RUNNING, same as the gateway side. */
+	requestCancelCalibration(wardId: string): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run || run.status !== 'running') return;
+		const channel = this.channelFor(wardId);
+		if (!channel) return;
+		try {
+			channel.send({
+				payload: {
+					$case: 'cancelCalibration',
+					cancelCalibration: {
+						requestId: crypto.randomUUID(),
+						wardId,
+						calibrationRequestId: run.requestId
+					}
+				}
+			});
+		} catch {
+			// Best-effort, matching the "no ack channel" contract above - a
+			// failed send just means the operator can try again or wait it
+			// out; nothing to settle client-side.
+		}
+	}
+
+	/** Removes a ward's calibration run from local state immediately,
+	 * regardless of whether it's still 'running' or already terminal -
+	 * the single "go back to the sensor list" action calibration-dialog.svelte's
+	 * Cancel button uses (karshipta#248). Deliberately does not wait for a
+	 * CANCELLED confirmation: a running calibration's own cancel request
+	 * (requestCancelCalibration, called alongside this) is fire-and-forget
+	 * with no ack channel, so waiting for confirmation here would mean
+	 * "going back" might never actually complete if that message is lost.
+	 * Clears any pending stall/settle timer tied to this run so it can't
+	 * fire against an already-cleared entry afterward. */
+	clearCalibrationRun(wardId: string): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run) return;
+		const timer = this.timeoutTimers.get(run.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(run.requestId);
+		}
+		delete this.calibrationRuns[wardId];
 	}
 
 	/**
@@ -558,9 +1042,10 @@ class FleetStore {
 					// console.warn - surfaced as an Event instead, the same channel
 					// a fleet mission's upload-phase rejection already uses
 					// (MISSION_UPLOAD_REJECTED), so a failure on one ward is never
-					// silently invisible. A success needs no separate surfacing:
-					// missionProgress ticks (start) or the FleetMission's own
-					// ward_states (stop) already show the outcome.
+					// silently invisible. A success needs no separate surfacing: the
+					// FleetMission's own ward_states already cover both outcomes -
+					// WARD_MISSION_STATUS_ACTIVE on a successful start, STOPPED on a
+					// successful stop.
 					if (
 						ack.status === CommandStatus.COMMAND_STATUS_REJECTED ||
 						ack.status === CommandStatus.COMMAND_STATUS_TIMEOUT
@@ -583,15 +1068,6 @@ class FleetStore {
 				this.settle(ack.commandId, ack.status, ack.message);
 				break;
 			}
-			case 'missionProgress':
-				this.missionProgress[payload.missionProgress.wardId] = payload.missionProgress;
-				break;
-			case 'missionDownload':
-				// Response to mission_download_request: the mission currently on the
-				// ward. Same slot as an upload, since both represent "what's on the
-				// ward now". No console UI sends mission_download_request yet.
-				this.uploadedMissions[payload.missionDownload.wardId] = payload.missionDownload;
-				break;
 			case 'wardConfigAck': {
 				const ack = payload.wardConfigAck;
 				const tracker = this.wardConfigRequests[ack.requestId];
@@ -627,6 +1103,12 @@ class FleetStore {
 			case 'stopFleetMission':
 			case 'removeFleetMission':
 			case 'updateFleetMissionRoutes':
+			case 'getParams':
+			case 'setParam':
+			case 'getLogEntries':
+			case 'downloadLogFile':
+			case 'startCalibration':
+			case 'cancelCalibration':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			case 'fleet':
@@ -646,6 +1128,36 @@ class FleetStore {
 				break;
 			case 'zoneAck':
 				zoneStore.applyZoneAck(payload.zoneAck);
+				break;
+			// Still a real, expected wire message - any actively-flying mission
+			// keeps emitting these regardless of whether it was started via the
+			// old per-ward flow or a FleetMission - just nothing in the console
+			// reads them anymore (removed with the per-ward MissionPanel;
+			// FleetMission's own ward_states push already covers the operator-
+			// visible progress/outcome, see the commandAck case above). Explicit
+			// no-op cases, not left to fall into the default's "unknown payload
+			// kind" warning, which would be a false alarm for a message this
+			// console fully recognizes and is just choosing not to act on.
+			case 'missionProgress':
+			case 'missionDownload':
+				break;
+			case 'paramList':
+				this.applyParamList(payload.paramList);
+				break;
+			case 'paramAck':
+				this.applyParamAck(payload.paramAck);
+				break;
+			case 'logEntryList':
+				this.applyLogEntryList(payload.logEntryList);
+				break;
+			case 'downloadLogFileAck':
+				this.applyDownloadLogFileAck(payload.downloadLogFileAck);
+				break;
+			case 'logFileChunk':
+				this.applyLogFileChunk(payload.logFileChunk);
+				break;
+			case 'calibrationProgress':
+				this.applyCalibrationProgress(payload.calibrationProgress);
 				break;
 			default: {
 				const unhandled: never = payload;
@@ -679,11 +1191,19 @@ class FleetStore {
 		this.events = [];
 		this.commands = {};
 		this.wardConfigRequests = {};
+		this.paramLists = {};
+		this.paramListLoading = {};
+		this.paramListRequestIds = {};
+		this.paramWrites = {};
+		this.logEntries = {};
+		this.logEntriesLoading = {};
+		this.logEntriesRequestIds = {};
+		this.logDownloads = {};
+		this.logDownloadChunks = {};
+		this.calibrationRuns = {};
 		this.selectedWardId = undefined;
-		this.missionDraft = undefined;
-		this.uploadedMissions = {};
-		this.missionProgress = {};
 		this.cancelGoto();
+		this.cancelSetHome();
 		fleetGroups.teardown();
 		zoneStore.teardown();
 	}
@@ -767,6 +1287,257 @@ class FleetStore {
 				delete this.wardConfigRequests[requestId];
 			}, TRACKER_LINGER_MS);
 		}
+	}
+
+	/** Resolves a GetParams response. Ignores a response whose request_id no
+	 * longer matches the latest one sent for that ward - a stale answer to a
+	 * superseded "refresh" click. */
+	applyParamList(response: ParamList): void {
+		if (this.paramListRequestIds[response.wardId] !== response.requestId) return;
+		const timer = this.timeoutTimers.get(response.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(response.requestId);
+		}
+		this.paramListLoading[response.wardId] = false;
+		this.paramLists[response.wardId] = response;
+	}
+
+	/** Resolves a SetParam ack. On success, patches the cached ParamList for
+	 * this ward with the vehicle-confirmed value (ParamAck.param - see its
+	 * own doc comment: never an echo of the request) so the panel reflects
+	 * it without a full re-fetch. */
+	applyParamAck(ack: ParamAck): void {
+		this.settleParamWrite(ack.requestId, ack.status, ack.message);
+		if (ack.status !== ParamAckStatus.PARAM_ACK_STATUS_SUCCESS || !ack.param) return;
+		const list = this.paramLists[ack.wardId];
+		if (!list) return;
+		const confirmed = ack.param;
+		const index = list.params.findIndex((candidate) => candidate.name === confirmed.name);
+		if (index >= 0) {
+			list.params[index] = confirmed;
+		} else {
+			list.params.push(confirmed);
+		}
+	}
+
+	private settleParamWrite(requestId: string, status: ParamAckStatus, message: string): void {
+		const tracker = this.paramWrites[requestId];
+		if (!tracker || isParamWriteTerminal(tracker.status)) return;
+		tracker.status = status;
+		tracker.message = message;
+		if (isParamWriteTerminal(status)) {
+			const timer = this.timeoutTimers.get(requestId);
+			if (timer) {
+				clearTimeout(timer);
+				this.timeoutTimers.delete(requestId);
+			}
+			setTimeout(() => {
+				delete this.paramWrites[requestId];
+			}, TRACKER_LINGER_MS);
+		}
+	}
+
+	/** Resolves a GetLogEntries response. Same stale-response guard as
+	 * applyParamList() above. */
+	applyLogEntryList(response: LogEntryList): void {
+		if (this.logEntriesRequestIds[response.wardId] !== response.requestId) return;
+		const timer = this.timeoutTimers.get(response.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(response.requestId);
+		}
+		this.logEntriesLoading[response.wardId] = false;
+		this.logEntries[response.wardId] = response;
+	}
+
+	/** Resolves the immediate accept/reject for a DownloadLogFile request.
+	 * REJECTED ends the download outright; SUCCESS arms this store to
+	 * receive exactly chunk_count LogFileChunk messages next (0 completes
+	 * immediately - an empty file has nothing to wait for). */
+	applyDownloadLogFileAck(ack: DownloadLogFileAck): void {
+		const tracker = this.logDownloads[ack.requestId];
+		if (!tracker || tracker.status !== 'pending') return;
+		const timer = this.timeoutTimers.get(ack.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(ack.requestId);
+		}
+		if (ack.status === LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED) {
+			this.settleLogDownload(ack.requestId, ack.message);
+			return;
+		}
+		tracker.totalSizeBytes = ack.totalSizeBytes;
+		tracker.chunkCount = ack.chunkCount;
+		if (ack.chunkCount === 0) {
+			this.completeLogDownload(ack.requestId, new Uint8Array(0));
+			return;
+		}
+		tracker.status = 'downloading';
+		// .fill(undefined), not a bare `new Array(n)`: the latter is sparse
+		// (holes, not real undefined values), and every/some/forEach/filter
+		// all SKIP holes per spec - chunks.every(piece => piece !== undefined)
+		// below would then vacuously return true after just one chunk filled
+		// one slot, since the remaining holes are never visited at all. Only
+		// for...of (used to reassemble the bytes) actually visits holes,
+		// yielding literal undefined there - which crashed Uint8Array.set().
+		this.logDownloadChunks[ack.requestId] = new Array(ack.chunkCount).fill(undefined);
+		this.armLogChunkStallTimer(ack.requestId);
+	}
+
+	/** Reassembles LogFileChunk messages for one accepted download. A
+	 * REJECTED chunk means the gateway aborted mid-stream (see
+	 * log_file.proto's own comment on LogFileChunk) - no further chunks
+	 * will follow, so this settles immediately rather than waiting out the
+	 * stall timer. Out-of-range or duplicate indices are ignored
+	 * defensively; a single ordered WebSocket/relay connection should never
+	 * produce either, but silently dropping an impossible frame is safer
+	 * than indexing past the end of the array. */
+	applyLogFileChunk(chunk: LogFileChunk): void {
+		const tracker = this.logDownloads[chunk.requestId];
+		if (!tracker || tracker.status !== 'downloading') return;
+		if (chunk.status === LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED) {
+			delete this.logDownloadChunks[chunk.requestId];
+			this.settleLogDownload(chunk.requestId, chunk.message || 'download aborted mid-stream');
+			return;
+		}
+		const chunks = this.logDownloadChunks[chunk.requestId];
+		if (!chunks || chunk.chunkIndex >= chunks.length || chunks[chunk.chunkIndex] !== undefined) {
+			return;
+		}
+		chunks[chunk.chunkIndex] = chunk.data;
+		tracker.receivedBytes += chunk.data.length;
+		if (chunks.every((piece) => piece !== undefined)) {
+			const bytes = new Uint8Array(tracker.receivedBytes);
+			let offset = 0;
+			for (const piece of chunks) {
+				bytes.set(piece!, offset);
+				offset += piece!.length;
+			}
+			delete this.logDownloadChunks[chunk.requestId];
+			this.completeLogDownload(chunk.requestId, bytes);
+			return;
+		}
+		this.armLogChunkStallTimer(chunk.requestId);
+	}
+
+	/** (Re)arms the "no further chunks" stall timer, reset on every chunk
+	 * received so a large transfer isn't penalized for simply taking a
+	 * while - only silence between chunks is a failure, not total elapsed
+	 * time. */
+	private armLogChunkStallTimer(requestId: string): void {
+		const existing = this.timeoutTimers.get(requestId);
+		if (existing) clearTimeout(existing);
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				delete this.logDownloadChunks[requestId];
+				this.settleLogDownload(requestId, 'no further chunks received from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+	}
+
+	private completeLogDownload(requestId: string, bytes: Uint8Array): void {
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		const tracker = this.logDownloads[requestId];
+		if (!tracker) return;
+		tracker.status = 'success';
+		tracker.message = '';
+		triggerBrowserDownload(
+			logFileName(tracker.wardId, tracker.logId, this.wards[tracker.wardId]?.info?.autopilot),
+			bytes
+		);
+		setTimeout(() => {
+			delete this.logDownloads[requestId];
+		}, TRACKER_LINGER_MS);
+	}
+
+	private settleLogDownload(requestId: string, message: string): void {
+		const tracker = this.logDownloads[requestId];
+		if (!tracker || isLogDownloadTerminal(tracker.status)) return;
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		delete this.logDownloadChunks[requestId];
+		tracker.status = 'rejected';
+		tracker.message = message;
+		setTimeout(() => {
+			delete this.logDownloads[requestId];
+		}, TRACKER_LINGER_MS);
+	}
+
+	/** Resolves a CalibrationProgress update: RUNNING (re-arms the stall
+	 * timer - a calibration is operator-paced, so only silence between
+	 * updates is a failure, not total elapsed time, same reasoning as
+	 * armLogChunkStallTimer()) or one of the terminal statuses (settles
+	 * and lingers before clearing, same TRACKER_LINGER_MS every other
+	 * tracker uses). Ignores a message whose request_id no longer matches
+	 * this ward's current run (stale/superseded) or that arrives after
+	 * the run already settled. */
+	applyCalibrationProgress(progress: CalibrationProgress): void {
+		const run = this.calibrationRuns[progress.wardId];
+		if (!run || run.requestId !== progress.requestId || isCalibrationTerminal(run.status)) return;
+		const timer = this.timeoutTimers.get(progress.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(progress.requestId);
+		}
+
+		const status = calibrationRunStatus(progress.status);
+		run.status = status;
+		run.message = progress.message;
+		run.hasProgress = progress.hasProgress;
+		run.progress = progress.progress;
+		run.hasInstruction = progress.hasInstruction;
+		run.instruction = progress.instruction;
+
+		if (status === 'running') {
+			this.timeoutTimers.set(
+				progress.requestId,
+				setTimeout(() => {
+					this.settleCalibration(
+						progress.wardId,
+						progress.requestId,
+						'failed',
+						'no further progress from gateway'
+					);
+				}, REQUEST_TIMEOUT_MS)
+			);
+			return;
+		}
+		setTimeout(() => {
+			if (this.calibrationRuns[progress.wardId]?.requestId === progress.requestId) {
+				delete this.calibrationRuns[progress.wardId];
+			}
+		}, TRACKER_LINGER_MS);
+	}
+
+	private settleCalibration(
+		wardId: string,
+		requestId: string,
+		status: 'failed' | 'rejected',
+		message: string
+	): void {
+		const run = this.calibrationRuns[wardId];
+		if (!run || run.requestId !== requestId || isCalibrationTerminal(run.status)) return;
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		run.status = status;
+		run.message = message;
+		setTimeout(() => {
+			if (this.calibrationRuns[wardId]?.requestId === requestId) {
+				delete this.calibrationRuns[wardId];
+			}
+		}, TRACKER_LINGER_MS);
 	}
 
 	private persistDemoWardHomes(): void {

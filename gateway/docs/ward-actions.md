@@ -6,12 +6,14 @@
 
 `WardActions` wraps MAVSDK's `Action` plugin for exactly **one**
 already-connected ward. Its surface is deliberately narrow: every public
-method exists because a field in `Command.action`
-(`proto/karshipta/v1/command.proto`) needs it, and no method exists that a
-field does not back yet. It reads through a `WardConnection&` rather than
-owning a `System` itself, and lazily constructs the underlying
-`mavsdk::Action` plugin the first time any method is called, mirroring
-`TelemetryInfo`'s `ensure_telemetry()` pattern.
+method exists because either a field in `Command.action`
+(`proto/karshipta/v1/command.proto`) needs it, or - the one exception,
+`upload_geofence()` (karshipta#247) - a documented, scoped feature outside
+the `Command` oneof needs it; no method exists ahead of one or the other.
+It reads through a `WardConnection&` rather than owning a `System` itself,
+and lazily constructs each underlying MAVSDK plugin the first time a method
+that needs it is called, mirroring `TelemetryInfo`'s `ensure_telemetry()`
+pattern.
 
 ## Responsibilities
 
@@ -58,13 +60,179 @@ owning a `System` itself, and lazily constructs the underlying
 | `Result set_takeoff_altitude(float) const` | Sets the takeoff altitude used by `takeoff()`; backs `TakeoffCommand.altitude_rel_m`. |
 | `Result takeoff() const` | Implements `TakeoffCommand`. Commands takeoff to the configured altitude. Must be armed first. |
 | `Result land() const` | Implements `LandCommand`. Commands landing at the current position. |
+| `Result set_return_to_launch_altitude(float) const` | Sets the RTL altitude (meters above home) used by `return_to_launch()`; backs `ReturnToLaunchCommand.altitude_rel_m`. Same shape as `set_takeoff_altitude()` above. |
 | `Result return_to_launch() const` | Implements `ReturnToLaunchCommand`. Flies back to the home position and lands. |
 | `Result hold() const` | Backs `PauseMissionCommand`, once the M3 mission executor exists. Loiters at the current position and altitude. PX4-specific; not guaranteed on other autopilots. |
 | `Result goto_location(double lat, double lon, float alt_m, float yaw_deg) const` | Implements `GotoCommand`. `lat`/`lon`/`alt_m` come from `GotoCommand.target`; `yaw_deg` is NED yaw. |
 | `Result kill() const` | Implements `DisarmCommand{force: true}`. Disarms immediately regardless of landed state; the ward falls out of the sky if used while flying. The M3 executor must gate this on `force` and must never call it for a plain `DisarmCommand`. |
 | `Result set_current_speed(float) const` | Backs `GotoCommand.speed_m_s`. Ephemeral; not stored on the ward. |
+| `MavlinkPassthrough::Result set_home_position(double lat, double lon, float alt_msl_m) const` | Implements `SetHomeCommand`. Sends a raw `MAV_CMD_DO_SET_HOME` - see "Home position" below for why this one method uses a different plugin and a different `Result` type. |
+| `Geofence::Result upload_geofence(const Geofence::GeofenceData&) const` | Not tied to a `Command` - called by `WardManager::push_geofence()` (karshipta#247), on every zone mutation and on this ward's own reconnect. Pushes one `Polygon` per Zone (horizontal boundary only; see "Geofence" below for why altitude isn't included). |
+| `Param::AllParams get_all_params() const` | Implements `GetParams` (karshipta#211). Not tied to a `Command` - called by `WardManager::handle_get_params()`. Unlike every other method here, MAVSDK's `get_all_params()` has no `Result`/failure signal of its own; see "Parameters" below. |
+| `pair<Param::Result, int32_t> get_param_int(const string&) const` | Reads one int-valued parameter by name. Used by `handle_set_param()` to read back the vehicle-confirmed value after a successful write - see "Parameters" below. |
+| `pair<Param::Result, float> get_param_float(const string&) const` | Float counterpart to `get_param_int()`. |
+| `Param::Result set_param_int(const string&, int32_t) const` | Implements `SetParam` for an int-valued parameter (karshipta#211). |
+| `Param::Result set_param_float(const string&, float) const` | Float counterpart to `set_param_int()`. MAVSDK has no single polymorphic setter - the caller (`WardManager`) picks int or float from `ParamType`. |
+| `pair<LogFiles::Result, vector<LogFiles::Entry>> get_log_entries() const` | Implements flight log listing (karshipta#249). Not tied to a `Command` - called by `LogDownloadExecutor::execute_list()` and, again, by `execute_download()` to resolve a requested `log_id` against the vehicle's current entry list. See "Log files" below. |
+| `LogFiles::Result download_log_file(const LogFiles::Entry&, const string& local_path) const` | Implements flight log download (karshipta#249). Blocks until the transfer finishes or fails, wrapping MAVSDK's callback-only `download_log_file_async()` in a `promise`/`future`; see "Log files" below for why no blocking counterpart exists on the MAVSDK side. |
+| `Calibration::Result calibrate_gyro(const CalibrationProgressCallback&) const` | Implements `StartCalibration{GYRO}` (karshipta#248). Blocks until the calibration finishes, fails, or is cancelled, invoking the callback for every intermediate step; same promise/future bridge as `download_log_file()`, except every `Next` also forwards its `ProgressData` instead of being discarded. See "Calibration" below. |
+| `Calibration::Result calibrate_accelerometer(const CalibrationProgressCallback&) const` | Implements `StartCalibration{ACCELEROMETER}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result calibrate_magnetometer(const CalibrationProgressCallback&) const` | Implements `StartCalibration{MAGNETOMETER}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result calibrate_level_horizon(const CalibrationProgressCallback&) const` | Implements `StartCalibration{LEVEL_HORIZON}`. Same contract as `calibrate_gyro()`. |
+| `Calibration::Result cancel_calibration() const` | Implements `CancelCalibration`. An ordinary blocking call, unlike the four `calibrate_*` methods above - MAVSDK's `cancel()` has no async-only counterpart to bridge. |
 
-`Result` is `mavsdk::Action::Result` throughout.
+`Result` is `mavsdk::Action::Result` for every method above `set_home_position`; `set_home_position()`, `upload_geofence()`, every `Param`-prefixed method, `get_log_entries()`/`download_log_file()`, and every `calibrate_*`/`cancel_calibration()` method each have their own `Result` type from their own plugin (`MavlinkPassthrough`/`Geofence`/`Param`/`LogFiles`/`Calibration`), unrelated to `Action::Result` and to each other.
+
+## Home position: why one method uses a different plugin
+
+`return_to_launch()` flies to whatever the flight controller itself
+recorded as home (set automatically at arm/boot time) - MAVSDK's `Action`
+plugin has no method to change that location. It has
+`set_return_to_launch_altitude()`, which only controls the climb altitude
+RTL uses, not the location it returns to (karshipta#246). The only way to
+set a custom home point is a raw `MAV_CMD_DO_SET_HOME` MAVLink command,
+which no higher-level MAVSDK plugin wraps.
+
+`set_home_position()` sends that command via `MavlinkPassthrough`
+(`ensure_mavlink_passthrough()`, lazily constructed the same way
+`ensure_action()` constructs `action_`), with `param1=0` ("use the
+specified location", per the command's own spec). Its `Result` type is
+`mavsdk::MavlinkPassthrough::Result`, unrelated to `mavsdk::Action::Result`
+- `result_name()` is overloaded for both, and the `MavlinkPassthrough`
+overload is a hand-written switch rather than MAVSDK's own `operator<<`:
+that operator is declared in the plugin's header but not actually exported
+by the linked build (confirmed: undefined symbol at link time).
+
+`MavlinkPassthrough` itself is flagged for deprecation in MAVSDK v4 in
+favor of `MavlinkDirect`. Using it anyway here is a conscious choice. It's
+the stable, documented path to a single `COMMAND_LONG` today;
+`MavlinkDirect`'s JSON-based message construction is more involved for one
+command and worth adopting only once more of the gateway needs raw MAVLink
+access, not for this one call.
+
+## Geofence: horizontal boundary only
+
+`upload_geofence()` wraps MAVSDK's `Geofence` plugin, the one public method
+not tied to a `Command.action` field - `WardManager` calls it directly (see
+`gateway/docs/ward-manager.md`'s `push_geofence()` entry for the caching and
+per-ward fan-out), not `CommandExecutor`. Checked the full
+`mavsdk::Geofence::Polygon` header: there is no altitude field anywhere in
+its API, so `Zone.altitude_min_m`/`altitude_max_m` cannot be pushed to the
+autopilot through this plugin at all. Only the horizontal shape is
+enforced; altitude bounds stay advisory (console-side warning only),
+tracked separately as karshipta#251.
+
+## Parameters: no failure signal on the read path, no readback on the write path
+
+`get_all_params()`/`get_param_int()`/`get_param_float()`/`set_param_int()`/
+`set_param_float()` wrap MAVSDK's `Param` plugin (karshipta#211), the other
+public methods not tied to a `Command.action` field - `WardManager` calls
+them directly (`handle_get_params()`/`handle_set_param()`), not
+`CommandExecutor`, mirroring `upload_geofence()`'s own shape above.
+
+Two real MAVSDK API gaps shaped this class's own methods and comments, not
+just `WardManager`'s:
+
+- `get_all_params()` returns a bare `Param::AllParams`, no `Result`. A
+  connection-down failure is handled here (`ensure_param()` returns an
+  empty `AllParams`), but a genuine on-wire timeout or partial response has
+  no distinct signal at all - it looks identical to "the vehicle has zero
+  parameters" either way. `WardManager::handle_get_params()` can only
+  check connection state before trusting an empty result as real; it
+  cannot distinguish "connected but the read itself failed" from "really
+  zero params."
+- `set_param_int()`/`set_param_float()` return only a `Result`, never the
+  value the vehicle actually stored. `get_param_int()`/`get_param_float()`
+  exist on this class specifically so `WardManager::handle_set_param()` can
+  read back the confirmed value after a successful write, rather than
+  `ParamAck.param` being a dishonest echo of whatever was requested.
+
+Scoped to int and float parameters only, matching
+`Param::AllParams.int_params`/`.float_params` - MAVSDK's `AllParams` also
+carries `custom_params` (string-valued, extended param protocol, used by
+camera/gimbal components), which `proto/karshipta/v1/parameter.proto`
+deliberately leaves out: not something PX4/ArduPilot's standard autopilot
+parameter set ever uses.
+
+## Log files: no blocking counterpart to the download call
+
+`get_log_entries()`/`download_log_file()` wrap MAVSDK's `LogFiles` plugin
+(karshipta#249), the same "not tied to a `Command.action` field, called
+directly by a `WardManager`-owned worker, not `CommandExecutor`" shape as
+`upload_geofence()`/the `Param`-prefixed methods above - except here the
+caller is `LogDownloadExecutor`'s own worker thread, not `WardManager`
+itself (see `log-download-executor.md`), since a multi-MB log transfer is
+categorically too slow to run on any thread a transport frame is received
+on, params/geofence's own direct-call shape included.
+
+`get_entries() const -> pair<Result, vector<Entry>>` is a normal blocking
+call. `download_log_file_async(Entry, string path, DownloadLogFileCallback)`
+is not: MAVSDK's `LogFiles` plugin has no blocking download method at all,
+only this callback-driven one, which fires repeatedly with
+`Result::Next` plus progress and once more with a terminal `Result` when
+the transfer finishes or fails. `download_log_file()` bridges this into a
+blocking call the same way `command_executor.cpp`'s
+`wait_for_mission_result()` bridges `start_async()`/`pause_async()`: a
+`shared_ptr<promise<Result>>`, resolved only on the terminal (non-`Next`)
+result, with the calling thread blocking on the matching `future::get()`.
+Unlike `wait_for_mission_result()`, this is not stop_token-aware - it is
+only ever called from `LogDownloadExecutor`'s own worker thread, which
+checks its stop_token between chunks afterward instead (see
+`log-download-executor.md`'s Threading section), not during this call
+itself. The same accepted risk every other blocking MAVSDK call in this
+class already carries applies here too: if MAVSDK's internal timeout
+handling never fires the terminal callback, this blocks forever. Nothing in
+this codebase wraps that with a novel timeout of its own; this is
+consistent with that existing convention, not a new gap introduced for log
+files specifically.
+
+MAVSDK writes the downloaded bytes to `local_path` on the gateway's own
+filesystem - this method's caller (`LogDownloadExecutor::execute_download()`)
+owns choosing and cleaning up that path, not this class.
+
+## Calibration: progress is the point, not just the terminal result
+
+`calibrate_gyro()`/`calibrate_accelerometer()`/`calibrate_magnetometer()`/
+`calibrate_level_horizon()`/`cancel_calibration()` wrap MAVSDK's
+`Calibration` plugin (karshipta#248), the same "not tied to a
+`Command.action` field, called by a dedicated worker thread, not
+`CommandExecutor`" shape as `get_log_entries()`/`download_log_file()`
+above - the caller here is `CalibrationExecutor`'s own worker thread (see
+`calibration-executor.md`), for the same "too slow for any thread a
+transport frame is received on" reason, except a calibration is slower
+still: it is a guided, operator-paced procedure (rotate the vehicle
+through several orientations, hold still, etc), not a fixed-size file
+transfer.
+
+Each `calibrate_*_async(Callback)` method has no blocking counterpart,
+same gap as `download_log_file_async()`. Unlike that one call though, the
+intermediate `Result::Next` updates are not discarded here - each one
+carries a `ProgressData` (a progress fraction, an operator-facing
+instruction string, or both, independently optional per MAVSDK's own
+message) that the console needs to actually guide the operator through
+the procedure, so every `calibrate_*` method takes a
+`CalibrationProgressCallback` and invokes it for every `Next` before the
+terminal (non-`Next`) result resolves the same
+`shared_ptr<promise<Result>>` bridge `download_log_file()` uses. The
+callback is copied by value into the MAVSDK callback, never captured by
+reference - same rule every async MAVSDK callback in this class follows.
+
+`cancel()` is the one method here that is already a normal blocking
+call - no `_async` counterpart to bridge at all. It tells whichever
+`calibrate_*_async` is currently in flight on this `System` to stop,
+which is what eventually resolves that call's own blocking wrapper with
+`Result::Cancelled` - `cancel_calibration()` itself only reports whether
+the cancel request was accepted, never the calibration's own final
+outcome.
+
+`Result::Cancelled` and `Result::FailedArmed` are both real, expected
+outcomes this plugin defines that none of the other plugins this class
+wraps have an equivalent for: `Cancelled` is logged as info, not error,
+by `log_result()`'s own `Calibration::Result` overload (the only one of
+the six overloads with this distinction - see that method's own comment);
+`FailedArmed` means MAVSDK itself already refuses to calibrate an armed
+vehicle, so neither this class nor `CalibrationExecutor` adds any
+duplicate flight-safety gating on top of it.
 
 ## Design: Result all the way through
 
@@ -137,12 +305,32 @@ created lazily and never rebuilt across a reconnect.
 
 ## Automated tests
 
-No dedicated `ward_actions_test.cpp`; covered indirectly through
-`gateway/tests/ward/command_executor_test.cpp`, which constructs a real
-`WardActions` against a fake-autopilot `WardConnection`
-(`CommandExecutorTest.EveryActionKindAnswersAcceptedThenTerminal` drives
-every action kind through it) - the same fake-autopilot pattern
-`gateway/tests/ward/ward_connection_test.cpp` uses.
+No dedicated `ward_actions_test.cpp`; every `Command.action`-backed method is
+covered indirectly through `gateway/tests/ward/command_executor_test.cpp`,
+which constructs a real `WardActions` against a fake-autopilot
+`WardConnection` (`CommandExecutorTest.EveryActionKindAnswersAcceptedThenTerminal`
+drives every action kind through it) - the same fake-autopilot pattern
+`gateway/tests/ward/ward_connection_test.cpp` uses. `upload_geofence()` is
+not `Command`-driven, so it isn't exercised there; it's covered instead
+through `gateway/tests/ward/ward_manager_test.cpp`'s
+`PushGeofenceDoesNotCrashWithNoConnectedWards` (no-connection path only -
+see that file's own doc comment). The `Param`-prefixed methods are the
+same: not `Command`-driven, covered instead through that same file's
+`HandleGetParamsRejectsUnconnectedWardWithReason`/
+`HandleSetParamRejectsUnconnectedWardWithReason` (no-connection path
+only - a real parameter read/write round trip needs live SITL, not
+exercised by this test binary). `get_log_entries()`/`download_log_file()`
+are the same again: covered through `ward_manager_test.cpp`'s
+`HandleGetLogEntriesRejectsUnconnectedWardWithReason`/
+`HandleDownloadLogFileRejectsUnconnectedWardWithReason` (no-connection path
+only - a real log listing/download needs live SITL that has actually
+flown, not exercised by this test binary). The `calibrate_*`/
+`cancel_calibration()` methods are the same once more: covered through
+`ward_manager_test.cpp`'s `HandleStartCalibrationRejectsUnconnectedWardWithReason`/
+`HandleCancelCalibrationOnUnknownWardSendsNothing` (no-connection path
+only - a real calibration is a guided, operator-paced procedure, the
+least exercisable of any method here without live SITL and a human
+following along).
 
 ## Manual verification
 

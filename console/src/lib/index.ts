@@ -125,7 +125,6 @@ export {
 	type Ward,
 	type WardSource,
 	type DraftWaypoint,
-	type MissionDraft,
 	type CommandTracker,
 	type WardConfigTracker
 } from './fleet-store.svelte';
@@ -263,23 +262,34 @@ export { default as WardCard } from './components/ward-card.svelte';
 // scratch and drifting from this console's own look.
 export { default as FleetRow } from './components/fleet-row.svelte';
 export { default as Disclosure } from './components/ui/disclosure.svelte';
-// WardDetail is now WardTab (its former self-scrolling <section> chrome
-// moved to right-panel.svelte's tabpanel wrapper, since the console's own
-// shell now always owns that framing - see the shell restructure in
-// right-panel.svelte). A consuming app that rendered WardDetail directly
-// gets the same info line/dl/CommandPanel/MissionPanel content from WardTab.
-export { default as WardTab } from './components/ward-tab.svelte';
+// WardTab split into WardTelemetryTab (read-only detail, always relevant
+// regardless of readonly/flight state) and WardControlTab (commands, home
+// position, and the Plan Mission shortcut - gated on readonly/flight) so a
+// consuming app's right panel can put them in separate tabs, the compact
+// WardStatusStrip staying visible above both regardless of which is active
+// - confirmed live that stacking everything in one scrollable tab grew too
+// tall once RTL/Set Home/Configuration joined Commands. MissionPanel
+// (the old per-ward mission draft UI) is gone entirely: the fleet-wide
+// mission wizard's ad-hoc ward selection already supports a single ward as
+// a first-class case (docs/fleet-mission-model.md), and was strictly more
+// capable (a persisted, trackable FleetMission record vs a local-only
+// draft with no edit/remove after start) - WardControlTab's shortcut opens
+// that same wizard instead of duplicating it.
+export { default as WardTelemetryTab } from './components/ward-telemetry-tab.svelte';
+export { default as WardControlTab } from './components/ward-control-tab.svelte';
 export { default as WardStatusStrip } from './components/ward-status-strip.svelte';
 export { default as CommandPanel } from './components/command-panel.svelte';
-export { default as MissionPanel } from './components/mission-panel.svelte';
+export { default as HomePanel } from './components/home-panel.svelte';
 export { default as EventsFeed } from './components/events-feed.svelte';
 export { default as ConfirmDialog } from './components/confirm-dialog.svelte';
 // ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
 // self-contained, store-driven content panels, the same category as
-// WardTab/CommandPanel/MissionPanel above - not app-shell chrome. Unlike
-// left-rail.svelte/right-panel.svelte (still unexported, see this file's
-// own doc comment), neither encodes a self-host-vs-hosted opinion.
+// WardTelemetryTab/WardControlTab/CommandPanel above - not app-shell
+// chrome. Unlike left-rail.svelte/right-panel.svelte (still unexported,
+// see this file's own doc comment), neither encodes a self-host-vs-hosted
+// opinion.
 export { default as ZonesTab } from './components/zones-tab.svelte';
+export { default as ConfigurationTab } from './components/configuration-tab.svelte';
 export { default as MissionTab } from './components/mission-tab.svelte';
 export { default as FleetMissionWizard } from './components/fleet-mission-wizard.svelte';
 export { default as FleetMissionList } from './components/fleet-mission-list.svelte';

@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <mavsdk/mavsdk.h>
+#include <mavsdk/plugins/geofence/geofence.h>
 #include <karshipta/v1/envelope.pb.h>
 #include <karshipta/v1/fleet.pb.h>
 #include <ward_connection.h>
@@ -24,6 +25,8 @@
 #include <mission_importer.h>
 #include <telemetry.h>
 #include <command_executor.h>
+#include <log_download_executor.h>
+#include <calibration_executor.h>
 #include <transport.h>
 
 struct WardConfig {
@@ -80,6 +83,27 @@ struct ManagedWard {
     // so its position relative to `mission`/`executor` doesn't matter for
     // build order, unlike the rest of this quartet.
     std::unique_ptr<MissionImporter> mission_importer;
+    // Owns GetLogEntries/DownloadLogFile for this ward (karshipta#249).
+    // Unlike executor below, this is never retired/rebuilt by stop()/
+    // force_stop()/remove_ward(): those three exist to safely ground and
+    // disarm a ward before taking it offline, and log access is read-only,
+    // orthogonal to flight safety - interrupting an in-flight log listing
+    // or download just because the ward is being stopped would serve no
+    // purpose. Built once in add_ward_impl(), alongside mission_importer,
+    // and destroyed only when the ward itself is destroyed - same lifetime
+    // as connection/telemetry/actions/mission/mission_importer. Declared
+    // after mission_importer so it is destroyed before actions/telemetry/
+    // connection (its worker thread calls into *actions), but after
+    // executor (whose own worker is stopped and joined first).
+    std::unique_ptr<LogDownloadExecutor> log_executor;
+    // Owns StartCalibration/CancelCalibration for this ward (karshipta#248).
+    // Same never-retired lifetime as log_executor above, for a related but
+    // distinct reason: MAVSDK itself already refuses to calibrate an armed
+    // vehicle (Calibration::Result::FailedArmed), so there is no extra
+    // flight-safety gating this class needs to add on top, and being able
+    // to cancel a stuck calibration even while a stop()/force_stop()
+    // transition is also in flight is actively useful, not a hazard.
+    std::unique_ptr<CalibrationExecutor> calibration_executor;
 
     // Guards executor/busy/pending_auto_start_mission_id/reconnect_worker
     // below: this ward's own transition state, independent of every other
@@ -213,6 +237,18 @@ public:
     // every other ward's manager calls behind one slow client).
     void dispatch_command(const karshipta::v1::Command& command);
 
+    // Called by FleetManager after every successful zone mutation
+    // (karshipta#247): converts the full current zone set into one
+    // mavsdk::Geofence::GeofenceData (one Polygon per zone, KEEP_IN ->
+    // Inclusion, KEEP_OUT -> Exclusion - horizontal boundary only, see
+    // WardActions::upload_geofence's own comment on why altitude bounds
+    // aren't included), caches it, and pushes it to every currently
+    // connected ward. The cache is what run_reconnect_loop re-sends to a
+    // ward that (re)connects later, so a gateway restart or a dropped link
+    // never leaves a ward's geofence stale relative to zones changed while
+    // it was offline.
+    void push_geofence(const std::vector<karshipta::v1::Zone>& zones);
+
     // Every CommandAck this WardManager ever produces (rejection or real
     // executor outcome) is also handed to this observer, if set - lets
     // FleetManager correlate a fleet mission's Stop dispatch (a synthesized
@@ -274,6 +310,75 @@ public:
     // WARNING Event on failure) surfaces later, via the publish tick polling
     // take_download_result().
     void handle_mission_download_request(const karshipta::v1::MissionDownloadRequest& request);
+
+    // Implements GetParams (karshipta#211). Unlike mission upload/download,
+    // this is a direct, synchronous WardActions call (MAVSDK's
+    // get_all_params() blocks) - no executor queue, no busy flag, same
+    // "call straight through WardActions" shape push_geofence() already
+    // uses. Rejects with a reason (ward unknown, or registered but not
+    // currently connected - an empty AllParams from an unconnected ward
+    // would otherwise look identical to "this vehicle genuinely has zero
+    // parameters") rather than ever silently returning an empty list.
+    [[nodiscard]] karshipta::v1::ParamList handle_get_params(
+        const karshipta::v1::GetParams& request) const;
+
+    // Implements SetParam (karshipta#211). Same direct, synchronous shape
+    // as handle_get_params() above. On a successful write, reads the
+    // parameter back (WardActions::get_param_int/float) so ParamAck.param
+    // carries the value the vehicle actually confirmed, not just an echo
+    // of what was requested - MAVSDK's set_param_* returns only a Result,
+    // never the stored value. Falls back to echoing the requested value
+    // only if that readback itself fails after a successful write (a rare
+    // double-fault, still reported as SUCCESS since the write did land).
+    [[nodiscard]] karshipta::v1::ParamAck handle_set_param(
+        const karshipta::v1::SetParam& request) const;
+
+    // Implements GetLogEntries (karshipta#249). Unlike handle_get_params()
+    // above, this is NOT a direct synchronous WardActions call: MAVSDK's
+    // get_entries() round trip can be slow on a large log set or a weak
+    // link, so it is queued onto the ward's own LogDownloadExecutor worker
+    // thread instead of blocking whatever thread received the request.
+    // The result is sent later, to `client` only (never broadcast - same
+    // "meaningful just to the requester" reasoning as GetParams/SetParam),
+    // as a LogEntryList Envelope. This method only answers synchronously,
+    // via `client`, for the two cases it can resolve without ever touching
+    // the worker thread: unknown ward_id, or a ward that is registered but
+    // not currently connected (same is_connected() check and reasoning as
+    // handle_get_params()).
+    void handle_get_log_entries(Transport::ClientId client,
+                                 const karshipta::v1::GetLogEntries& request) const;
+
+    // Implements DownloadLogFile (karshipta#249). Same queued shape and
+    // requester-only delivery as handle_get_log_entries() above; the
+    // accept/reject DownloadLogFileAck and every following LogFileChunk
+    // are sent later, to `client` only, from the worker thread.
+    void handle_download_log_file(Transport::ClientId client,
+                                   const karshipta::v1::DownloadLogFile& request) const;
+
+    // Implements StartCalibration (karshipta#248). Same queued shape as
+    // handle_download_log_file() above: queued onto the ward's own
+    // CalibrationExecutor worker thread, not direct/synchronous - a
+    // calibration is a guided, operator-paced, multi-step process, the
+    // slowest and most interactive MAVLink round trip this gateway
+    // issues. Every CalibrationProgress update (zero or more RUNNING,
+    // then one terminal) is sent later, to `client` only. This method
+    // only answers synchronously, via `client`, for unknown ward_id or a
+    // registered-but-not-connected ward (same reasoning as
+    // handle_get_log_entries()); CalibrationExecutor::enqueue_start()
+    // itself handles the third synchronous-reject case (a calibration
+    // already running for this ward).
+    void handle_start_calibration(Transport::ClientId client,
+                                   const karshipta::v1::StartCalibration& request) const;
+
+    // Implements CancelCalibration (karshipta#248). Same unknown/
+    // unconnected-ward synchronous checks as handle_start_calibration()
+    // above; otherwise routes straight to CalibrationExecutor::cancel(),
+    // which runs on the calling thread (MAVSDK's cancel() is its own
+    // short blocking call) and reports nothing back on this path - a
+    // successful cancel surfaces as the running job's own terminal
+    // CalibrationProgress{CANCELLED} shortly after.
+    void handle_cancel_calibration(Transport::ClientId client,
+                                    const karshipta::v1::CancelCalibration& request) const;
 
     // Rejects an upstream envelope from a connection Transport marked
     // ClientRole::kViewer (gateway issue #20: read-only viewer mode). Never
@@ -398,6 +503,15 @@ private:
     // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
     std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
+    // The geofence push_geofence() most recently built, re-sent to each
+    // ward run_reconnect_loop brings back up. Its own mutex, independent of
+    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
+    // the shared_ptrs it needs) before calling into any ward's
+    // upload_geofence(), the same snapshot-then-release shape
+    // run_publish_loop already uses, so these two locks are never nested
+    // and need no relative ordering rule.
+    mutable std::mutex geofence_mutex_;
+    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Set-once, see the setters' own doc comments. Never reassigned after
     // start_publishing()/the first dispatch_command(), so reading these from
     // the publish thread or a CommandExecutor worker thread needs no lock.
@@ -449,6 +563,22 @@ private:
     // system's construction order (main.cpp builds Transport before
     // WardManager) to outlive it regardless.
     [[nodiscard]] std::unique_ptr<CommandExecutor> make_executor(ManagedWard& ward);
+
+    // Builds the LogDownloadExecutor wired to send its results to whichever
+    // client asked (never broadcast, see handle_get_log_entries()'s own doc
+    // comment); shared by add_ward_impl() only, since (unlike make_executor())
+    // this is never rebuilt after a stop()/force_stop()/remove_ward()
+    // transition - log_executor's lifetime matches actions/telemetry/
+    // connection, not executor. Same "capture &transport_, never `this`"
+    // safety reasoning as make_executor().
+    [[nodiscard]] std::unique_ptr<LogDownloadExecutor> make_log_executor(ManagedWard& ward);
+
+    // Builds the CalibrationExecutor wired to send its progress to
+    // whichever client asked (never broadcast); shared by add_ward_impl()
+    // only, same never-rebuilt lifetime as make_log_executor() above.
+    // Same "capture &transport_, never `this`" safety reasoning as
+    // make_executor().
+    [[nodiscard]] std::unique_ptr<CalibrationExecutor> make_calibration_executor(ManagedWard& ward);
 
     // Clears ward's busy flag under ward->mutex_. Takes the shared_ptr
     // directly (not a ward_id to re-look-up): the caller already holds a

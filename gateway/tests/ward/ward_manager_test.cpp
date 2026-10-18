@@ -70,6 +70,24 @@ public:
         return envelopes;
     }
 
+    // Every Envelope send() to this specific client so far, parsed, in
+    // order - the send()-to-requester counterpart of broadcast_envelopes()
+    // above, for GetLogEntries/DownloadLogFile (karshipta#249), which are
+    // answered via send(), not broadcast() (see
+    // WardManager::handle_get_log_entries()'s own doc comment for why).
+    [[nodiscard]] std::vector<karshipta::v1::Envelope> sent_envelopes(ClientId client) const {
+        std::lock_guard lock(mutex_);
+        std::vector<karshipta::v1::Envelope> envelopes;
+        for (const auto& [sent_client, bytes] : sent_) {
+            if (sent_client != client) continue;
+            karshipta::v1::Envelope envelope;
+            if (envelope.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
+                envelopes.push_back(envelope);
+            }
+        }
+        return envelopes;
+    }
+
 private:
     mutable std::mutex mutex_;
     bool running_ = false;
@@ -211,6 +229,32 @@ TEST_F(WardManagerTest, AddWardRejectsDuplicateSystemId) {
     EXPECT_EQ(manager.list_ward_ids().size(), 1u);
 }
 
+// push_geofence() is called by FleetManager on every zone mutation
+// (karshipta#247) and again by run_reconnect_loop on every reconnect; this
+// test only exercises the no-connection path (same "never-started ward"
+// pattern as AddWardRegistersAndListsId above) - a never-connected ward's
+// WardActions::ensure_geofence() always fails, so the real assertion here is
+// that pushing to it is a logged no-op, never a crash, and that an empty
+// zone list (no zones created yet) is just as safe to push as a populated
+// one.
+TEST_F(WardManagerTest, PushGeofenceDoesNotCrashWithNoConnectedWards) {
+    auto manager = make_manager();
+    EXPECT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24993")));
+
+    EXPECT_NO_THROW(manager.push_geofence({}));
+
+    karshipta::v1::Zone zone;
+    zone.set_zone_id("zone-1");
+    zone.set_name("test keep-in");
+    zone.set_type(karshipta::v1::ZONE_TYPE_KEEP_IN);
+    for (const auto& [lat, lon] : {std::pair{47.0, 8.0}, std::pair{47.0, 8.1}, std::pair{47.1, 8.1}}) {
+        auto* vertex = zone.add_vertices();
+        vertex->set_latitude_deg(lat);
+        vertex->set_longitude_deg(lon);
+    }
+    EXPECT_NO_THROW(manager.push_geofence({zone}));
+}
+
 TEST_F(WardManagerTest, DispatchCommandRejectsUnknownWardWithReason) {
     auto manager = make_manager();
 
@@ -226,6 +270,230 @@ TEST_F(WardManagerTest, DispatchCommandRejectsUnknownWardWithReason) {
     EXPECT_EQ(ack.command_id(), "cmd-1");
     EXPECT_EQ(ack.status(), karshipta::v1::COMMAND_STATUS_REJECTED);
     EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
+}
+
+// handle_get_params()/handle_set_param() return their response value
+// directly rather than broadcasting it (karshipta#211, mirrors the Zone/
+// Fleet handler shape, not dispatch_command()'s broadcast-an-ack shape),
+// so these tests assert on the returned ParamList/ParamAck directly - no
+// transport_.broadcast_envelopes() involved.
+TEST_F(WardManagerTest, HandleGetParamsRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetParams request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    const auto response = manager.handle_get_params(request);
+
+    EXPECT_EQ(response.request_id(), "req-1");
+    EXPECT_EQ(response.status(), karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("does-not-exist"), std::string::npos);
+    EXPECT_EQ(response.params_size(), 0);
+}
+
+// A registered-but-never-connected ward's get_all_params() would otherwise
+// return an empty AllParams (WardActions::get_all_params()'s own doc
+// comment) - indistinguishable from "this vehicle genuinely has zero
+// parameters" unless handle_get_params() checks connection state itself
+// first, which this test exercises directly (same "never-started ward"
+// pattern as AddWardRegistersAndListsId).
+TEST_F(WardManagerTest, HandleGetParamsRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24994")));
+
+    karshipta::v1::GetParams request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    const auto response = manager.handle_get_params(request);
+
+    EXPECT_EQ(response.status(), karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleSetParamRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.mutable_param()->set_name("MPC_LAND_SPEED");
+    request.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+    request.mutable_param()->set_float_value(0.5f);
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
+}
+
+// Request-shape check ("does this even carry a param"), deliberately
+// ordered before the connection check in handle_set_param() itself - see
+// that method's own comment - so this is testable without a live
+// connection, same as HandleGetParamsRejectsUnknownWardWithReason above.
+TEST_F(WardManagerTest, HandleSetParamRejectsRequestWithNoParam) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24995")));
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("no param"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleSetParamRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24996")));
+
+    karshipta::v1::SetParam request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.mutable_param()->set_name("MPC_LAND_SPEED");
+    request.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+    request.mutable_param()->set_float_value(0.5f);
+    const auto ack = manager.handle_set_param(request);
+
+    EXPECT_EQ(ack.status(), karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("not connected"), std::string::npos);
+}
+
+// handle_get_log_entries()/handle_download_log_file() are void, not
+// value-returning like handle_get_params()/handle_set_param() above: a
+// result only ever comes back later, asynchronously, from the ward's own
+// LogDownloadExecutor worker thread (karshipta#249). Only the two
+// synchronous-reject cases below (unknown ward, unconnected ward) are
+// testable without a live connection - same limitation as the exercised
+// GetParams/SetParam rejection tests above - so these inspect what
+// FakeTransport's send() captured for the requesting client instead of a
+// return value.
+TEST_F(WardManagerTest, HandleGetLogEntriesRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    manager.handle_get_log_entries(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_log_entry_list());
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.request_id(), "req-1");
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("does-not-exist"), std::string::npos);
+    EXPECT_EQ(response.entries_size(), 0);
+}
+
+TEST_F(WardManagerTest, HandleGetLogEntriesRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24997")));
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    manager.handle_get_log_entries(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_NE(response.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleDownloadLogFileRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_log_id(3);
+    manager.handle_download_log_file(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_download_log_file_ack());
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.request_id(), "req-1");
+    EXPECT_EQ(ack.log_id(), 3U);
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("does-not-exist"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleDownloadLogFileRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24998")));
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.set_log_id(3);
+    manager.handle_download_log_file(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+    EXPECT_NE(ack.message().find("not connected"), std::string::npos);
+}
+
+// handle_start_calibration()/handle_cancel_calibration() are void, same
+// shape as handle_get_log_entries()/handle_download_log_file() above and
+// for the same reason: the real result (zero or more RUNNING
+// CalibrationProgress messages, then one terminal one) only ever comes
+// back later, from the ward's own CalibrationExecutor worker thread
+// (karshipta#248). Only the synchronous-reject cases below (unknown
+// ward, unconnected ward) are testable without a live connection.
+TEST_F(WardManagerTest, HandleStartCalibrationRejectsUnknownWardWithReason) {
+    auto manager = make_manager();
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_GYRO);
+    manager.handle_start_calibration(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    ASSERT_TRUE(sent.front().has_calibration_progress());
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.request_id(), "req-1");
+    EXPECT_EQ(progress.calibration_type(), karshipta::v1::CALIBRATION_TYPE_GYRO);
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_NE(progress.message().find("does-not-exist"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleStartCalibrationRejectsUnconnectedWardWithReason) {
+    auto manager = make_manager();
+    ASSERT_TRUE(manager.add_ward(make_config("alpha-1", "udpin://127.0.0.1:24999")));
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_LEVEL_HORIZON);
+    manager.handle_start_calibration(/*client=*/1, request);
+
+    const auto sent = transport_.sent_envelopes(1);
+    ASSERT_EQ(sent.size(), 1U);
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_NE(progress.message().find("not connected"), std::string::npos);
+}
+
+TEST_F(WardManagerTest, HandleCancelCalibrationOnUnknownWardSendsNothing) {
+    auto manager = make_manager();
+
+    karshipta::v1::CancelCalibration request;
+    request.set_request_id("req-1");
+    request.set_ward_id("does-not-exist");
+    request.set_calibration_request_id("original-req");
+    // No ack channel exists for Cancel at all (see CalibrationExecutor::
+    // cancel()'s own doc comment) - this only needs to not crash and not
+    // send anything for an unknown ward.
+    manager.handle_cancel_calibration(/*client=*/1, request);
+
+    EXPECT_TRUE(transport_.sent_envelopes(1).empty());
 }
 
 TEST_F(WardManagerTest, HandleMissionUploadRejectsUnknownWardWithEvent) {
@@ -676,6 +944,95 @@ TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsMissionDownloadRequestWithEve
     ASSERT_TRUE(event.has_value());
     EXPECT_EQ(event->ward_id(), "alpha-1");
     EXPECT_EQ(event->message(), "read-only session");
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsGetLogEntriesWithResponse) {
+    auto manager = make_manager();
+
+    karshipta::v1::GetLogEntries request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_get_log_entries() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    // Sent only to the viewer client, not broadcast - same reasoning as the
+    // live kGetLogEntries case this mirrors.
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_log_entry_list());
+    const auto& response = sent.front().log_entry_list();
+    EXPECT_EQ(response.request_id(), "req-viewer");
+    EXPECT_EQ(response.status(), karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+    EXPECT_EQ(response.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsDownloadLogFileWithAck) {
+    auto manager = make_manager();
+
+    karshipta::v1::DownloadLogFile request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_log_id(2);
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_download_log_file() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_download_log_file_ack());
+    const auto& ack = sent.front().download_log_file_ack();
+    EXPECT_EQ(ack.request_id(), "req-viewer");
+    EXPECT_EQ(ack.log_id(), 2u);
+    EXPECT_EQ(ack.status(), karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+    EXPECT_EQ(ack.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsStartCalibrationWithProgress) {
+    auto manager = make_manager();
+
+    karshipta::v1::StartCalibration request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_type(karshipta::v1::CALIBRATION_TYPE_MAGNETOMETER);
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_start_calibration() = request;
+
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    const auto sent = transport_.sent_envelopes(7);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent.front().has_calibration_progress());
+    const auto& progress = sent.front().calibration_progress();
+    EXPECT_EQ(progress.request_id(), "req-viewer");
+    EXPECT_EQ(progress.calibration_type(), karshipta::v1::CALIBRATION_TYPE_MAGNETOMETER);
+    EXPECT_EQ(progress.status(), karshipta::v1::CALIBRATION_STATUS_REJECTED);
+    EXPECT_EQ(progress.message(), "read-only session");
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
+}
+
+TEST_F(WardManagerTest, RejectViewerEnvelopeIgnoresCancelCalibrationSilently) {
+    auto manager = make_manager();
+
+    karshipta::v1::CancelCalibration request;
+    request.set_request_id("req-viewer");
+    request.set_ward_id("alpha-1");
+    request.set_calibration_request_id("some-run");
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_cancel_calibration() = request;
+
+    // No ack channel exists for Cancel at all - a viewer's attempt is
+    // logged and otherwise silently ignored, same as a stale/mistargeted
+    // cancel from a real operator (CalibrationExecutor::cancel()'s own
+    // doc comment).
+    manager.reject_viewer_envelope(/*client=*/7, envelope);
+
+    EXPECT_TRUE(transport_.sent_envelopes(7).empty());
+    EXPECT_TRUE(transport_.broadcast_envelopes().empty());
 }
 
 // ---------- Flight mode mapping ----------

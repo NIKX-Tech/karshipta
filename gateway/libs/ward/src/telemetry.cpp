@@ -230,3 +230,18 @@ bool TelemetryInfo::is_health_ok() const {
     if (!ensure_telemetry()) return false;
     return telemetry_->health_all_ok();
 }
+
+bool TelemetryInfo::is_gyrometer_calibration_ok() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->health().is_gyrometer_calibration_ok;
+}
+
+bool TelemetryInfo::is_accelerometer_calibration_ok() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->health().is_accelerometer_calibration_ok;
+}
+
+bool TelemetryInfo::is_magnetometer_calibration_ok() const {
+    if (!ensure_telemetry()) return false;
+    return telemetry_->health().is_magnetometer_calibration_ok;
+}

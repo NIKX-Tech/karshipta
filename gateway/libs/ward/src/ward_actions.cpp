@@ -2,12 +2,88 @@
 
 #include <spdlog/spdlog.h>
 
+#include <future>
 #include <sstream>
 
-// MAVSDK only offers operator<< for Action::Result, and fmt::streamed needs
-// fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one stringstream keeps the
-// human-readable reason portable.
+// fmt::streamed needs fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one
+// stringstream keeps the human-readable reason portable regardless. Not
+// every MAVSDK Result type actually has this operator<< exported by the
+// linked build, though every one's header declares it - see the
+// MavlinkPassthrough::Result overload below for the one that doesn't.
 std::string WardActions::result_name(const mavsdk::Action::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
+// No ostream operator<< for this Result type exists in the linked MAVSDK
+// build (confirmed: undefined symbol at link time, unlike Action::Result)
+// - this plugin's operator<< is declared in the header but never actually
+// exported. An explicit switch instead of the result_name(Action::Result)
+// pattern above.
+std::string WardActions::result_name(const mavsdk::MavlinkPassthrough::Result result) {
+    switch (result) {
+        case mavsdk::MavlinkPassthrough::Result::Success:
+            return "Success";
+        case mavsdk::MavlinkPassthrough::Result::ConnectionError:
+            return "ConnectionError";
+        case mavsdk::MavlinkPassthrough::Result::CommandNoSystem:
+            return "CommandNoSystem";
+        case mavsdk::MavlinkPassthrough::Result::CommandBusy:
+            return "CommandBusy";
+        case mavsdk::MavlinkPassthrough::Result::CommandDenied:
+            return "CommandDenied";
+        case mavsdk::MavlinkPassthrough::Result::CommandUnsupported:
+            return "CommandUnsupported";
+        case mavsdk::MavlinkPassthrough::Result::CommandTimeout:
+            return "CommandTimeout";
+        case mavsdk::MavlinkPassthrough::Result::CommandTemporarilyRejected:
+            return "CommandTemporarilyRejected";
+        case mavsdk::MavlinkPassthrough::Result::CommandFailed:
+            return "CommandFailed";
+        case mavsdk::MavlinkPassthrough::Result::ParamWrongType:
+            return "ParamWrongType";
+        case mavsdk::MavlinkPassthrough::Result::ParamNameTooLong:
+            return "ParamNameTooLong";
+        case mavsdk::MavlinkPassthrough::Result::ParamValueTooLong:
+            return "ParamValueTooLong";
+        case mavsdk::MavlinkPassthrough::Result::ParamNotFound:
+            return "ParamNotFound";
+        case mavsdk::MavlinkPassthrough::Result::ParamValueUnsupported:
+            return "ParamValueUnsupported";
+        case mavsdk::MavlinkPassthrough::Result::Unknown:
+            return "Unknown";
+    }
+    return "Unknown";
+}
+
+// Geofence::Result's operator<< is exported by the linked build (confirmed,
+// unlike MavlinkPassthrough::Result above) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Geofence::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
+// Param::Result's operator<< is exported by the linked build (confirmed,
+// same as Geofence::Result) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Param::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
+// LogFiles::Result's operator<< is exported by the linked build (confirmed,
+// same as Geofence::Result/Param::Result) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::LogFiles::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
+// Calibration::Result's operator<< is exported by the linked build
+// (confirmed via nm, same as the others above) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::Calibration::Result result) {
     std::ostringstream stream;
     stream << result;
     return stream.str();
@@ -25,9 +101,117 @@ bool WardActions::ensure_action() const {
     return true;
 }
 
+bool WardActions::ensure_mavlink_passthrough() const {
+    std::lock_guard lock(init_mutex_);
+    if (mavlink_passthrough_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    mavlink_passthrough_ = std::make_unique<mavsdk::MavlinkPassthrough>(connection_.get_system());
+    spdlog::info("mavlink passthrough plugin created");
+    return true;
+}
+
+bool WardActions::ensure_geofence() const {
+    std::lock_guard lock(init_mutex_);
+    if (geofence_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    geofence_ = std::make_unique<mavsdk::Geofence>(connection_.get_system());
+    spdlog::info("geofence plugin created");
+    return true;
+}
+
+bool WardActions::ensure_param() const {
+    std::lock_guard lock(init_mutex_);
+    if (param_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    param_ = std::make_unique<mavsdk::Param>(connection_.get_system());
+    spdlog::info("param plugin created");
+    return true;
+}
+
+bool WardActions::ensure_log_files() const {
+    std::lock_guard lock(init_mutex_);
+    if (log_files_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    log_files_ = std::make_unique<mavsdk::LogFiles>(connection_.get_system());
+    spdlog::info("log files plugin created");
+    return true;
+}
+
+bool WardActions::ensure_calibration() const {
+    std::lock_guard lock(init_mutex_);
+    if (calibration_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    calibration_ = std::make_unique<mavsdk::Calibration>(connection_.get_system());
+    spdlog::info("calibration plugin created");
+    return true;
+}
+
 mavsdk::Action::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::MavlinkPassthrough::Result WardActions::log_result(
+    const std::string& label, const mavsdk::MavlinkPassthrough::Result result) {
+    if (result != mavsdk::MavlinkPassthrough::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Geofence::Result WardActions::log_result(const std::string& label,
+                                                  const mavsdk::Geofence::Result result) {
+    if (result != mavsdk::Geofence::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Param::Result WardActions::log_result(const std::string& label,
+                                               const mavsdk::Param::Result result) {
+    if (result != mavsdk::Param::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::LogFiles::Result WardActions::log_result(const std::string& label,
+                                                  const mavsdk::LogFiles::Result result) {
+    if (result != mavsdk::LogFiles::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::Calibration::Result WardActions::log_result(const std::string& label,
+                                                     const mavsdk::Calibration::Result result) {
+    // Cancelled is an expected, operator-initiated outcome here, not a
+    // failure - the only log_result overload that needs this distinction,
+    // since none of the other MAVSDK calls this class wraps are
+    // cancellable mid-flight.
+    if (result == mavsdk::Calibration::Result::Cancelled) {
+        spdlog::info("{} cancelled", label);
+        return result;
+    }
+    if (result != mavsdk::Calibration::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
@@ -68,6 +252,16 @@ mavsdk::Action::Result WardActions::land() const {
     return log_result("land", action_->land());
 }
 
+mavsdk::Action::Result WardActions::set_return_to_launch_altitude(const float new_altitude) const {
+    if (ensure_action()) {
+        const auto result = action_->set_return_to_launch_altitude(new_altitude);
+        spdlog::info("set return to launch altitude to {:.1f}m", new_altitude);
+        return result;
+    }
+    spdlog::error("set return to launch altitude failed: action not available");
+    return mavsdk::Action::Result::Failed;
+}
+
 mavsdk::Action::Result WardActions::return_to_launch() const {
     if (!ensure_action()) return mavsdk::Action::Result::Failed;
     return log_result("return to launch", action_->return_to_launch());
@@ -105,4 +299,181 @@ mavsdk::Action::Result WardActions::set_current_speed(const float speed_m_s) con
     }
     spdlog::error("set current speed failed: action not available");
     return mavsdk::Action::Result::Failed;
+}
+
+mavsdk::MavlinkPassthrough::Result WardActions::set_home_position(
+    const double latitude_deg, const double longitude_deg, const float altitude_msl_m) const {
+    if (!ensure_mavlink_passthrough()) return mavsdk::MavlinkPassthrough::Result::ConnectionError;
+    // param1=0 means "use the location given in params 5-7", not the current
+    // position - MAV_CMD_DO_SET_HOME's own spec. MAV_COMP_ID_AUTOPILOT1 is
+    // the standard autopilot component id (mavsdk::Mavsdk also defines
+    // DEFAULT_COMPONENT_ID_AUTOPILOT as the same value, but it's private in
+    // the version this builds against). COMMAND_LONG carries lat/lon as
+    // float32 (~1m worst-case precision at these magnitudes), not the
+    // int32-scaled precision COMMAND_INT would give - accepted here the
+    // same way every other GCS sends this exact command: a home point
+    // doesn't need waypoint-grade precision.
+    const mavsdk::MavlinkPassthrough::CommandLong command{
+        connection_.get_system()->get_system_id(),
+        MAV_COMP_ID_AUTOPILOT1,
+        MAV_CMD_DO_SET_HOME,
+        0.0f,  // param1: 0 = use specified location, not current position
+        0.0f, 0.0f, 0.0f,
+        static_cast<float>(latitude_deg),
+        static_cast<float>(longitude_deg),
+        altitude_msl_m};
+    return log_result("set home position", mavlink_passthrough_->send_command_long(command));
+}
+
+mavsdk::Geofence::Result WardActions::upload_geofence(
+    const mavsdk::Geofence::GeofenceData& data) const {
+    if (!ensure_geofence()) return mavsdk::Geofence::Result::Error;
+    return log_result("upload geofence", geofence_->upload_geofence(data));
+}
+
+mavsdk::Param::AllParams WardActions::get_all_params() const {
+    if (!ensure_param()) {
+        spdlog::error("get all params failed: not connected");
+        return {};
+    }
+    const auto params = param_->get_all_params();
+    spdlog::info("get all params succeeded ({} int, {} float)", params.int_params.size(),
+                 params.float_params.size());
+    return params;
+}
+
+std::pair<mavsdk::Param::Result, int32_t> WardActions::get_param_int(const std::string& name) const {
+    if (!ensure_param()) return {mavsdk::Param::Result::ConnectionError, 0};
+    const auto [result, value] = param_->get_param_int(name);
+    log_result("get param '" + name + "'", result);
+    return {result, value};
+}
+
+std::pair<mavsdk::Param::Result, float> WardActions::get_param_float(const std::string& name) const {
+    if (!ensure_param()) return {mavsdk::Param::Result::ConnectionError, 0.0f};
+    const auto [result, value] = param_->get_param_float(name);
+    log_result("get param '" + name + "'", result);
+    return {result, value};
+}
+
+mavsdk::Param::Result WardActions::set_param_int(const std::string& name, const int32_t value) const {
+    if (!ensure_param()) return mavsdk::Param::Result::ConnectionError;
+    return log_result("set param '" + name + "' to " + std::to_string(value),
+                       param_->set_param_int(name, value));
+}
+
+mavsdk::Param::Result WardActions::set_param_float(const std::string& name, const float value) const {
+    if (!ensure_param()) return mavsdk::Param::Result::ConnectionError;
+    return log_result("set param '" + name + "' to " + std::to_string(value),
+                       param_->set_param_float(name, value));
+}
+
+std::pair<mavsdk::LogFiles::Result, std::vector<mavsdk::LogFiles::Entry>>
+WardActions::get_log_entries() const {
+    if (!ensure_log_files()) return {mavsdk::LogFiles::Result::NoSystem, {}};
+    const auto [result, entries] = log_files_->get_entries();
+    log_result("get log entries", result);
+    return {result, entries};
+}
+
+mavsdk::LogFiles::Result WardActions::download_log_file(const mavsdk::LogFiles::Entry& entry,
+                                                          const std::string& local_path) const {
+    if (!ensure_log_files()) return mavsdk::LogFiles::Result::NoSystem;
+    // Bridges download_log_file_async() (no blocking counterpart in this
+    // MAVSDK version) to a blocking call: the callback fires repeatedly
+    // with Result::Next + a 0-1 progress fraction while the transfer is
+    // in flight, then exactly once more with the terminal Result
+    // (Success or a failure code) - only that terminal call resolves the
+    // promise, every Next is discarded. This method reports no progress
+    // of its own; LogDownloadExecutor (the only caller) only needs the
+    // final outcome, not incremental updates.
+    auto result_promise = std::make_shared<std::promise<mavsdk::LogFiles::Result>>();
+    auto result_future = result_promise->get_future();
+    log_files_->download_log_file_async(
+        entry, local_path,
+        [result_promise](const mavsdk::LogFiles::Result result, mavsdk::LogFiles::ProgressData) {
+            if (result == mavsdk::LogFiles::Result::Next) return;
+            result_promise->set_value(result);
+        });
+    const auto result = result_future.get();
+    return log_result("download log file id=" + std::to_string(entry.id), result);
+}
+
+namespace {
+
+// Shared body for every calibrate_*() method below: bridges MAVSDK's
+// callback-only calibrate_*_async() to a blocking call the same
+// promise/future way download_log_file_async() is bridged above, except
+// every Result::Next also forwards its ProgressData to on_progress
+// instead of being silently discarded - a calibration's intermediate
+// steps (percentage, and operator instructions like "rotate to the next
+// orientation") are the whole point of this call, unlike a file
+// transfer's progress fraction. on_progress is copied by value into the
+// MAVSDK callback (never captured by reference) - same "no dangling
+// capture in an async MAVSDK callback" rule as download_log_file() above.
+template <typename StartAsync>
+mavsdk::Calibration::Result run_calibration(
+    StartAsync&& start_async, const WardActions::CalibrationProgressCallback& on_progress) {
+    auto result_promise = std::make_shared<std::promise<mavsdk::Calibration::Result>>();
+    auto result_future = result_promise->get_future();
+    start_async([result_promise, on_progress](const mavsdk::Calibration::Result result,
+                                               const mavsdk::Calibration::ProgressData progress) {
+        if (result == mavsdk::Calibration::Result::Next) {
+            if (on_progress) on_progress(progress);
+            return;
+        }
+        result_promise->set_value(result);
+    });
+    return result_future.get();
+}
+
+}  // namespace
+
+mavsdk::Calibration::Result WardActions::calibrate_gyro(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateGyroCallback& callback) {
+            calibration_->calibrate_gyro_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate gyro", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_accelerometer(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateAccelerometerCallback& callback) {
+            calibration_->calibrate_accelerometer_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate accelerometer", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_magnetometer(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateMagnetometerCallback& callback) {
+            calibration_->calibrate_magnetometer_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate magnetometer", result);
+}
+
+mavsdk::Calibration::Result WardActions::calibrate_level_horizon(
+    const CalibrationProgressCallback& on_progress) const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    const auto result = run_calibration(
+        [this](const mavsdk::Calibration::CalibrateLevelHorizonCallback& callback) {
+            calibration_->calibrate_level_horizon_async(callback);
+        },
+        on_progress);
+    return log_result("calibrate level horizon", result);
+}
+
+mavsdk::Calibration::Result WardActions::cancel_calibration() const {
+    if (!ensure_calibration()) return mavsdk::Calibration::Result::NoSystem;
+    return log_result("cancel calibration", calibration_->cancel());
 }

@@ -36,6 +36,27 @@ import {
 	type WardMissionState,
 	type Zone
 } from '$lib/gen/karshipta/v1/fleet';
+import {
+	ParamAckStatus,
+	ParamListStatus,
+	ParamType,
+	type GetParams,
+	type Param,
+	type SetParam
+} from '$lib/gen/karshipta/v1/parameter';
+import {
+	LogDownloadStatus,
+	LogEntryListStatus,
+	type DownloadLogFile,
+	type GetLogEntries,
+	type LogEntry
+} from '$lib/gen/karshipta/v1/log_file';
+import {
+	CalibrationStatus,
+	CalibrationType,
+	type CancelCalibration,
+	type StartCalibration
+} from '$lib/gen/karshipta/v1/calibration';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 import type { LatLon } from '$lib/geolocation';
@@ -223,6 +244,107 @@ interface SimWard {
 	patrolling: boolean;
 	target: Target | undefined;
 	missionRun: MissionRun | undefined;
+	/** demo stand-in for a real MAVLink parameter set (karshipta#212),
+	 * keyed by raw PARAM_ID. Plausible-looking PX4 values for the curated
+	 * tier-1 fields only, not a claim of real firmware defaults - every
+	 * demo ward reports itself as PX4 (see WardInfo below), so only PX4
+	 * names need seeding here. */
+	params: Map<string, Param>;
+	/** demo stand-in for a real vehicle's flight log list (karshipta#249) -
+	 * fixed, not generated per flight; see defaultDemoLogs(). */
+	logs: LogEntry[];
+	/** The one calibration this ward is currently simulating, if any
+	 * (karshipta#248) - at most one at a time, same gateway-enforced
+	 * guarantee CalibrationExecutor provides for real. Advanced once per
+	 * tick() in FakeGateway.tick(); undefined when nothing is running. */
+	calibration: DemoCalibration | undefined;
+}
+
+/** DEMO_CALIBRATION_TOTAL_STEPS ticks of simulated progress, one
+ * CalibrationProgress sent per DEMO_CALIBRATION_TICKS_PER_STEP real
+ * ticks (TICK_HZ apart) so a demo run takes a few real seconds and
+ * genuinely exercises the console's progress bar/instruction text, not
+ * an instant no-op. */
+interface DemoCalibration {
+	requestId: string;
+	calibrationType: CalibrationType;
+	/** ticks elapsed since this calibration started */
+	ticksElapsed: number;
+}
+
+const DEMO_CALIBRATION_TOTAL_STEPS = 5;
+const DEMO_CALIBRATION_TICKS_PER_STEP = TICK_HZ; // one simulated step per real second
+
+/** Plausible, not a claim of real MAVSDK/firmware wording - matches
+ * calibration-dialog.svelte's own expectation of an operator-facing
+ * instruction string per RUNNING update. */
+function demoCalibrationInstruction(stepIndex: number): string {
+	const steps = [
+		'Place the vehicle on a flat, level surface',
+		'Hold still',
+		'Rotate to the next orientation',
+		'Hold still',
+		'Finishing up'
+	];
+	return steps[Math.min(stepIndex, steps.length - 1)];
+}
+
+/** One small (fits in one demo chunk) and one larger (spans several, at
+ * DEMO_LOG_CHUNK_BYTES below) entry, so demo download exercises both the
+ * single-chunk and multi-chunk reassembly paths without needing real
+ * SITL flight logs. */
+function defaultDemoLogs(): LogEntry[] {
+	return [
+		{ logId: 1, date: '2026-10-15T09:12:00Z', sizeBytes: 8_192 },
+		{ logId: 2, date: '2026-10-17T14:03:00Z', sizeBytes: 20_480 }
+	];
+}
+
+/** Demo-only chunk size - deliberately much smaller than the real
+ * gateway's own kLogChunkBytes (main.cpp/log_download_executor.cpp) so
+ * even a small demo log legitimately splits into multiple LogFileChunk
+ * messages, exercising fleet-store.svelte.ts's reassembly logic instead
+ * of trivially completing in one. */
+const DEMO_LOG_CHUNK_BYTES = 4_096;
+
+function defaultDemoParams(): Map<string, Param> {
+	const intParam = (name: string, intValue: number): Param => ({
+		name,
+		type: ParamType.PARAM_TYPE_INT,
+		value: { $case: 'intValue', intValue }
+	});
+	const floatParam = (name: string, floatValue: number): Param => ({
+		name,
+		type: ParamType.PARAM_TYPE_FLOAT,
+		value: { $case: 'floatValue', floatValue }
+	});
+	return new Map(
+		[
+			floatParam('RTL_RETURN_ALT', 60),
+			floatParam('BAT_LOW_THR', 0.15),
+			floatParam('BAT_CRIT_THR', 0.07),
+			floatParam('BAT_EMERGEN_THR', 0.05),
+			intParam('COM_LOW_BAT_ACT', 2),
+			floatParam('COM_RC_LOSS_T', 0.5),
+			intParam('NAV_RCL_ACT', 2),
+			floatParam('COM_DL_LOSS_T', 10),
+			intParam('NAV_DLL_ACT', 2),
+			// Tier 2 (karshipta#213): plausible PX4 PID defaults, same
+			// "not a claim of real firmware defaults" caveat as above.
+			floatParam('MC_ROLLRATE_P', 0.15),
+			floatParam('MC_ROLLRATE_I', 0.2),
+			floatParam('MC_ROLLRATE_D', 0.003),
+			floatParam('MC_ROLL_P', 6.5),
+			floatParam('MC_PITCHRATE_P', 0.15),
+			floatParam('MC_PITCHRATE_I', 0.2),
+			floatParam('MC_PITCHRATE_D', 0.003),
+			floatParam('MC_PITCH_P', 6.5),
+			floatParam('MC_YAWRATE_P', 0.2),
+			floatParam('MC_YAWRATE_I', 0.1),
+			floatParam('MC_YAWRATE_D', 0),
+			floatParam('MC_YAW_P', 2.8)
+		].map((param) => [param.name, param])
+	);
 }
 
 interface MissionRun {
@@ -254,7 +376,10 @@ function initialWard(spec: WardSpec): SimWard {
 		thetaRad: spec.phaseRad,
 		patrolling: true,
 		target: undefined,
-		missionRun: undefined
+		missionRun: undefined,
+		params: defaultDemoParams(),
+		logs: defaultDemoLogs(),
+		calibration: undefined
 	};
 }
 
@@ -406,6 +531,24 @@ export class FakeGateway implements DemoEngine {
 				break;
 			case 'deleteZone':
 				this.handleDeleteZone(envelope.payload.deleteZone);
+				break;
+			case 'getParams':
+				this.handleGetParams(envelope.payload.getParams);
+				break;
+			case 'setParam':
+				this.handleSetParam(envelope.payload.setParam);
+				break;
+			case 'getLogEntries':
+				this.handleGetLogEntries(envelope.payload.getLogEntries);
+				break;
+			case 'downloadLogFile':
+				this.handleDownloadLogFile(envelope.payload.downloadLogFile);
+				break;
+			case 'startCalibration':
+				this.handleStartCalibration(envelope.payload.startCalibration);
+				break;
+			case 'cancelCalibration':
+				this.handleCancelCalibration(envelope.payload.cancelCalibration);
 				break;
 			default:
 				console.warn(
@@ -684,7 +827,7 @@ export class FakeGateway implements DemoEngine {
 						? { $case: 'pauseMission', pauseMission: {} }
 						: action === FleetMissionStopAction.FLEET_MISSION_STOP_ACTION_LAND
 							? { $case: 'land', land: {} }
-							: { $case: 'rtl', rtl: {} }
+							: { $case: 'rtl', rtl: { altitudeRelM: 0 } }
 			});
 			dispatched += 1;
 		}
@@ -920,6 +1063,208 @@ export class FakeGateway implements DemoEngine {
 		);
 	}
 
+	private handleGetParams(request: GetParams): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.onEnvelope({
+				payload: {
+					$case: 'paramList',
+					paramList: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+						message: `unknown ward_id: ${request.wardId}`,
+						params: []
+					}
+				}
+			});
+			return;
+		}
+		this.onEnvelope({
+			payload: {
+				$case: 'paramList',
+				paramList: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					status: ParamListStatus.PARAM_LIST_STATUS_SUCCESS,
+					message: '',
+					params: [...ward.params.values()]
+				}
+			}
+		});
+	}
+
+	private handleSetParam(request: SetParam): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`,
+				undefined
+			);
+			return;
+		}
+		if (!request.param) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				'set_param has no param',
+				undefined
+			);
+			return;
+		}
+		// Demo-engine stand-in for the real gateway's type-mismatch rejection
+		// (MAVSDK's Param::Result::WrongType): only accept a write for a
+		// param already seeded here with the same type, same as a real
+		// vehicle rejecting a write against its own declared parameter type.
+		const existing = ward.params.get(request.param.name);
+		if (!existing || existing.type !== request.param.type) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				`unknown parameter or type mismatch: ${request.param.name}`,
+				undefined
+			);
+			return;
+		}
+		ward.params.set(request.param.name, request.param);
+		this.paramAck(
+			request.requestId,
+			request.wardId,
+			ParamAckStatus.PARAM_ACK_STATUS_SUCCESS,
+			'',
+			request.param
+		);
+	}
+
+	private paramAck(
+		requestId: string,
+		wardId: string,
+		status: ParamAckStatus,
+		message: string,
+		param: Param | undefined
+	): void {
+		this.onEnvelope({
+			payload: { $case: 'paramAck', paramAck: { requestId, wardId, status, message, param } }
+		});
+	}
+
+	private handleGetLogEntries(request: GetLogEntries): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.onEnvelope({
+				payload: {
+					$case: 'logEntryList',
+					logEntryList: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+						message: `unknown ward_id: ${request.wardId}`,
+						entries: []
+					}
+				}
+			});
+			return;
+		}
+		this.onEnvelope({
+			payload: {
+				$case: 'logEntryList',
+				logEntryList: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_SUCCESS,
+					message: '',
+					entries: ward.logs
+				}
+			}
+		});
+	}
+
+	private handleDownloadLogFile(request: DownloadLogFile): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.downloadLogFileAck(
+				request,
+				LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`,
+				0,
+				0
+			);
+			return;
+		}
+		const entry = ward.logs.find((candidate) => candidate.logId === request.logId);
+		if (!entry) {
+			this.downloadLogFileAck(
+				request,
+				LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED,
+				`unknown log_id ${request.logId}`,
+				0,
+				0
+			);
+			return;
+		}
+		const totalSizeBytes = entry.sizeBytes;
+		const chunkCount = totalSizeBytes === 0 ? 0 : Math.ceil(totalSizeBytes / DEMO_LOG_CHUNK_BYTES);
+		this.downloadLogFileAck(
+			request,
+			LogDownloadStatus.LOG_DOWNLOAD_STATUS_SUCCESS,
+			'',
+			totalSizeBytes,
+			chunkCount
+		);
+		// Deterministic filler bytes (byte index mod 256), not random: lets a
+		// manual check of the downloaded file's content be reproducible,
+		// same reasoning as every other seeded-not-randomized demo value in
+		// this file.
+		for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+			const start = chunkIndex * DEMO_LOG_CHUNK_BYTES;
+			const end = Math.min(start + DEMO_LOG_CHUNK_BYTES, totalSizeBytes);
+			const data = new Uint8Array(end - start);
+			for (let i = 0; i < data.length; i++) data[i] = (start + i) % 256;
+			this.onEnvelope({
+				payload: {
+					$case: 'logFileChunk',
+					logFileChunk: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						logId: request.logId,
+						status: LogDownloadStatus.LOG_DOWNLOAD_STATUS_SUCCESS,
+						message: '',
+						chunkIndex,
+						data
+					}
+				}
+			});
+		}
+	}
+
+	private downloadLogFileAck(
+		request: DownloadLogFile,
+		status: LogDownloadStatus,
+		message: string,
+		totalSizeBytes: number,
+		chunkCount: number
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'downloadLogFileAck',
+				downloadLogFileAck: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					logId: request.logId,
+					status,
+					message,
+					totalSizeBytes,
+					chunkCount
+				}
+			}
+		});
+	}
+
 	private zoneAck(requestId: string, status: ZoneAckStatus, message: string, zoneId: string): void {
 		this.onEnvelope({
 			payload: { $case: 'zoneAck', zoneAck: { requestId, status, message, zoneId } }
@@ -1031,7 +1376,12 @@ export class FakeGateway implements DemoEngine {
 				} else {
 					this.interruptMission(ward, 'RTL command');
 					ward.mode = FlightMode.FLIGHT_MODE_RETURN;
-					this.setTarget(ward, command, 0, 0, ward.altM, 0, 'land');
+					// 0 means "keep the current configured altitude" (same
+					// meaning as the real gateway's set_return_to_launch_altitude
+					// call) - only override the transit altitude when a real
+					// value was actually requested.
+					const rtlAltM = action.rtl.altitudeRelM > 0 ? action.rtl.altitudeRelM : ward.altM;
+					this.setTarget(ward, command, 0, 0, rtlAltM, 0, 'land');
 					this.ack(command, CommandStatus.COMMAND_STATUS_EXECUTING, 'returning to launch');
 				}
 				break;
@@ -1099,6 +1449,21 @@ export class FakeGateway implements DemoEngine {
 					this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'mission paused');
 				}
 				break;
+			case 'setHome': {
+				const target = action.setHome.target;
+				if (!target) {
+					this.reject(command, ward, 'set_home has no target');
+					break;
+				}
+				// Real effect, not a stub: rtl/goto both compute their offsets
+				// from ward.spec.homeLatDeg/homeLonDeg above, so this genuinely
+				// moves where this ward's own RTL returns to, same as the real
+				// gateway's MAV_CMD_DO_SET_HOME.
+				ward.spec.homeLatDeg = target.latitudeDeg;
+				ward.spec.homeLonDeg = target.longitudeDeg;
+				this.ack(command, CommandStatus.COMMAND_STATUS_SUCCESS, 'home position set');
+				break;
+			}
 			default: {
 				const unhandled: never = action;
 				this.ack(command, CommandStatus.COMMAND_STATUS_REJECTED, `unsupported action ${unhandled}`);
@@ -1278,7 +1643,119 @@ export class FakeGateway implements DemoEngine {
 			this.advance(ward);
 			this.drainBattery(ward);
 			this.onEnvelope(stateEnvelope(ward, nowMs));
+			this.advanceCalibration(ward);
 		}
+	}
+
+	/** Advances this ward's simulated calibration, if one is running, by
+	 * one tick - sends a RUNNING CalibrationProgress once per
+	 * DEMO_CALIBRATION_TICKS_PER_STEP ticks (not every tick: TICK_HZ is
+	 * 5Hz, far faster than a real calibration's own step cadence), ending
+	 * in SUCCESS after DEMO_CALIBRATION_TOTAL_STEPS steps. */
+	private advanceCalibration(ward: SimWard): void {
+		if (!ward.calibration) return;
+		ward.calibration.ticksElapsed += 1;
+		if (ward.calibration.ticksElapsed % DEMO_CALIBRATION_TICKS_PER_STEP !== 0) return;
+
+		const stepIndex = ward.calibration.ticksElapsed / DEMO_CALIBRATION_TICKS_PER_STEP - 1;
+		const { requestId, calibrationType } = ward.calibration;
+
+		if (stepIndex >= DEMO_CALIBRATION_TOTAL_STEPS) {
+			ward.calibration = undefined;
+			this.calibrationProgress(
+				ward.spec.wardId,
+				requestId,
+				calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_SUCCESS,
+				''
+			);
+			return;
+		}
+		this.calibrationProgress(
+			ward.spec.wardId,
+			requestId,
+			calibrationType,
+			CalibrationStatus.CALIBRATION_STATUS_RUNNING,
+			'',
+			true,
+			stepIndex / DEMO_CALIBRATION_TOTAL_STEPS,
+			true,
+			demoCalibrationInstruction(stepIndex)
+		);
+	}
+
+	private calibrationProgress(
+		wardId: string,
+		requestId: string,
+		calibrationType: CalibrationType,
+		status: CalibrationStatus,
+		message: string,
+		hasProgress = false,
+		progress = 0,
+		hasInstruction = false,
+		instruction = ''
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'calibrationProgress',
+				calibrationProgress: {
+					requestId,
+					wardId,
+					calibrationType,
+					status,
+					message,
+					hasProgress,
+					progress,
+					hasInstruction,
+					instruction
+				}
+			}
+		});
+	}
+
+	private handleStartCalibration(request: StartCalibration): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.calibrationProgress(
+				request.wardId,
+				request.requestId,
+				request.calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`
+			);
+			return;
+		}
+		if (ward.calibration) {
+			this.calibrationProgress(
+				request.wardId,
+				request.requestId,
+				request.calibrationType,
+				CalibrationStatus.CALIBRATION_STATUS_REJECTED,
+				'a calibration is already running for this ward, retry once it finishes'
+			);
+			return;
+		}
+		ward.calibration = {
+			requestId: request.requestId,
+			calibrationType: request.calibrationType,
+			ticksElapsed: 0
+		};
+	}
+
+	private handleCancelCalibration(request: CancelCalibration): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward?.calibration || ward.calibration.requestId !== request.calibrationRequestId) {
+			return;
+		}
+		const { requestId, calibrationType } = ward.calibration;
+		ward.calibration = undefined;
+		this.calibrationProgress(
+			request.wardId,
+			requestId,
+			calibrationType,
+			CalibrationStatus.CALIBRATION_STATUS_CANCELLED,
+			''
+		);
 	}
 
 	private advance(ward: SimWard): void {
@@ -1460,7 +1937,13 @@ function stateEnvelope(ward: SimWard, nowMs: number): Envelope {
 				flight: {
 					flightMode: ward.mode,
 					armed: ward.armed,
-					inAir: ward.inAir
+					inAir: ward.inAir,
+					// A healthy demo fleet is already calibrated, same
+					// "plausible working baseline" convention as healthOk
+					// above - karshipta#248's picker badges.
+					gyrometerCalibrationOk: true,
+					accelerometerCalibrationOk: true,
+					magnetometerCalibrationOk: true
 				},
 				tags: []
 			}

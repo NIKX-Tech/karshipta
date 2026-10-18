@@ -276,6 +276,26 @@ TEST_F(FleetManagerTest, DeleteZoneAcceptedAckCarriesZoneId) {
     EXPECT_EQ(ack.zone_id(), zone_id);
 }
 
+// push_geofence_to_all_wards() just forwards store_.list_zones() into
+// ward_manager.push_geofence() (karshipta#247); ward_manager_ here has no
+// registered wards, so this is only asserting the plumbing itself never
+// throws, not that any MAVLink upload happens (WardManagerTest covers
+// push_geofence()'s own no-connection behavior directly).
+TEST_F(FleetManagerTest, PushGeofenceToAllWardsForwardsCurrentZoneSetWithoutThrowing) {
+    karshipta::v1::CreateZone create;
+    create.set_request_id("req-1");
+    create.set_name("Staging");
+    create.set_type(karshipta::v1::ZONE_TYPE_KEEP_IN);
+    for (const auto& [lat, lon] : {std::pair{1.0, 1.0}, std::pair{2.0, 1.0}, std::pair{1.5, 2.0}}) {
+        auto* vertex = create.add_vertices();
+        vertex->set_latitude_deg(lat);
+        vertex->set_longitude_deg(lon);
+    }
+    ASSERT_EQ(manager_.handle_create_zone(create).status(), karshipta::v1::ZONE_ACK_STATUS_ACCEPTED);
+
+    EXPECT_NO_THROW(manager_.push_geofence_to_all_wards(ward_manager_));
+}
+
 // ---------- Fleet mission ----------
 
 namespace {

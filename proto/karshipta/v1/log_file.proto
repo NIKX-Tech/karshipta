@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package karshipta.v1;
+
+// ---------- Flight logs (console <-> gateway) ----------
+//
+// Post-flight log download (karshipta#249): MAVSDK's LogFiles plugin
+// pulls a flight log off the vehicle to a local file on the gateway,
+// which this streams to the console over the existing wire in
+// kMaxEnvelopeBytes-sized chunks (main.cpp) - deliberately not a
+// separate HTTP endpoint the way Herald's ingest server is one: relayly
+// only proxies its own Noise-encrypted message channel, never arbitrary
+// HTTP, so an HTTP download endpoint would silently not work at all for
+// an operator connected through the relay transport - exactly the
+// self-hosted-behind-NAT case the relay transport exists for.
+//
+// ward_id-scoped like Command/GetParams, not fleet-scoped: a log always
+// belongs to exactly one ward's own flight controller.
+
+message GetLogEntries {
+  string request_id = 1;
+  string ward_id = 2;
+}
+
+// Mirrors mavsdk::LogFiles::Entry directly - id, date (UTC ISO 8601,
+// "yyyy-mm-ddThh:mm:ssZ"), size.
+message LogEntry {
+  uint32 log_id = 1;
+  string date = 2;
+  uint32 size_bytes = 3;
+}
+
+enum LogEntryListStatus {
+  LOG_ENTRY_LIST_STATUS_UNSPECIFIED = 0;
+  LOG_ENTRY_LIST_STATUS_SUCCESS = 1;
+  LOG_ENTRY_LIST_STATUS_REJECTED = 2;  // reason in message
+}
+
+// Response to GetLogEntries, correlated by request_id.
+message LogEntryList {
+  string request_id = 1;
+  string ward_id = 2;
+  LogEntryListStatus status = 3;
+  string message = 4;
+  repeated LogEntry entries = 5;
+}
+
+message DownloadLogFile {
+  string request_id = 1;
+  string ward_id = 2;
+  uint32 log_id = 3;
+}
+
+enum LogDownloadStatus {
+  LOG_DOWNLOAD_STATUS_UNSPECIFIED = 0;
+  LOG_DOWNLOAD_STATUS_SUCCESS = 1;
+  LOG_DOWNLOAD_STATUS_REJECTED = 2;  // reason in message
+}
+
+// Answers DownloadLogFile immediately: SUCCESS means the vehicle-side
+// pull has started and chunk_count LogFileChunk messages will follow;
+// REJECTED means outright refusal (unknown ward/log_id, vehicle
+// unreachable) and no chunks will follow at all. Not a completion
+// signal either way - completion is LogFileChunk's own chunk_index
+// reaching chunk_count - 1.
+message DownloadLogFileAck {
+  string request_id = 1;
+  string ward_id = 2;
+  uint32 log_id = 3;
+  LogDownloadStatus status = 4;
+  string message = 5;
+  uint32 total_size_bytes = 6;  // only meaningful when status is SUCCESS
+  uint32 chunk_count = 7;       // only meaningful when status is SUCCESS; 0 for an empty file
+}
+
+// One piece of the log file's raw bytes, sent chunk_count times per
+// download (chunk_count from the preceding DownloadLogFileAck) when
+// status is SUCCESS - the console reassembles by concatenating data in
+// chunk_index order (0-based). status is REJECTED instead only if the
+// transfer aborts mid-stream after already being accepted (e.g. the
+// gateway's own read of its temp file fails) - chunk_index/data are
+// meaningless then, reason is in message, and no further chunks follow.
+message LogFileChunk {
+  string request_id = 1;
+  string ward_id = 2;
+  uint32 log_id = 3;
+  LogDownloadStatus status = 4;
+  string message = 5;
+  uint32 chunk_index = 6;
+  bytes data = 7;
+}

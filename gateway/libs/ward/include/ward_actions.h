@@ -2,19 +2,34 @@
 #define KARSHIPTA_GATEWAY_WARD_ACTIONS_H
 
 #include <mavsdk/plugins/action/action.h>
+#include <mavsdk/plugins/calibration/calibration.h>
+#include <mavsdk/plugins/geofence/geofence.h>
+#include <mavsdk/plugins/log_files/log_files.h>
+#include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
+#include <mavsdk/plugins/param/param.h>
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "ward_connection.h"
 
-// Wraps MAVSDK's Action plugin against exactly one connected ward. Scoped
-// to precisely the commands proto/karshipta/v1/command.proto's Command.action
-// oneof can carry (ArmCommand, DisarmCommand, TakeoffCommand, LandCommand,
-// ReturnToLaunchCommand, GotoCommand); nothing here exists ahead of a schema
-// field for it.
+// Wraps MAVSDK's Action plugin (plus MavlinkPassthrough for the one command
+// Action doesn't cover, see set_home_position below, Geofence for
+// upload_geofence, Param for get_all_params/get_param_*/set_param_*, and
+// LogFiles for get_log_entries/download_log_file) against exactly one
+// connected ward. Scoped to precisely the commands
+// proto/karshipta/v1/command.proto's Command.action oneof can carry
+// (ArmCommand, DisarmCommand, TakeoffCommand, LandCommand,
+// ReturnToLaunchCommand, GotoCommand, SetHomeCommand), plus the
+// WardManager-driven geofence push (karshipta#247), parameter access
+// (karshipta#211), and flight log download (karshipta#249) - all
+// WardManager-driven, not Command-shaped - nothing here exists ahead of a
+// schema field or a documented, scoped feature for it.
 class WardActions {
    public:
     // Binds this wrapper to a connection; does not create the Action plugin yet
@@ -24,6 +39,29 @@ class WardActions {
     // Human-readable text for a MAVSDK result (via its operator<<), the string
     // that CommandAck.message carries on rejection.
     static std::string result_name(mavsdk::Action::Result result);
+    // Overload for set_home_position's own Result type (MavlinkPassthrough
+    // has no relation to Action::Result - different plugin, different enum).
+    static std::string result_name(mavsdk::MavlinkPassthrough::Result result);
+    // Overload for upload_geofence's own Result type. Unlike
+    // MavlinkPassthrough::Result, Geofence::Result's operator<< is actually
+    // exported by the linked MAVSDK build (confirmed), so this one uses the
+    // same fmt::streamed-via-ostringstream pattern as Action::Result instead
+    // of a hand-written switch.
+    static std::string result_name(mavsdk::Geofence::Result result);
+    // Overload for Param's own Result type. Its operator<< is exported
+    // (confirmed, same as Geofence::Result) - normal pattern. Carries much
+    // more specific reasons than Action::Result (DoesNotExist,
+    // ValueOutOfRange, PermissionDenied, ReadOnly, TypeMismatch, ...);
+    // WardManager must surface this text as-is in ParamAck.message, never
+    // collapse it to a bare "rejected" (karshipta#211).
+    static std::string result_name(mavsdk::Param::Result result);
+    // Overload for LogFiles' own Result type. Its operator<< is exported
+    // (confirmed, same as Geofence::Result/Param::Result) - normal pattern.
+    static std::string result_name(mavsdk::LogFiles::Result result);
+    // Overload for Calibration's own Result type. Its operator<< is
+    // exported (confirmed via nm, same as the others above) - normal
+    // pattern.
+    static std::string result_name(mavsdk::Calibration::Result result);
 
     // Implements ArmCommand. Arms the ward (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.
@@ -43,6 +81,11 @@ class WardActions {
     [[nodiscard]] mavsdk::Action::Result takeoff() const;
     // Implements LandCommand. Commands landing at the current position.
     [[nodiscard]] mavsdk::Action::Result land() const;
+    // Sets the RTL altitude (meters above home) used by return_to_launch();
+    // backs ReturnToLaunchCommand.altitude_rel_m. Same shape as
+    // set_takeoff_altitude() above - a separate FC-persisted value,
+    // return_to_launch() itself takes no argument.
+    [[nodiscard]] mavsdk::Action::Result set_return_to_launch_altitude(float new_altitude) const;
     // Implements ReturnToLaunchCommand. Flies back to the home position and lands.
     [[nodiscard]] mavsdk::Action::Result return_to_launch() const;
     // Manual hold: loiters at the current GPS position and altitude,
@@ -65,6 +108,116 @@ class WardActions {
     // Backs GotoCommand.speed_m_s: sets the current speed (m/s) used for
     // missions/repositioning. Ephemeral, not stored on the ward.
     [[nodiscard]] mavsdk::Action::Result set_current_speed(float speed_m_s) const;
+    // Implements SetHomeCommand. Sends a raw MAV_CMD_DO_SET_HOME (param1=0,
+    // "use specified location") - no higher-level MAVSDK plugin wraps this;
+    // Action has set_return_to_launch_altitude() (the RTL climb height) but
+    // nothing for the RTL location itself (karshipta#246). MavlinkPassthrough
+    // is flagged for deprecation in MAVSDK v4 in favor of MavlinkDirect; a
+    // conscious choice for now since it's the stable, documented path to a
+    // single COMMAND_LONG.
+    [[nodiscard]] mavsdk::MavlinkPassthrough::Result set_home_position(
+        double latitude_deg, double longitude_deg, float altitude_msl_m) const;
+    // Pushes a horizontal-only geofence (karshipta#247 - MAVSDK's Geofence
+    // plugin has no altitude field anywhere in its API, checked the full
+    // header; altitude bounds stay advisory, tracked separately as
+    // karshipta#251). Not tied to a Command - called by WardManager, not
+    // CommandExecutor, on every zone mutation and on this ward's own
+    // (re)connect, mirroring MAV_CMD geofence upload's own full-replace
+    // semantics: the complete current zone set is always re-sent, never an
+    // incremental diff.
+    [[nodiscard]] mavsdk::Geofence::Result upload_geofence(
+        const mavsdk::Geofence::GeofenceData& data) const;
+    // Implements GetParams (karshipta#211). Reads every int and float
+    // parameter currently known to the autopilot. Unlike every other
+    // MAVSDK call this class wraps, get_all_params() has no Result/failure
+    // signal of its own - it returns whatever it collected. Returns an
+    // empty AllParams if the connection isn't up yet (checked via
+    // ensure_param(), same contract as every other ensure_*() here); a
+    // genuine on-wire timeout or partial response is likewise
+    // indistinguishable from "the vehicle has no parameters" at this
+    // layer - WardManager must still check connection state itself before
+    // trusting an empty result as real (see its own doc comment).
+    [[nodiscard]] mavsdk::Param::AllParams get_all_params() const;
+    // Reads one int-valued parameter by its raw MAVLink PARAM_ID. Used by
+    // WardManager::handle_set_param() to read back the vehicle-confirmed
+    // value after a successful set_param_int() - MAVSDK's setter returns
+    // only a Result, not the value the vehicle actually stored, so an
+    // honest "confirmed" value needs this explicit round trip.
+    [[nodiscard]] std::pair<mavsdk::Param::Result, int32_t> get_param_int(
+        const std::string& name) const;
+    // Float counterpart to get_param_int(), same contract.
+    [[nodiscard]] std::pair<mavsdk::Param::Result, float> get_param_float(
+        const std::string& name) const;
+    // Implements SetParam for an int-valued parameter (karshipta#211).
+    // MAVSDK has no single polymorphic setter - get/set_param_int and
+    // get/set_param_float are separate calls, each returning
+    // Result::WrongType if name actually holds the other type; the caller
+    // (WardManager) picks the right one from ParamType.
+    [[nodiscard]] mavsdk::Param::Result set_param_int(const std::string& name,
+                                                       int32_t value) const;
+    // Float counterpart to set_param_int(), same contract.
+    [[nodiscard]] mavsdk::Param::Result set_param_float(const std::string& name,
+                                                         float value) const;
+    // Implements GetLogEntries (karshipta#249). Blocking metadata fetch, no
+    // file transfer - same "direct, synchronous" treatment as
+    // get_all_params() above, not routed through a worker thread the way
+    // download_log_file() below must be.
+    [[nodiscard]] std::pair<mavsdk::LogFiles::Result, std::vector<mavsdk::LogFiles::Entry>>
+    get_log_entries() const;
+    // Implements DownloadLogFile (karshipta#249). Writes the complete log
+    // to local_path on the gateway's own filesystem. MAVSDK only exposes
+    // this as download_log_file_async() (no blocking counterpart, unlike
+    // get_entries()); this bridges it to a blocking call via
+    // std::promise/future, resolved only on the terminal callback
+    // invocation (Result::Success or a failure code) - every earlier
+    // Result::Next progress update is discarded, this method reports no
+    // progress of its own. A real MAVLink file transfer, seconds to tens
+    // of seconds for a real log - the caller (a dedicated worker thread,
+    // never the network thread) must already expect to block here.
+    [[nodiscard]] mavsdk::LogFiles::Result download_log_file(const mavsdk::LogFiles::Entry& entry,
+                                                              const std::string& local_path) const;
+
+    // Receives every intermediate ProgressData from a calibrate_* call
+    // below (karshipta#248) - MAVSDK's own callback fires once per
+    // Result::Next with progress and/or an operator-facing instruction
+    // string, before the terminal Result resolves the call. Copied by
+    // value into the MAVSDK callback (never captured by reference), same
+    // "no dangling capture in an async MAVSDK callback" rule this class
+    // already follows elsewhere (see download_log_file()'s own comment).
+    using CalibrationProgressCallback = std::function<void(mavsdk::Calibration::ProgressData)>;
+
+    // Implements StartCalibration{GYRO} (karshipta#248). Blocks until the
+    // calibration finishes, fails, or is cancelled, invoking on_progress
+    // for every intermediate step along the way - same promise/future
+    // bridge over MAVSDK's callback-only calibrate_gyro_async() as
+    // download_log_file() uses for download_log_file_async(), the only
+    // other MAVSDK call this class wraps with no blocking counterpart of
+    // its own. The caller (a dedicated worker thread, never the network
+    // thread) must already expect to block here, potentially for the
+    // whole guided, operator-paced calibration procedure.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_gyro(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{ACCELEROMETER}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_accelerometer(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{MAGNETOMETER}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_magnetometer(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements StartCalibration{LEVEL_HORIZON}. Same contract as
+    // calibrate_gyro() above.
+    [[nodiscard]] mavsdk::Calibration::Result calibrate_level_horizon(
+        const CalibrationProgressCallback& on_progress) const;
+    // Implements CancelCalibration. Unlike the calibrate_* methods above,
+    // MAVSDK's cancel() is already a normal blocking call (no _async
+    // counterpart to bridge) - it tells whichever calibrate_*_async is
+    // currently in flight on this System to stop, which is what
+    // eventually resolves that call's own blocking wrapper with
+    // Result::Cancelled; this method itself only reports whether the
+    // cancel request was accepted, not the calibration's own final
+    // outcome.
+    [[nodiscard]] mavsdk::Calibration::Result cancel_calibration() const;
 
    private:
     // The connection this action wrapper sends commands through. Must outlive this object.
@@ -75,22 +228,69 @@ class WardActions {
     // The Action plugin bound to the connected System. Null until ensure_action()
     // lazily constructs it on first use.
     mutable std::unique_ptr<mavsdk::Action> action_;
+    // The MavlinkPassthrough plugin, lazily constructed the same way as
+    // action_ (see ensure_mavlink_passthrough()) - only set_home_position
+    // uses this; every other method stays on the Action plugin above.
+    mutable std::unique_ptr<mavsdk::MavlinkPassthrough> mavlink_passthrough_;
+    // The Geofence plugin, lazily constructed the same way as action_ (see
+    // ensure_geofence()) - only upload_geofence uses this.
+    mutable std::unique_ptr<mavsdk::Geofence> geofence_;
+    // The Param plugin, lazily constructed the same way as action_ (see
+    // ensure_param()) - only get_all_params/get_param_*/set_param_* use this.
+    mutable std::unique_ptr<mavsdk::Param> param_;
+    // The LogFiles plugin, lazily constructed the same way as action_ (see
+    // ensure_log_files()) - only get_log_entries/download_log_file use this.
+    mutable std::unique_ptr<mavsdk::LogFiles> log_files_;
+    // The Calibration plugin, lazily constructed the same way as action_
+    // (see ensure_calibration()) - only the calibrate_*/cancel_calibration
+    // methods use this.
+    mutable std::unique_ptr<mavsdk::Calibration> calibration_;
 
-    // Serializes the lazy init in ensure_action(): both the CommandExecutor
-    // worker and WardManager's own threads can trigger the first creation
-    // concurrently. Once created, `action_` is never reset, so reads after a
-    // successful ensure_action() need no lock.
+    // Serializes the lazy init in ensure_action()/ensure_mavlink_passthrough()/
+    // ensure_geofence()/ensure_param()/ensure_log_files()/ensure_calibration():
+    // the CommandExecutor worker, WardManager's own zone-push and parameter
+    // calls, the LogDownloadExecutor and CalibrationExecutor workers, and
+    // WardManager's reconnect_worker threads can all trigger a first
+    // creation concurrently. Once created, action_/mavlink_passthrough_/
+    // geofence_/param_/log_files_/calibration_ are never reset, so reads
+    // after a successful ensure_*() need no lock. Shared across all six:
+    // none of them are ever constructed concurrently with each other either.
     mutable std::mutex init_mutex_;
 
     // Lazily creates `action_` the first time it's needed. Returns false if
     // `connection_` isn't connected yet; returns true immediately if already created.
     // Thread-safe.
     bool ensure_action() const;
+    // Lazily creates `mavlink_passthrough_`, same contract as ensure_action().
+    bool ensure_mavlink_passthrough() const;
+    // Lazily creates `geofence_`, same contract as ensure_action().
+    bool ensure_geofence() const;
+    // Lazily creates `param_`, same contract as ensure_action().
+    bool ensure_param() const;
+    // Lazily creates `log_files_`, same contract as ensure_action().
+    bool ensure_log_files() const;
+    // Lazily creates `calibration_`, same contract as ensure_action().
+    bool ensure_calibration() const;
     // Logs the outcome of a command already sent to `action_` and passes the
     // Result through unchanged, so the caller (eventually the M3 CommandAck
     // path) keeps the reason a bool would have erased.
     static mavsdk::Action::Result log_result(const std::string& label,
                                              mavsdk::Action::Result result);
+    // Overload for MavlinkPassthrough::Result, same contract as log_result above.
+    static mavsdk::MavlinkPassthrough::Result log_result(const std::string& label,
+                                                          mavsdk::MavlinkPassthrough::Result result);
+    // Overload for Geofence::Result, same contract as log_result above.
+    static mavsdk::Geofence::Result log_result(const std::string& label,
+                                                mavsdk::Geofence::Result result);
+    // Overload for Param::Result, same contract as log_result above.
+    static mavsdk::Param::Result log_result(const std::string& label,
+                                             mavsdk::Param::Result result);
+    // Overload for LogFiles::Result, same contract as log_result above.
+    static mavsdk::LogFiles::Result log_result(const std::string& label,
+                                                mavsdk::LogFiles::Result result);
+    // Overload for Calibration::Result, same contract as log_result above.
+    static mavsdk::Calibration::Result log_result(const std::string& label,
+                                                   mavsdk::Calibration::Result result);
 };
 
 #endif  // KARSHIPTA_GATEWAY_WARD_ACTIONS_H

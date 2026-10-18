@@ -72,6 +72,13 @@ and fleet persistence are all facade methods on this class.
 | `static unique_ptr<WardManager> create(Transport&, filesystem::path persistence_path = {})` | Builds the shared `Mavsdk` core itself. The entry point every consumer outside this library should use. |
 | `add_ward(const WardConfig&)` | Builds the object graph and registers it; does not connect. Rejects an empty or already-registered `ward_id`, or a nonzero `system_id` already bound elsewhere. |
 | `dispatch_command(const Command&)` | Routes to the ward's `CommandExecutor`; synthesizes a REJECTED `CommandAck` for unknown/stopped/busy wards. |
+| `push_geofence(const vector<Zone>&)` | Builds one `mavsdk::Geofence::GeofenceData` from the full zone set (karshipta#247, horizontal boundary only), caches it, and uploads it to every currently connected ward via `WardActions::upload_geofence()`. Called by `FleetManager::push_geofence_to_all_wards()` after every zone mutation, and again from each ward's own `reconnect_worker` on every reconnect so the cache is what re-applies after a dropped link. |
+| `handle_get_params(const GetParams&) const` | Implements `GetParams` (karshipta#211). Direct, synchronous `WardActions::get_all_params()` call - no executor queue, no busy flag, same shape as `push_geofence()`. Rejects (empty `params`) if the ward is unknown or registered but not currently connected, never returns an empty list that could be mistaken for "this vehicle genuinely has zero parameters." `main.cpp` sends the response only to the requester, not a broadcast - a param dump isn't shared mutable state other consoles need to learn about. |
+| `handle_set_param(const SetParam&) const` | Implements `SetParam` (karshipta#211). Same direct, synchronous shape. On a successful write, reads the parameter back (`WardActions::get_param_int`/`get_param_float`) so `ParamAck.param` carries the vehicle-confirmed value, not an echo of the request - `set_param_*`'s MAVSDK call returns only a `Result`, never the stored value. `main.cpp` broadcasts the ack (unlike `GetParams`'s response): a confirmed parameter change is real vehicle state other consoles watching this ward should learn about, same as `CommandAck`. |
+| `handle_get_log_entries(client, const GetLogEntries&) const` | Implements flight log listing (karshipta#249). Unlike `handle_get_params()`, NOT direct/synchronous: queues onto the ward's `LogDownloadExecutor` worker thread (a log listing round trip can be slow), which sends the resulting `LogEntryList` to `client` only once ready. Answers synchronously, also to `client` only, for the two cases resolvable without the worker: unknown ward_id, or registered-but-not-connected. See `log-download-executor.md`. |
+| `handle_download_log_file(client, const DownloadLogFile&) const` | Implements flight log download (karshipta#249). Same queued shape as `handle_get_log_entries()` above; the accept/reject `DownloadLogFileAck` and every following `LogFileChunk` are sent to `client` only, from the worker thread. See `log-download-executor.md`. |
+| `handle_start_calibration(client, const StartCalibration&) const` | Implements pre-flight sensor calibration (karshipta#248). Queues onto the ward's `CalibrationExecutor` worker thread; zero or more `RUNNING` `CalibrationProgress` messages then one terminal message are sent to `client` only. Answers synchronously, also to `client` only, for unknown ward_id or registered-but-not-connected; `CalibrationExecutor::enqueue_start()` itself answers the third synchronous case (a calibration already running for this ward). See `calibration-executor.md`. |
+| `handle_cancel_calibration(client, const CancelCalibration&) const` | Implements calibration cancellation (karshipta#248). Same unknown/unconnected-ward checks as `handle_start_calibration()`; otherwise routes to `CalibrationExecutor::cancel()`, which runs on the calling thread and reports nothing back directly - a successful cancel surfaces as the running job's own terminal `CalibrationProgress{CANCELLED}`. See `calibration-executor.md`. |
 | `handle_mission_upload(const Mission&)` | Routes to the ward's `WardMission::enqueue_upload()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards (no `CommandAck`-shaped ack exists for missions). |
 | `handle_mission_file_upload(const MissionFileUpload&)` | Converts via the ward's `MissionImporter::import()` (synchronous - local parsing, not a MAVLink round trip), then routes through `handle_mission_upload()`'s same path on success; a WARNING `Event` on either the ward lookup or the import itself failing. |
 | `handle_mission_download_request(const MissionDownloadRequest&)` | Routes to the ward's `WardMission::enqueue_download()`; broadcasts a WARNING `Event` for unknown/stopped/busy wards. Result surfaces later via the publish tick. |
@@ -81,7 +88,7 @@ and fleet persistence are all facade methods on this class.
 | `load_persisted()` | Reloads every ward from `persistence_path`; 0 if unset or the file doesn't exist. |
 | `restore_and_start()` | `load_persisted()` then `start_all()` - the crash-recovery entry point. |
 | `start_publishing(interval = kDefaultPublishInterval)` | Launches the shared telemetry-publish worker. |
-| `send_ward_info(client)` | Sends one `WardInfo` per discovered ward to a single client (for `Transport::on_connect`). |
+| `send_ward_info(client)` | Sends one `WardInfo` per discovered ward to a single client (for `Transport::on_connect`). `WardInfo.autopilot` ("PX4"/"ArduPilot"/"") comes from `mavsdk::System::autopilot_type()` (the vehicle's own HEARTBEAT, already-cached, no round trip) - fixed from an earlier hardcoded `"PX4"` stub once karshipta#212's console work needed the real value to pick the right per-firmware parameter names. |
 | `is_started`/`is_connected`/`list_status`/`list_ward_ids` | Read-only fleet queries. |
 | `remove_ward(ward_id)` / `remove_all()` | Applies `stop`'s ground-safety rules, then erases. |
 | `handle_add_ward`/`handle_remove_ward` | Wire entry points: `AddWard`/`RemoveWard` in, `WardConfigAck` out. Never throw. |
@@ -139,9 +146,13 @@ generated `fleet_state.yaml` itself is gitignored.
 - Each ward's `reconnect_worker` is an independent `jthread`: connects,
   broadcasts an INFO `LINK_CONNECTED` `Event`, requests the telemetry stream
   rate (re-requested on every reconnect - PX4 forgets it across a link drop),
-  waits while connected, and on drop broadcasts a WARNING `LINK_LOST` `Event`
-  before reconnecting (not on a deliberate `stop()`/`force_stop()` - the loop
-  only emits `LINK_LOST` when the drop wasn't requested).
+  re-uploads the cached geofence (`cached_geofence_`, under `geofence_mutex_`,
+  karshipta#247 - same reasoning as the telemetry rate: there's no way to
+  know whether this ward's FC still holds the last fence it was sent, so it
+  is always re-sent, not just on the first connect), waits while connected,
+  and on drop broadcasts a WARNING `LINK_LOST` `Event` before reconnecting
+  (not on a deliberate `stop()`/`force_stop()` - the loop only emits
+  `LINK_LOST` when the drop wasn't requested).
 - `handle_add_ward()`/`handle_remove_ward()` broadcast an INFO
   `WARD_ADDED`/`WARD_REMOVED` `Event` (`broadcast_fleet_event()`) on
   their accepted path only, same no-lock-held pattern as
@@ -195,6 +206,38 @@ a real socket:
 
 - `AddWardRegistersAndListsId`, `AddWardRejectsEmptyId`,
   `AddWardRejectsDuplicateId`, `AddWardRejectsDuplicateSystemId`.
+- `PushGeofenceDoesNotCrashWithNoConnectedWards` (karshipta#247): against a
+  never-connected ward, `push_geofence()` with both an empty and a populated
+  zone list is a logged no-op, never a crash - `WardActions::ensure_geofence()`
+  always fails without a connection, so this is the limit of what's
+  testable without a live SITL; `fleet_manager_test.cpp`'s
+  `PushGeofenceToAllWardsForwardsCurrentZoneSetWithoutThrowing` covers the
+  `FleetManager` side of the same plumbing.
+- `HandleGetParamsRejectsUnknownWardWithReason`/
+  `HandleGetParamsRejectsUnconnectedWardWithReason`,
+  `HandleSetParamRejectsUnknownWardWithReason`/
+  `HandleSetParamRejectsRequestWithNoParam`/
+  `HandleSetParamRejectsUnconnectedWardWithReason` (karshipta#211): same
+  no-live-SITL limit as the geofence tests above - these assert the
+  returned `ParamList`/`ParamAck` directly (both handlers return their
+  response rather than broadcasting it), not `transport_.broadcast_envelopes()`.
+- `HandleGetLogEntriesRejectsUnknownWardWithReason`/
+  `HandleGetLogEntriesRejectsUnconnectedWardWithReason`,
+  `HandleDownloadLogFileRejectsUnknownWardWithReason`/
+  `HandleDownloadLogFileRejectsUnconnectedWardWithReason` (karshipta#249):
+  same no-live-SITL limit again, but these two handlers are `void` (the
+  real result comes back later, from `LogDownloadExecutor`'s worker
+  thread), so these assert `transport_.sent_envelopes(client)` instead of
+  a return value - see `log-download-executor.md`.
+- `HandleStartCalibrationRejectsUnknownWardWithReason`/
+  `HandleStartCalibrationRejectsUnconnectedWardWithReason`,
+  `HandleCancelCalibrationOnUnknownWardSendsNothing` (karshipta#248): same
+  no-live-SITL limit again - `handle_start_calibration()` asserts
+  `transport_.sent_envelopes(client)` a `CalibrationProgress{REJECTED}`,
+  same shape as the log-file handlers above; `handle_cancel_calibration()`
+  has no ack channel at all even on its happy path, so its only testable
+  assertion is that nothing gets sent for an unknown ward. See
+  `calibration-executor.md`.
 - `DispatchCommandRejectsUnknownWardWithReason`: the broadcast `CommandAck`
   carries the offending id in its message.
 - `RemoveWardRemovesNeverStartedWard`.
@@ -232,6 +275,17 @@ a real socket:
   ward-level state (`list_ward_ids()`, an existing ward's
   registration) never changed - proof the envelope never reached
   `dispatch_command`/`handle_add_ward`/etc.
+- `RejectViewerEnvelopeRejectsGetLogEntriesWithResponse`/
+  `RejectViewerEnvelopeRejectsDownloadLogFileWithAck`: same pattern, but
+  assert `transport_.sent_envelopes(client)` (not `broadcast_envelopes()`),
+  matching the live `kGetLogEntries`/`kDownloadLogFile` handlers' own
+  send-to-requester-only delivery.
+- `RejectViewerEnvelopeRejectsStartCalibrationWithProgress`: same
+  send-to-requester-only pattern, asserting a `CalibrationProgress{
+  REJECTED}`. `RejectViewerEnvelopeIgnoresCancelCalibrationSilently`:
+  `CancelCalibration` has no ack channel at all, so this only asserts
+  nothing gets sent or broadcast - same as a stale/mistargeted cancel
+  from a real operator.
 
 ## Manual verification
 

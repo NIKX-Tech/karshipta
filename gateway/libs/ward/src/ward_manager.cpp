@@ -31,14 +31,53 @@ constexpr std::chrono::milliseconds kReconnectPollInterval{1000};
 // altitude. Named so a config value can override it later (BRIEF.md M4).
 constexpr std::chrono::seconds kForceStopLandingTimeout{120};
 
+// Horizontal boundary only (karshipta#247) - mavsdk::Geofence::Polygon has
+// no altitude field anywhere in its API (checked the full header), so
+// Zone.altitude_min_m/altitude_max_m stay advisory-only here, tracked
+// separately as karshipta#251 (and scoped to flight wards specifically when
+// it lands - a generic tracker has no autopilot to enforce a ceiling on).
+mavsdk::Geofence::GeofenceData build_geofence_data(const std::vector<karshipta::v1::Zone>& zones) {
+    mavsdk::Geofence::GeofenceData data;
+    data.polygons.reserve(zones.size());
+    for (const auto& zone : zones) {
+        mavsdk::Geofence::Polygon polygon;
+        polygon.fence_type = zone.type() == karshipta::v1::ZONE_TYPE_KEEP_OUT
+                                  ? mavsdk::Geofence::FenceType::Exclusion
+                                  : mavsdk::Geofence::FenceType::Inclusion;
+        polygon.points.reserve(zone.vertices_size());
+        for (const auto& vertex : zone.vertices()) {
+            polygon.points.push_back({vertex.latitude_deg(), vertex.longitude_deg()});
+        }
+        data.polygons.push_back(std::move(polygon));
+    }
+    return data;
+}
+
 // BRIEF.md M2's ~5Hz per-ward telemetry target: requested from the
 // autopilot on every (re)connect, and matches
 // WardManager::kDefaultPublishInterval (1000ms / kTelemetryRateHz).
 constexpr float kTelemetryRateHz = 5.0f;
 
-// Only autopilot this milestone connects to (SITL); AddWard carries no
-// autopilot-family field to derive this from.
-constexpr auto kAutopilotName = "PX4";
+// WardInfo.autopilot's real source: mavsdk::System::autopilot_type()
+// reads the family straight off the vehicle's own HEARTBEAT (no blocking
+// round trip, already-cached state), unlike query_firmware_version()
+// below. Returns "" for Autopilot::Unknown rather than guessing - a ward
+// whose family genuinely isn't known yet shouldn't claim to be either one
+// (karshipta#212 depends on this being real: its per-firmware parameter
+// name table is dead code if every ward always reports "PX4" regardless
+// of what's actually connected, which an earlier, now-removed hardcoded
+// stub here did).
+std::string autopilot_name(const mavsdk::Autopilot autopilot) {
+    switch (autopilot) {
+        case mavsdk::Autopilot::Px4:
+            return "PX4";
+        case mavsdk::Autopilot::ArduPilot:
+            return "ArduPilot";
+        case mavsdk::Autopilot::Unknown:
+            return "";
+    }
+    return "";
+}
 
 // Rejection reason for every upstream envelope from a viewer connection
 // (gateway issue #20). Fixed wording, not a formatted message: a viewer's
@@ -130,6 +169,9 @@ karshipta::v1::WardState build_ward_state(const std::string& ward_id,
         ward_manager_internal::to_proto_flight_mode(telemetry.get_flight_mode()));
     flight->set_armed(telemetry.is_armed());
     flight->set_in_air(telemetry.is_in_air());
+    flight->set_gyrometer_calibration_ok(telemetry.is_gyrometer_calibration_ok());
+    flight->set_accelerometer_calibration_ok(telemetry.is_accelerometer_calibration_ok());
+    flight->set_magnetometer_calibration_ok(telemetry.is_magnetometer_calibration_ok());
     state.set_health_ok(telemetry.is_health_ok());
     state.set_connected(connection.is_connected());
 
@@ -197,6 +239,46 @@ void emit_rejection_event(Transport& transport, const karshipta::v1::CommandAck&
     event->set_code("COMMAND_REJECTED");
     event->set_message(ack.message());
     transport.broadcast(serialize_envelope(envelope));
+}
+
+// Free-function counterparts for the log-file family (karshipta#249),
+// same reasoning as emit_command_ack/emit_rejection_event above:
+// make_log_executor()'s callbacks capture &transport_, never `this`, so
+// they call these instead of a WardManager member of the same name. Sent
+// to `client` only, never broadcast - a log listing or download is
+// meaningful just to whoever asked for it, the same reasoning GetParams/
+// SetParam already use.
+void emit_log_entry_list(Transport& transport, const Transport::ClientId client,
+                          const karshipta::v1::LogEntryList& response) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_log_entry_list() = response;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+void emit_download_log_file_ack(Transport& transport, const Transport::ClientId client,
+                                 const karshipta::v1::DownloadLogFileAck& ack) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_download_log_file_ack() = ack;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+void emit_log_file_chunk(Transport& transport, const Transport::ClientId client,
+                          const karshipta::v1::LogFileChunk& chunk) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_log_file_chunk() = chunk;
+    transport.send(client, serialize_envelope(envelope));
+}
+
+// Free-function counterpart for the calibration family (karshipta#248),
+// same reasoning as emit_log_entry_list above: make_calibration_executor()'s
+// callback captures &transport_, never `this`. Sent to `client` only,
+// never broadcast - a calibration run is meaningful just to whoever
+// started it.
+void emit_calibration_progress(Transport& transport, const Transport::ClientId client,
+                                const karshipta::v1::CalibrationProgress& progress) {
+    karshipta::v1::Envelope envelope;
+    *envelope.mutable_calibration_progress() = progress;
+    transport.send(client, serialize_envelope(envelope));
 }
 
 }  // namespace
@@ -299,6 +381,35 @@ std::unique_ptr<CommandExecutor> WardManager::make_executor(ManagedWard& ward) {
         });
 }
 
+std::unique_ptr<LogDownloadExecutor> WardManager::make_log_executor(ManagedWard& ward) {
+    // Same "capture &transport_, never `this`" reasoning as make_executor()
+    // above: this callback must stay safe to invoke even if a
+    // LogDownloadExecutor outlives WardManager itself.
+    Transport* transport = &transport_;
+    return std::make_unique<LogDownloadExecutor>(
+        *ward.actions,
+        [transport](const Transport::ClientId client, const karshipta::v1::LogEntryList& response) {
+            emit_log_entry_list(*transport, client, response);
+        },
+        [transport](const Transport::ClientId client, const karshipta::v1::DownloadLogFileAck& ack) {
+            emit_download_log_file_ack(*transport, client, ack);
+        },
+        [transport](const Transport::ClientId client, const karshipta::v1::LogFileChunk& chunk) {
+            emit_log_file_chunk(*transport, client, chunk);
+        });
+}
+
+std::unique_ptr<CalibrationExecutor> WardManager::make_calibration_executor(ManagedWard& ward) {
+    // Same "capture &transport_, never `this`" reasoning as make_executor()
+    // above.
+    Transport* transport = &transport_;
+    return std::make_unique<CalibrationExecutor>(
+        *ward.actions,
+        [transport](const Transport::ClientId client, const karshipta::v1::CalibrationProgress& progress) {
+            emit_calibration_progress(*transport, client, progress);
+        });
+}
+
 std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, bool should_persist) {
     if (cfg.ward_id.empty()) {
         return "ward_id is empty";
@@ -339,6 +450,8 @@ std::optional<std::string> WardManager::add_ward_impl(const WardConfig& cfg, boo
     managed->actions = std::move(actions);
     managed->mission = std::move(mission);
     managed->mission_importer = std::move(mission_importer);
+    managed->log_executor = make_log_executor(*managed);
+    managed->calibration_executor = make_calibration_executor(*managed);
     managed->executor = make_executor(*managed);
 
     std::lock_guard lock(wards_mutex_);
@@ -433,6 +546,33 @@ void WardManager::dispatch_command(const karshipta::v1::Command& command) {
     }
     executor->enqueue(command);
     clear_busy(ward);
+}
+
+void WardManager::push_geofence(const std::vector<karshipta::v1::Zone>& zones) {
+    auto data = build_geofence_data(zones);
+    {
+        std::lock_guard lock(geofence_mutex_);
+        cached_geofence_ = data;
+    }
+
+    // Snapshot-then-release, same shape run_publish_loop already uses:
+    // upload_geofence() is a blocking MAVSDK round trip per ward, so
+    // wards_mutex_ must not be held while it runs.
+    std::vector<std::shared_ptr<ManagedWard>> wards;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards.reserve(managed_wards_.size());
+        for (const auto& [id, ward] : managed_wards_) {
+            wards.push_back(ward);
+        }
+    }
+    for (const auto& ward : wards) {
+        const auto result = ward->actions->upload_geofence(data);
+        if (result != mavsdk::Geofence::Result::Success) {
+            spdlog::warn("geofence push to ward '{}' failed: {}", ward->config.ward_id,
+                         WardActions::result_name(result));
+        }
+    }
 }
 
 void WardManager::set_command_outcome_observer(CommandOutcomeObserver observer) {
@@ -562,6 +702,226 @@ void WardManager::handle_mission_download_request(
     clear_busy(ward);
 }
 
+karshipta::v1::ParamList WardManager::handle_get_params(
+    const karshipta::v1::GetParams& request) const {
+    karshipta::v1::ParamList response;
+    response.set_request_id(request.request_id());
+    response.set_ward_id(request.ward_id());
+
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("get_params rejected: unknown ward_id '{}'", request.ward_id());
+        response.set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+        response.set_message("unknown ward_id: " + request.ward_id());
+        return response;
+    }
+    // An unconnected ward's get_all_params() would just return an empty
+    // AllParams (WardActions::get_all_params()'s own doc comment) -
+    // indistinguishable from "this vehicle genuinely has zero parameters"
+    // unless checked explicitly here first.
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("get_params rejected: ward_id '{}' is not connected", request.ward_id());
+        response.set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+        response.set_message("ward is not connected");
+        return response;
+    }
+
+    const auto all_params = ward->actions->get_all_params();
+    response.mutable_params()->Reserve(
+        static_cast<int>(all_params.int_params.size() + all_params.float_params.size()));
+    for (const auto& int_param : all_params.int_params) {
+        auto* param = response.add_params();
+        param->set_name(int_param.name);
+        param->set_type(karshipta::v1::PARAM_TYPE_INT);
+        param->set_int_value(int_param.value);
+    }
+    for (const auto& float_param : all_params.float_params) {
+        auto* param = response.add_params();
+        param->set_name(float_param.name);
+        param->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+        param->set_float_value(float_param.value);
+    }
+    response.set_status(karshipta::v1::PARAM_LIST_STATUS_SUCCESS);
+    return response;
+}
+
+karshipta::v1::ParamAck WardManager::handle_set_param(const karshipta::v1::SetParam& request) const {
+    karshipta::v1::ParamAck ack;
+    ack.set_request_id(request.request_id());
+    ack.set_ward_id(request.ward_id());
+
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("set_param rejected: unknown ward_id '{}'", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("unknown ward_id: " + request.ward_id());
+        return ack;
+    }
+    // Request-shape check before the connection check below: whether this
+    // request even carries a param to set is independent of whether the
+    // ward happens to be connected right now, same ordering
+    // command_executor.cpp uses for its own "does this command carry what
+    // it needs" checks.
+    if (!request.has_param()) {
+        spdlog::warn("set_param rejected: ward_id '{}' sent no param", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("set_param has no param");
+        return ack;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("set_param rejected: ward_id '{}' is not connected", request.ward_id());
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message("ward is not connected");
+        return ack;
+    }
+
+    const auto& param = request.param();
+    mavsdk::Param::Result write_result;
+    switch (param.type()) {
+        case karshipta::v1::PARAM_TYPE_INT:
+            write_result = ward->actions->set_param_int(param.name(), param.int_value());
+            break;
+        case karshipta::v1::PARAM_TYPE_FLOAT:
+            write_result = ward->actions->set_param_float(param.name(), param.float_value());
+            break;
+        default:
+            spdlog::warn("set_param rejected: ward_id '{}' param '{}' has unspecified type",
+                         request.ward_id(), param.name());
+            ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+            ack.set_message("param has unspecified type");
+            return ack;
+    }
+    if (write_result != mavsdk::Param::Result::Success) {
+        ack.set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+        ack.set_message(WardActions::result_name(write_result));
+        return ack;
+    }
+
+    // Read back the value the vehicle actually stored - set_param_* returns
+    // only a Result, never the stored value (see handle_set_param()'s own
+    // header doc comment for why an echo of the request isn't good enough).
+    if (param.type() == karshipta::v1::PARAM_TYPE_INT) {
+        const auto [read_result, confirmed] = ward->actions->get_param_int(param.name());
+        if (read_result == mavsdk::Param::Result::Success) {
+            ack.mutable_param()->set_name(param.name());
+            ack.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_INT);
+            ack.mutable_param()->set_int_value(confirmed);
+        } else {
+            *ack.mutable_param() = param;
+        }
+    } else {
+        const auto [read_result, confirmed] = ward->actions->get_param_float(param.name());
+        if (read_result == mavsdk::Param::Result::Success) {
+            ack.mutable_param()->set_name(param.name());
+            ack.mutable_param()->set_type(karshipta::v1::PARAM_TYPE_FLOAT);
+            ack.mutable_param()->set_float_value(confirmed);
+        } else {
+            *ack.mutable_param() = param;
+        }
+    }
+    ack.set_status(karshipta::v1::PARAM_ACK_STATUS_SUCCESS);
+    return ack;
+}
+
+void WardManager::handle_get_log_entries(const Transport::ClientId client,
+                                         const karshipta::v1::GetLogEntries& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("get_log_entries rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::LogEntryList response;
+        response.set_request_id(request.request_id());
+        response.set_ward_id(request.ward_id());
+        response.set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+        response.set_message("unknown ward_id: " + request.ward_id());
+        emit_log_entry_list(transport_, client, response);
+        return;
+    }
+    // Same reasoning as handle_get_params(): an unconnected ward's
+    // get_entries() would otherwise just surface as a MAVSDK Timeout/
+    // NoSystem result later, a less clear reason than this upfront check.
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("get_log_entries rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::LogEntryList response;
+        response.set_request_id(request.request_id());
+        response.set_ward_id(request.ward_id());
+        response.set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+        response.set_message("ward is not connected");
+        emit_log_entry_list(transport_, client, response);
+        return;
+    }
+    ward->log_executor->enqueue_get_entries(client, request);
+}
+
+void WardManager::handle_download_log_file(const Transport::ClientId client,
+                                           const karshipta::v1::DownloadLogFile& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("download_log_file rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::DownloadLogFileAck ack;
+        ack.set_request_id(request.request_id());
+        ack.set_ward_id(request.ward_id());
+        ack.set_log_id(request.log_id());
+        ack.set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+        ack.set_message("unknown ward_id: " + request.ward_id());
+        emit_download_log_file_ack(transport_, client, ack);
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("download_log_file rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::DownloadLogFileAck ack;
+        ack.set_request_id(request.request_id());
+        ack.set_ward_id(request.ward_id());
+        ack.set_log_id(request.log_id());
+        ack.set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+        ack.set_message("ward is not connected");
+        emit_download_log_file_ack(transport_, client, ack);
+        return;
+    }
+    ward->log_executor->enqueue_download(client, request);
+}
+
+void WardManager::handle_start_calibration(const Transport::ClientId client,
+                                           const karshipta::v1::StartCalibration& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("start_calibration rejected: unknown ward_id '{}'", request.ward_id());
+        karshipta::v1::CalibrationProgress progress;
+        progress.set_request_id(request.request_id());
+        progress.set_ward_id(request.ward_id());
+        progress.set_calibration_type(request.calibration_type());
+        progress.set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+        progress.set_message("unknown ward_id: " + request.ward_id());
+        emit_calibration_progress(transport_, client, progress);
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("start_calibration rejected: ward_id '{}' is not connected", request.ward_id());
+        karshipta::v1::CalibrationProgress progress;
+        progress.set_request_id(request.request_id());
+        progress.set_ward_id(request.ward_id());
+        progress.set_calibration_type(request.calibration_type());
+        progress.set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+        progress.set_message("ward is not connected");
+        emit_calibration_progress(transport_, client, progress);
+        return;
+    }
+    ward->calibration_executor->enqueue_start(client, request);
+}
+
+void WardManager::handle_cancel_calibration(const Transport::ClientId client,
+                                            const karshipta::v1::CancelCalibration& request) const {
+    auto ward = find_shared_locked(request.ward_id());
+    if (ward == nullptr) {
+        spdlog::warn("cancel_calibration rejected: unknown ward_id '{}'", request.ward_id());
+        return;
+    }
+    if (!ward->connection->is_connected()) {
+        spdlog::warn("cancel_calibration rejected: ward_id '{}' is not connected", request.ward_id());
+        return;
+    }
+    ward->calibration_executor->cancel(client, request);
+}
+
 void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                                          const karshipta::v1::Envelope& envelope) {
     switch (envelope.payload_case()) {
@@ -633,6 +993,88 @@ void WardManager::reject_viewer_envelope(const Transport::ClientId client,
                                     kReadOnlySessionMessage);
             break;
         }
+        case karshipta::v1::Envelope::kGetParams: {
+            const auto& request = envelope.get_params();
+            spdlog::warn("viewer client {} attempted get_params on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope response_envelope;
+            auto* response = response_envelope.mutable_param_list();
+            response->set_request_id(request.request_id());
+            response->set_ward_id(request.ward_id());
+            response->set_status(karshipta::v1::PARAM_LIST_STATUS_REJECTED);
+            response->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: a param dump is a
+            // read-only response meaningful just to the requester, same
+            // reasoning handle_get_params()'s own caller (main.cpp) uses.
+            transport_.send(client, serialize_envelope(response_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kSetParam: {
+            const auto& request = envelope.set_param();
+            spdlog::warn("viewer client {} attempted set_param on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_param_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_status(karshipta::v1::PARAM_ACK_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.broadcast(serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kGetLogEntries: {
+            const auto& request = envelope.get_log_entries();
+            spdlog::warn("viewer client {} attempted get_log_entries on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope response_envelope;
+            auto* response = response_envelope.mutable_log_entry_list();
+            response->set_request_id(request.request_id());
+            response->set_ward_id(request.ward_id());
+            response->set_status(karshipta::v1::LOG_ENTRY_LIST_STATUS_REJECTED);
+            response->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: same reasoning as
+            // kGetParams above.
+            transport_.send(client, serialize_envelope(response_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kDownloadLogFile: {
+            const auto& request = envelope.download_log_file();
+            spdlog::warn("viewer client {} attempted download_log_file on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope ack_envelope;
+            auto* ack = ack_envelope.mutable_download_log_file_ack();
+            ack->set_request_id(request.request_id());
+            ack->set_ward_id(request.ward_id());
+            ack->set_log_id(request.log_id());
+            ack->set_status(karshipta::v1::LOG_DOWNLOAD_STATUS_REJECTED);
+            ack->set_message(kReadOnlySessionMessage);
+            transport_.send(client, serialize_envelope(ack_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kStartCalibration: {
+            const auto& request = envelope.start_calibration();
+            spdlog::warn("viewer client {} attempted start_calibration on ward_id '{}', rejecting",
+                         client, request.ward_id());
+            karshipta::v1::Envelope progress_envelope;
+            auto* progress = progress_envelope.mutable_calibration_progress();
+            progress->set_request_id(request.request_id());
+            progress->set_ward_id(request.ward_id());
+            progress->set_calibration_type(request.calibration_type());
+            progress->set_status(karshipta::v1::CALIBRATION_STATUS_REJECTED);
+            progress->set_message(kReadOnlySessionMessage);
+            // Sent only to this client, not broadcast: same reasoning as
+            // kGetLogEntries above.
+            transport_.send(client, serialize_envelope(progress_envelope));
+            break;
+        }
+        case karshipta::v1::Envelope::kCancelCalibration:
+            // No ack channel exists for Cancel even on the normal path
+            // (CalibrationExecutor::cancel()'s own doc comment) - a
+            // viewer's attempt gets the same silent-no-op treatment as a
+            // stale/mistargeted cancel from a real operator, just logged.
+            spdlog::warn("viewer client {} attempted cancel_calibration on ward_id '{}', ignoring",
+                         client, envelope.cancel_calibration().ward_id());
+            break;
         default:
             spdlog::warn("viewer client {} sent unexpected upstream payload kind {}, ignoring",
                          client, static_cast<int>(envelope.payload_case()));
@@ -1088,7 +1530,7 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
         info.set_ward_id(snapshot.ward_id);
         info.set_ward_class(snapshot.ward_class);
         if (snapshot.system) {
-            info.set_autopilot(kAutopilotName);
+            info.set_autopilot(autopilot_name(snapshot.system->autopilot_type()));
             info.set_mavlink_system_id(snapshot.system->get_system_id());
             info.set_firmware_version(query_firmware_version(snapshot.system));
         }
@@ -1543,8 +1985,25 @@ void WardManager::run_reconnect_loop(ManagedWard& ward, std::stop_token stop_tok
         spdlog::info("ward connected (system_id={})", ward.config.system_id);
         broadcast_link_event(ward.config.ward_id, /*connected=*/true);
         // PX4 forgets requested stream rates across a link drop, so this is
-        // re-requested on every reconnect, not just the first.
+        // re-requested on every reconnect, not just the first - same
+        // reasoning for the geofence push right below: there is no way to
+        // know whether this specific ward's FC still holds the last fence
+        // it was sent (a reboot, a parameter reset, or simply zones having
+        // changed while this ward was offline all clear it), so it is
+        // always re-sent on every reconnect too, not just the first.
         ward.telemetry->set_telemetry_rate(kTelemetryRateHz);
+        {
+            mavsdk::Geofence::GeofenceData geofence_data;
+            {
+                std::lock_guard lock(geofence_mutex_);
+                geofence_data = cached_geofence_;
+            }
+            const auto result = ward.actions->upload_geofence(geofence_data);
+            if (result != mavsdk::Geofence::Result::Success) {
+                spdlog::warn("geofence push to ward '{}' on reconnect failed: {}",
+                             ward.config.ward_id, WardActions::result_name(result));
+            }
+        }
 
         while (ward.connection->is_connected() && !stop_token.stop_requested()) {
             std::this_thread::sleep_for(kReconnectPollInterval);

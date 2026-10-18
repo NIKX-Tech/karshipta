@@ -123,26 +123,51 @@
 							</label>
 						{/each}
 					</div>
-					<div class="flex gap-1.5">
-						<input
-							type="number"
-							bind:value={newAltitudeMin}
-							placeholder="Alt min (m)"
-							class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-						/>
-						<input
-							type="number"
-							bind:value={newAltitudeMax}
-							placeholder="Alt max (m)"
-							class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs"
-						/>
+					<div class="mt-1.5 flex flex-col gap-1 border-t border-edge pt-2.5">
+						<span class="text-[10px] font-medium text-fg-muted">Altitude (optional)</span>
+						<div class="flex gap-1.5">
+							<label class="flex flex-1 flex-col-reverse gap-0.5 text-[10px] text-fg-muted">
+								<input
+									type="number"
+									bind:value={newAltitudeMin}
+									placeholder="none"
+									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs text-fg"
+								/>
+								Min (m)
+							</label>
+							<label class="flex flex-1 flex-col-reverse gap-0.5 text-[10px] text-fg-muted">
+								<input
+									type="number"
+									bind:value={newAltitudeMax}
+									placeholder="none"
+									class="w-full rounded border border-edge bg-ink px-1.5 py-1 text-xs text-fg"
+								/>
+								Max (m)
+							</label>
+						</div>
+						<span class="text-[10px] text-fg-muted">
+							Advisory only - leave blank for a boundary-only zone, or for a ward class with no
+							altitude (e.g. a generic GPS tracker).
+						</span>
 					</div>
 					<div class="flex gap-1.5">
 						<button type="submit" class="zones-tab-button-accent">Create</button>
-						<button type="button" class="zones-tab-button" onclick={() => (finishing = false)}>
-							Back
+						<button
+							type="button"
+							class="zones-tab-button"
+							title="Keep this shape and go back to adding/removing vertices"
+							onclick={() => (finishing = false)}
+						>
+							Edit shape
 						</button>
-						<button type="button" class="zones-tab-button" onclick={cancelDrawing}>Cancel</button>
+						<button
+							type="button"
+							class="zones-tab-button"
+							title="Discard this zone entirely, including the shape drawn so far"
+							onclick={cancelDrawing}
+						>
+							Cancel
+						</button>
 					</div>
 				</form>
 			{/if}
@@ -155,6 +180,10 @@
 		>
 			+ Draw Zone
 		</button>
+		<p class="text-[10px] text-fg-muted">
+			Keep-in/keep-out boundaries are enforced on every connected ward's autopilot. Altitude limits
+			are advisory only; they appear as a warning before upload, not a hard block.
+		</p>
 
 		{#if zoneStore.zoneIds.length === 0}
 			<p class="text-xs text-fg-muted">No zones yet.</p>
@@ -163,7 +192,7 @@
 				{#each zoneStore.zoneIds as zoneId (zoneId)}
 					{@const zone = zoneStore.zones[zoneId]}
 					{#if zone}
-						<div class="rounded border border-edge p-2">
+						<div class="rounded border border-edge p-2.5">
 							{#if editingZoneId === zoneId}
 								<form class="flex flex-col gap-1.5" onsubmit={submitEdit}>
 									<!-- svelte-ignore a11y_autofocus -->
@@ -187,19 +216,31 @@
 											</label>
 										{/each}
 									</div>
-									<div class="flex gap-1.5">
-										<input
-											type="number"
-											bind:value={editAltitudeMin}
-											placeholder="Alt min (m)"
-											class="w-full rounded border border-edge bg-ink px-1.5 py-0.5 text-[10px]"
-										/>
-										<input
-											type="number"
-											bind:value={editAltitudeMax}
-											placeholder="Alt max (m)"
-											class="w-full rounded border border-edge bg-ink px-1.5 py-0.5 text-[10px]"
-										/>
+									<div class="mt-1 flex flex-col gap-1 border-t border-edge pt-2">
+										<span class="text-[9px] font-medium text-fg-muted">Altitude (optional)</span>
+										<div class="flex gap-1.5">
+											<label class="flex flex-1 flex-col-reverse gap-0.5 text-[9px] text-fg-muted">
+												<input
+													type="number"
+													bind:value={editAltitudeMin}
+													placeholder="none"
+													class="w-full rounded border border-edge bg-ink px-1.5 py-0.5 text-[10px] text-fg"
+												/>
+												Min (m)
+											</label>
+											<label class="flex flex-1 flex-col-reverse gap-0.5 text-[9px] text-fg-muted">
+												<input
+													type="number"
+													bind:value={editAltitudeMax}
+													placeholder="none"
+													class="w-full rounded border border-edge bg-ink px-1.5 py-0.5 text-[10px] text-fg"
+												/>
+												Max (m)
+											</label>
+										</div>
+										<span class="text-[9px] text-fg-muted">
+											Advisory only - leave blank for a boundary-only zone.
+										</span>
 									</div>
 									<div class="flex gap-1.5">
 										<button type="submit" class="zones-tab-button-accent">Save</button>
@@ -213,44 +254,65 @@
 									</div>
 								</form>
 							{:else}
-								<div class="flex items-center gap-1.5">
-									<span
-										class="h-2 w-2 shrink-0 rounded-full"
-										style="background-color: {zoneTypeColor(zone.type)}"
-									></span>
-									<button
-										type="button"
-										class="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent"
-										onclick={() => startEdit(zone)}
-										title="Edit"
-									>
-										{zone.name}
-										<span class="font-mono text-[10px] text-fg-muted">
-											({zoneTypeLabel(zone.type)} &middot; {zone.vertices.length} pts)
-										</span>
-									</button>
-									<button
-										type="button"
-										class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-critical/15 hover:text-critical"
-										aria-label="Delete {zone.name}"
-										title="Delete zone"
-										onclick={() => (deleteConfirmId = zoneId)}
-									>
-										<svg
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.75"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-											aria-hidden="true"
+								<div class="flex flex-col gap-1.5">
+									<div class="flex items-start justify-between gap-2">
+										<button
+											type="button"
+											class="flex min-w-0 items-center gap-1.5 text-left hover:text-accent"
+											onclick={() => startEdit(zone)}
+											title="Edit"
 										>
-											<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
-											<path d="M10 11v6M14 11v6" />
-										</svg>
-									</button>
+											<span
+												class="h-2 w-2 shrink-0 rounded-full"
+												style="background-color: {zoneTypeColor(zone.type)}"
+											></span>
+											<span class="truncate text-xs font-medium">{zone.name}</span>
+										</button>
+										<button
+											type="button"
+											class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-muted hover:bg-critical/15 hover:text-critical"
+											aria-label="Delete {zone.name}"
+											title="Delete zone"
+											onclick={() => (deleteConfirmId = zoneId)}
+										>
+											<svg
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.75"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												aria-hidden="true"
+											>
+												<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
+												<path d="M10 11v6M14 11v6" />
+											</svg>
+										</button>
+									</div>
+									<dl
+										class="grid grid-cols-[4.5rem_1fr] gap-x-2 gap-y-1 pl-3.5 font-mono text-[10px]"
+									>
+										<dt class="text-fg-muted">Type</dt>
+										<dd>{zoneTypeLabel(zone.type)}</dd>
+										<dt class="text-fg-muted">Shape</dt>
+										<dd>{zone.vertices.length} points</dd>
+										<dt class="text-fg-muted">Altitude</dt>
+										<dd>
+											{#if zone.altitudeMinM !== undefined || zone.altitudeMaxM !== undefined}
+												{zone.altitudeMinM ?? 'no min'}&ndash;{zone.altitudeMaxM ?? 'no max'} m
+												<span
+													class="text-fg-muted"
+													title="Altitude limits are advisory only; the boundary shape above is enforced, altitude is not."
+												>
+													(advisory only)
+												</span>
+											{:else}
+												<span class="text-fg-muted">not set</span>
+											{/if}
+										</dd>
+									</dl>
 								</div>
 							{/if}
 						</div>
@@ -266,7 +328,7 @@
 	{@const zone = zoneStore.zones[targetZoneId]}
 	<ConfirmDialog
 		title="Delete {zone?.name ?? targetZoneId}"
-		body="This removes the zone. It stops being checked against future missions immediately."
+		body="This removes the zone, including its enforced boundary on every connected ward. Its autopilot geofence is re-pushed immediately without this zone."
 		confirmLabel="Delete"
 		onconfirm={() => {
 			zoneStore.requestDeleteZone(targetZoneId);
