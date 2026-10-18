@@ -36,6 +36,14 @@ import {
 	type WardMissionState,
 	type Zone
 } from '$lib/gen/karshipta/v1/fleet';
+import {
+	ParamAckStatus,
+	ParamListStatus,
+	ParamType,
+	type GetParams,
+	type Param,
+	type SetParam
+} from '$lib/gen/karshipta/v1/parameter';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 import type { LatLon } from '$lib/geolocation';
@@ -223,6 +231,38 @@ interface SimWard {
 	patrolling: boolean;
 	target: Target | undefined;
 	missionRun: MissionRun | undefined;
+	/** demo stand-in for a real MAVLink parameter set (karshipta#212),
+	 * keyed by raw PARAM_ID. Plausible-looking PX4 values for the curated
+	 * tier-1 fields only, not a claim of real firmware defaults - every
+	 * demo ward reports itself as PX4 (see WardInfo below), so only PX4
+	 * names need seeding here. */
+	params: Map<string, Param>;
+}
+
+function defaultDemoParams(): Map<string, Param> {
+	const intParam = (name: string, intValue: number): Param => ({
+		name,
+		type: ParamType.PARAM_TYPE_INT,
+		value: { $case: 'intValue', intValue }
+	});
+	const floatParam = (name: string, floatValue: number): Param => ({
+		name,
+		type: ParamType.PARAM_TYPE_FLOAT,
+		value: { $case: 'floatValue', floatValue }
+	});
+	return new Map(
+		[
+			floatParam('RTL_RETURN_ALT', 60),
+			floatParam('BAT_LOW_THR', 0.15),
+			floatParam('BAT_CRIT_THR', 0.07),
+			floatParam('BAT_EMERGEN_THR', 0.05),
+			intParam('COM_LOW_BAT_ACT', 2),
+			floatParam('COM_RC_LOSS_T', 0.5),
+			intParam('NAV_RCL_ACT', 2),
+			floatParam('COM_DL_LOSS_T', 10),
+			intParam('NAV_DLL_ACT', 2)
+		].map((param) => [param.name, param])
+	);
 }
 
 interface MissionRun {
@@ -254,7 +294,8 @@ function initialWard(spec: WardSpec): SimWard {
 		thetaRad: spec.phaseRad,
 		patrolling: true,
 		target: undefined,
-		missionRun: undefined
+		missionRun: undefined,
+		params: defaultDemoParams()
 	};
 }
 
@@ -406,6 +447,12 @@ export class FakeGateway implements DemoEngine {
 				break;
 			case 'deleteZone':
 				this.handleDeleteZone(envelope.payload.deleteZone);
+				break;
+			case 'getParams':
+				this.handleGetParams(envelope.payload.getParams);
+				break;
+			case 'setParam':
+				this.handleSetParam(envelope.payload.setParam);
 				break;
 			default:
 				console.warn(
@@ -918,6 +965,96 @@ export class FakeGateway implements DemoEngine {
 			'zone deleted',
 			request.zoneId
 		);
+	}
+
+	private handleGetParams(request: GetParams): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.onEnvelope({
+				payload: {
+					$case: 'paramList',
+					paramList: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						status: ParamListStatus.PARAM_LIST_STATUS_REJECTED,
+						message: `unknown ward_id: ${request.wardId}`,
+						params: []
+					}
+				}
+			});
+			return;
+		}
+		this.onEnvelope({
+			payload: {
+				$case: 'paramList',
+				paramList: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					status: ParamListStatus.PARAM_LIST_STATUS_SUCCESS,
+					message: '',
+					params: [...ward.params.values()]
+				}
+			}
+		});
+	}
+
+	private handleSetParam(request: SetParam): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`,
+				undefined
+			);
+			return;
+		}
+		if (!request.param) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				'set_param has no param',
+				undefined
+			);
+			return;
+		}
+		// Demo-engine stand-in for the real gateway's type-mismatch rejection
+		// (MAVSDK's Param::Result::WrongType): only accept a write for a
+		// param already seeded here with the same type, same as a real
+		// vehicle rejecting a write against its own declared parameter type.
+		const existing = ward.params.get(request.param.name);
+		if (!existing || existing.type !== request.param.type) {
+			this.paramAck(
+				request.requestId,
+				request.wardId,
+				ParamAckStatus.PARAM_ACK_STATUS_REJECTED,
+				`unknown parameter or type mismatch: ${request.param.name}`,
+				undefined
+			);
+			return;
+		}
+		ward.params.set(request.param.name, request.param);
+		this.paramAck(
+			request.requestId,
+			request.wardId,
+			ParamAckStatus.PARAM_ACK_STATUS_SUCCESS,
+			'',
+			request.param
+		);
+	}
+
+	private paramAck(
+		requestId: string,
+		wardId: string,
+		status: ParamAckStatus,
+		message: string,
+		param: Param | undefined
+	): void {
+		this.onEnvelope({
+			payload: { $case: 'paramAck', paramAck: { requestId, wardId, status, message, param } }
+		});
 	}
 
 	private zoneAck(requestId: string, status: ZoneAckStatus, message: string, zoneId: string): void {

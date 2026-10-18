@@ -58,9 +58,26 @@ mavsdk::Geofence::GeofenceData build_geofence_data(const std::vector<karshipta::
 // WardManager::kDefaultPublishInterval (1000ms / kTelemetryRateHz).
 constexpr float kTelemetryRateHz = 5.0f;
 
-// Only autopilot this milestone connects to (SITL); AddWard carries no
-// autopilot-family field to derive this from.
-constexpr auto kAutopilotName = "PX4";
+// WardInfo.autopilot's real source: mavsdk::System::autopilot_type()
+// reads the family straight off the vehicle's own HEARTBEAT (no blocking
+// round trip, already-cached state), unlike query_firmware_version()
+// below. Returns "" for Autopilot::Unknown rather than guessing - a ward
+// whose family genuinely isn't known yet shouldn't claim to be either one
+// (karshipta#212 depends on this being real: its per-firmware parameter
+// name table is dead code if every ward always reports "PX4" regardless
+// of what's actually connected, which an earlier, now-removed hardcoded
+// stub here did).
+std::string autopilot_name(const mavsdk::Autopilot autopilot) {
+    switch (autopilot) {
+        case mavsdk::Autopilot::Px4:
+            return "PX4";
+        case mavsdk::Autopilot::ArduPilot:
+            return "ArduPilot";
+        case mavsdk::Autopilot::Unknown:
+            return "";
+    }
+    return "";
+}
 
 // Rejection reason for every upstream envelope from a viewer connection
 // (gateway issue #20). Fixed wording, not a formatted message: a viewer's
@@ -1287,7 +1304,7 @@ void WardManager::send_ward_info(Transport::ClientId client) const {
         info.set_ward_id(snapshot.ward_id);
         info.set_ward_class(snapshot.ward_class);
         if (snapshot.system) {
-            info.set_autopilot(kAutopilotName);
+            info.set_autopilot(autopilot_name(snapshot.system->autopilot_type()));
             info.set_mavlink_system_id(snapshot.system->get_system_id());
             info.set_firmware_version(query_firmware_version(snapshot.system));
         }

@@ -1,6 +1,6 @@
 const COLLAPSED_STORAGE_KEY = 'karshipta.rightPanelCollapsed';
 
-export type RightPanelTab = 'telemetry' | 'control' | 'mission' | 'zones';
+export type RightPanelTab = 'telemetry' | 'control' | 'mission' | 'zones' | 'configuration';
 
 function readStoredCollapsed(): boolean {
 	if (typeof localStorage === 'undefined') return true;

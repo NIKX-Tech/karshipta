@@ -7,6 +7,7 @@
 	import WardControlTab from '$lib/components/ward-control-tab.svelte';
 	import MissionTab from '$lib/components/mission-tab.svelte';
 	import ZonesTab from '$lib/components/zones-tab.svelte';
+	import ConfigurationTab from '$lib/components/configuration-tab.svelte';
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 	import UnitsToggle from '$lib/components/units-toggle.svelte';
 
@@ -19,19 +20,21 @@
 	// The icon rail stays reachable regardless of whether a ward is
 	// selected, which is the whole point of this restructure. Telemetry and
 	// Control used to be one "Ward" tab - split once RTL/Set Home/the
-	// planned Configuration content made that single scrollable tab too
-	// tall (confirmed live). WardStatusStrip (below) stays visible above
-	// every one of these tabs regardless of which is active, so at-a-glance
+	// Configuration content made that single scrollable tab too tall
+	// (confirmed live). WardStatusStrip (below) stays visible above every
+	// one of these tabs regardless of which is active, so at-a-glance
 	// telemetry is never actually hidden by this split - only the deeper
 	// detail is tab-gated. Fleet management itself lives in the left rail
 	// (alongside the ward list it groups); Mission is for assigning a
 	// mission to a Fleet or an ad-hoc set of wards; Zones is the
-	// safety-area drawing tool.
+	// safety-area drawing tool; Configuration is tier-1 safety-critical
+	// MAVLink parameter read/write (karshipta#212) - flight wards only.
 	const TABS: TabItem[] = [
 		{ id: 'telemetry', label: 'Telemetry' },
 		{ id: 'control', label: 'Control' },
 		{ id: 'mission', label: 'Missions' },
-		{ id: 'zones', label: 'Zones' }
+		{ id: 'zones', label: 'Zones' },
+		{ id: 'configuration', label: 'Configuration' }
 	];
 
 	// Auto-switch to the Telemetry tab and auto-expand the moment selection
@@ -135,6 +138,20 @@
 			>
 				<ZonesTab />
 			</div>
+
+			<div
+				role="tabpanel"
+				id="tabpanel-configuration"
+				aria-labelledby="tab-configuration"
+				class="min-h-0 flex-1 overflow-y-auto p-3"
+				hidden={rightPanelUi.activeTab !== 'configuration'}
+			>
+				{#if fleet.selectedWardId}
+					<ConfigurationTab wardId={fleet.selectedWardId} />
+				{:else}
+					<p class="text-xs text-fg-muted">Select a ward to see its configuration.</p>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -170,6 +187,9 @@
 						<line x1="18" y1="12" x2="22" y2="12" />
 					</svg>
 				{:else if tab.id === 'control'}
+					<!-- A retro arcade-style joystick: wide flat base, tapered boot,
+					     prominent ball grip - reads as "fly this thing right now,"
+					     distinct from Configuration's sliders (stored settings) below. -->
 					<svg
 						width="16"
 						height="16"
@@ -181,12 +201,10 @@
 						stroke-linejoin="round"
 						aria-hidden="true"
 					>
-						<line x1="3" y1="6" x2="21" y2="6" />
-						<circle cx="8" cy="6" r="2" fill="currentColor" stroke="none" />
-						<line x1="3" y1="12" x2="21" y2="12" />
-						<circle cx="16" cy="12" r="2" fill="currentColor" stroke="none" />
-						<line x1="3" y1="18" x2="21" y2="18" />
-						<circle cx="11" cy="18" r="2" fill="currentColor" stroke="none" />
+						<rect x="4" y="17" width="16" height="3.5" rx="1" />
+						<path d="M9 17c0-2.8 1-4.3 3-4.3s3 1.5 3 4.3" />
+						<line x1="12" y1="12.7" x2="12" y2="7" />
+						<circle cx="12" cy="4.5" r="2.5" fill="currentColor" stroke="none" />
 					</svg>
 				{:else if tab.id === 'mission'}
 					<svg
@@ -219,6 +237,27 @@
 						aria-hidden="true"
 					>
 						<path d="M12 2 21 7.5v9L12 22l-9-5.5v-9Z" />
+					</svg>
+				{:else if tab.id === 'configuration'}
+					<!-- Sliders - a gear read as "whole-app settings" in testing,
+					     which this isn't: it's per-ward stored parameter values. -->
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<line x1="3" y1="6" x2="21" y2="6" />
+						<circle cx="8" cy="6" r="2" fill="currentColor" stroke="none" />
+						<line x1="3" y1="12" x2="21" y2="12" />
+						<circle cx="16" cy="12" r="2" fill="currentColor" stroke="none" />
+						<line x1="3" y1="18" x2="21" y2="18" />
+						<circle cx="11" cy="18" r="2" fill="currentColor" stroke="none" />
 					</svg>
 				{/if}
 			{/snippet}
