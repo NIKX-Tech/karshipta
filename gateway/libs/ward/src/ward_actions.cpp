@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <future>
 #include <sstream>
 
 // fmt::streamed needs fmt 9 (Ubuntu 22.04's spdlog bundles fmt 8); one
@@ -72,6 +73,14 @@ std::string WardActions::result_name(const mavsdk::Param::Result result) {
     return stream.str();
 }
 
+// LogFiles::Result's operator<< is exported by the linked build (confirmed,
+// same as Geofence::Result/Param::Result) - the normal pattern applies.
+std::string WardActions::result_name(const mavsdk::LogFiles::Result result) {
+    std::ostringstream stream;
+    stream << result;
+    return stream.str();
+}
+
 WardActions::WardActions(WardConnection& connection) : connection_(connection) {}
 
 bool WardActions::ensure_action() const {
@@ -114,6 +123,16 @@ bool WardActions::ensure_param() const {
     return true;
 }
 
+bool WardActions::ensure_log_files() const {
+    std::lock_guard lock(init_mutex_);
+    if (log_files_) return true;
+    if (!connection_.is_connected()) return false;
+    mavsdk_keepalive_ = connection_.get_mavsdk();
+    log_files_ = std::make_unique<mavsdk::LogFiles>(connection_.get_system());
+    spdlog::info("log files plugin created");
+    return true;
+}
+
 mavsdk::Action::Result WardActions::log_result(const std::string& label,
                                                   const mavsdk::Action::Result result) {
     if (result != mavsdk::Action::Result::Success) {
@@ -147,6 +166,16 @@ mavsdk::Geofence::Result WardActions::log_result(const std::string& label,
 mavsdk::Param::Result WardActions::log_result(const std::string& label,
                                                const mavsdk::Param::Result result) {
     if (result != mavsdk::Param::Result::Success) {
+        spdlog::error("{} failed: {}", label, result_name(result));
+        return result;
+    }
+    spdlog::info("{} succeeded", label);
+    return result;
+}
+
+mavsdk::LogFiles::Result WardActions::log_result(const std::string& label,
+                                                  const mavsdk::LogFiles::Result result) {
+    if (result != mavsdk::LogFiles::Result::Success) {
         spdlog::error("{} failed: {}", label, result_name(result));
         return result;
     }
@@ -301,4 +330,35 @@ mavsdk::Param::Result WardActions::set_param_float(const std::string& name, cons
     if (!ensure_param()) return mavsdk::Param::Result::ConnectionError;
     return log_result("set param '" + name + "' to " + std::to_string(value),
                        param_->set_param_float(name, value));
+}
+
+std::pair<mavsdk::LogFiles::Result, std::vector<mavsdk::LogFiles::Entry>>
+WardActions::get_log_entries() const {
+    if (!ensure_log_files()) return {mavsdk::LogFiles::Result::NoSystem, {}};
+    const auto [result, entries] = log_files_->get_entries();
+    log_result("get log entries", result);
+    return {result, entries};
+}
+
+mavsdk::LogFiles::Result WardActions::download_log_file(const mavsdk::LogFiles::Entry& entry,
+                                                          const std::string& local_path) const {
+    if (!ensure_log_files()) return mavsdk::LogFiles::Result::NoSystem;
+    // Bridges download_log_file_async() (no blocking counterpart in this
+    // MAVSDK version) to a blocking call: the callback fires repeatedly
+    // with Result::Next + a 0-1 progress fraction while the transfer is
+    // in flight, then exactly once more with the terminal Result
+    // (Success or a failure code) - only that terminal call resolves the
+    // promise, every Next is discarded. This method reports no progress
+    // of its own; LogDownloadExecutor (the only caller) only needs the
+    // final outcome, not incremental updates.
+    auto result_promise = std::make_shared<std::promise<mavsdk::LogFiles::Result>>();
+    auto result_future = result_promise->get_future();
+    log_files_->download_log_file_async(
+        entry, local_path,
+        [result_promise](const mavsdk::LogFiles::Result result, mavsdk::LogFiles::ProgressData) {
+            if (result == mavsdk::LogFiles::Result::Next) return;
+            result_promise->set_value(result);
+        });
+    const auto result = result_future.get();
+    return log_result("download log file id=" + std::to_string(entry.id), result);
 }

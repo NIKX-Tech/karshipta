@@ -3,6 +3,7 @@
 
 #include <mavsdk/plugins/action/action.h>
 #include <mavsdk/plugins/geofence/geofence.h>
+#include <mavsdk/plugins/log_files/log_files.h>
 #include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
 #include <mavsdk/plugins/param/param.h>
 
@@ -11,20 +12,22 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "ward_connection.h"
 
 // Wraps MAVSDK's Action plugin (plus MavlinkPassthrough for the one command
 // Action doesn't cover, see set_home_position below, Geofence for
-// upload_geofence, and Param for get_all_params/get_param_*/set_param_*)
-// against exactly one connected ward. Scoped to precisely the commands
+// upload_geofence, Param for get_all_params/get_param_*/set_param_*, and
+// LogFiles for get_log_entries/download_log_file) against exactly one
+// connected ward. Scoped to precisely the commands
 // proto/karshipta/v1/command.proto's Command.action oneof can carry
 // (ArmCommand, DisarmCommand, TakeoffCommand, LandCommand,
 // ReturnToLaunchCommand, GotoCommand, SetHomeCommand), plus the
-// WardManager-driven geofence push (karshipta#247) and parameter access
-// (karshipta#211, also WardManager-driven, not Command-shaped - see
-// GetParams/SetParam below) - nothing here exists ahead of a schema field
-// or a documented, scoped feature for it.
+// WardManager-driven geofence push (karshipta#247), parameter access
+// (karshipta#211), and flight log download (karshipta#249) - all
+// WardManager-driven, not Command-shaped - nothing here exists ahead of a
+// schema field or a documented, scoped feature for it.
 class WardActions {
    public:
     // Binds this wrapper to a connection; does not create the Action plugin yet
@@ -50,6 +53,9 @@ class WardActions {
     // WardManager must surface this text as-is in ParamAck.message, never
     // collapse it to a bare "rejected" (karshipta#211).
     static std::string result_name(mavsdk::Param::Result result);
+    // Overload for LogFiles' own Result type. Its operator<< is exported
+    // (confirmed, same as Geofence::Result/Param::Result) - normal pattern.
+    static std::string result_name(mavsdk::LogFiles::Result result);
 
     // Implements ArmCommand. Arms the ward (motors become live). Returns a
     // failure Result if failsafe is active or pre-arm checks have not passed.
@@ -146,6 +152,24 @@ class WardActions {
     // Float counterpart to set_param_int(), same contract.
     [[nodiscard]] mavsdk::Param::Result set_param_float(const std::string& name,
                                                          float value) const;
+    // Implements GetLogEntries (karshipta#249). Blocking metadata fetch, no
+    // file transfer - same "direct, synchronous" treatment as
+    // get_all_params() above, not routed through a worker thread the way
+    // download_log_file() below must be.
+    [[nodiscard]] std::pair<mavsdk::LogFiles::Result, std::vector<mavsdk::LogFiles::Entry>>
+    get_log_entries() const;
+    // Implements DownloadLogFile (karshipta#249). Writes the complete log
+    // to local_path on the gateway's own filesystem. MAVSDK only exposes
+    // this as download_log_file_async() (no blocking counterpart, unlike
+    // get_entries()); this bridges it to a blocking call via
+    // std::promise/future, resolved only on the terminal callback
+    // invocation (Result::Success or a failure code) - every earlier
+    // Result::Next progress update is discarded, this method reports no
+    // progress of its own. A real MAVLink file transfer, seconds to tens
+    // of seconds for a real log - the caller (a dedicated worker thread,
+    // never the network thread) must already expect to block here.
+    [[nodiscard]] mavsdk::LogFiles::Result download_log_file(const mavsdk::LogFiles::Entry& entry,
+                                                              const std::string& local_path) const;
 
    private:
     // The connection this action wrapper sends commands through. Must outlive this object.
@@ -166,15 +190,19 @@ class WardActions {
     // The Param plugin, lazily constructed the same way as action_ (see
     // ensure_param()) - only get_all_params/get_param_*/set_param_* use this.
     mutable std::unique_ptr<mavsdk::Param> param_;
+    // The LogFiles plugin, lazily constructed the same way as action_ (see
+    // ensure_log_files()) - only get_log_entries/download_log_file use this.
+    mutable std::unique_ptr<mavsdk::LogFiles> log_files_;
 
     // Serializes the lazy init in ensure_action()/ensure_mavlink_passthrough()/
-    // ensure_geofence()/ensure_param(): the CommandExecutor worker,
-    // WardManager's own zone-push and parameter calls, and WardManager's
+    // ensure_geofence()/ensure_param()/ensure_log_files(): the
+    // CommandExecutor worker, WardManager's own zone-push and parameter
+    // calls, the LogDownloadExecutor worker, and WardManager's
     // reconnect_worker threads can all trigger a first creation
     // concurrently. Once created, action_/mavlink_passthrough_/geofence_/
-    // param_ are never reset, so reads after a successful ensure_*() need
-    // no lock. Shared across all four: none of them are ever constructed
-    // concurrently with each other either.
+    // param_/log_files_ are never reset, so reads after a successful
+    // ensure_*() need no lock. Shared across all five: none of them are
+    // ever constructed concurrently with each other either.
     mutable std::mutex init_mutex_;
 
     // Lazily creates `action_` the first time it's needed. Returns false if
@@ -187,6 +215,8 @@ class WardActions {
     bool ensure_geofence() const;
     // Lazily creates `param_`, same contract as ensure_action().
     bool ensure_param() const;
+    // Lazily creates `log_files_`, same contract as ensure_action().
+    bool ensure_log_files() const;
     // Logs the outcome of a command already sent to `action_` and passes the
     // Result through unchanged, so the caller (eventually the M3 CommandAck
     // path) keeps the reason a bool would have erased.
@@ -201,6 +231,9 @@ class WardActions {
     // Overload for Param::Result, same contract as log_result above.
     static mavsdk::Param::Result log_result(const std::string& label,
                                              mavsdk::Param::Result result);
+    // Overload for LogFiles::Result, same contract as log_result above.
+    static mavsdk::LogFiles::Result log_result(const std::string& label,
+                                                mavsdk::LogFiles::Result result);
 };
 
 #endif  // KARSHIPTA_GATEWAY_WARD_ACTIONS_H

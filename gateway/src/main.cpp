@@ -304,6 +304,19 @@ int main() {
                 transport->broadcast(serialize_envelope(ack_envelope));
                 break;
             }
+            case karshipta::v1::Envelope::kGetLogEntries:
+                // Unlike GetParams above, the result does not come back
+                // here: WardManager queues this onto the ward's own
+                // LogDownloadExecutor worker thread (karshipta#249), which
+                // sends the LogEntryList to `client` itself once ready.
+                ward_manager->handle_get_log_entries(client, envelope.get_log_entries());
+                break;
+            case karshipta::v1::Envelope::kDownloadLogFile:
+                // Same queued shape as kGetLogEntries above: the accept/
+                // reject ack and every chunk are sent to `client` later,
+                // from the worker thread.
+                ward_manager->handle_download_log_file(client, envelope.download_log_file());
+                break;
 #endif  // KARSHIPTA_GATEWAY_ENABLE_MAVLINK
             case karshipta::v1::Envelope::kCreateFleet: {
                 const auto ack = fleet_manager->handle_create_fleet(envelope.create_fleet());

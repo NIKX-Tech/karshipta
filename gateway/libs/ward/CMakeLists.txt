@@ -5,6 +5,7 @@ add_library(ward
         src/ward_mission.cpp
         src/mission_importer.cpp
         src/command_executor.cpp
+        src/log_download_executor.cpp
         src/ward_manager.cpp
 )
 
