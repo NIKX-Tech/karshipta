@@ -56,26 +56,26 @@ param ID** · **Implemented** (karshipta#212's shipped tier-1 panel) ·
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Fence breach action | `GF_ACTION` | `FENCE_ACTION` | No | What happens when the vehicle crosses the boundary karshipta#247 already enforces as a real MAVSDK geofence - the natural next addition, since the shape is already pushed but what happens on breach isn't surfaced yet. |
+| Fence breach action | `GF_ACTION` | `FENCE_ACTION` | No (karshipta#258) | What happens when the vehicle crosses the boundary karshipta#247 already enforces as a real MAVSDK geofence - the natural next addition, since the shape is already pushed but what happens on breach isn't surfaced yet. |
 | Fence enable | implicit (set via `GF_ACTION` ≠ none) | `FENCE_ENABLE` | No | ArduPilot gates the whole feature behind one enable flag; PX4 has no separate enable, a 0 action effectively disables it. |
 | Max horizontal distance/radius | `GF_MAX_HOR_DIST` | `FENCE_RADIUS` | No | Meters on both. 0 disables on PX4. This is the shape karshipta#247 already pushes as a polygon - these legacy cylinder params are PX4/ArduPilot's own built-in fallback fence, separate from (and possibly redundant with) our own geofence push. Worth confirming how the two interact before building a UI for this row. |
 | Max altitude | `GF_MAX_VER_DIST` | `FENCE_ALT_MAX` | No | Meters. The altitude-enforcement gap tracked separately as karshipta#251. |
-| Flight termination circuit breaker | `CBRK_FLIGHTTERM` | - | No | Must be explicitly reset for `GF_ACTION=Terminate` to actually kill the vehicle - a safety interlock on top of the action itself, not optional to skip if ever exposing Terminate as a selectable action. |
+| Flight termination circuit breaker | `CBRK_FLIGHTTERM` | - | No (karshipta#258) | Must be explicitly reset for `GF_ACTION=Terminate` to actually kill the vehicle - a safety interlock on top of the action itself, not optional to skip if ever exposing Terminate as a selectable action. |
 
 ## EKF / position failsafe
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Position-loss failsafe action | `COM_POSCTL_NAVL` | `FS_EKF_ACTION` | No | PX4's exact current-version semantics are murky - a v1.16 forum report describes behavior diverging from the documented description. Re-verify directly against GetParams on a real vehicle before building this, not just this table. |
-| EKF failsafe threshold | `COM_POS_FS_EPH` (position) | `FS_EKF_THRESH` | No | PX4 splits this into several distinct eph/epv/evh thresholds per failure mode; ArduPilot uses one 0-1 "variance" threshold (default 0.8) covering compass/position/velocity together. Not a clean 1:1 mapping - treat as a cluster of PX4 parameters against ArduPilot's one. |
-| Disable position-accuracy checks | `CBRK_VELPOSERR` | - | No | A circuit breaker, not a tunable threshold - disables the check family entirely. High-risk to expose without a strong warning. |
+| Position-loss failsafe action | `COM_POSCTL_NAVL` | `FS_EKF_ACTION` | No (karshipta#259) | PX4's exact current-version semantics are murky - a v1.16 forum report describes behavior diverging from the documented description. Re-verify directly against GetParams on a real vehicle before building this, not just this table. |
+| EKF failsafe threshold | `COM_POS_FS_EPH` (position) | `FS_EKF_THRESH` | No (karshipta#259) | PX4 splits this into several distinct eph/epv/evh thresholds per failure mode; ArduPilot uses one 0-1 "variance" threshold (default 0.8) covering compass/position/velocity together. Not a clean 1:1 mapping - treat as a cluster of PX4 parameters against ArduPilot's one. |
+| Disable position-accuracy checks | `CBRK_VELPOSERR` | - | No (karshipta#259) | A circuit breaker, not a tunable threshold - disables the check family entirely. High-risk to expose without a strong warning. |
 
 ## Arming checks
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Arming checks enabled | multiple `COM_ARM_*` flags (no single bitmask) | `ARMING_CHECK` | No | Structurally different: PX4 spreads this across many individual boolean-ish parameters (`COM_ARM_WO_GPS`, `COM_ARM_EKF_POS`, `COM_ARM_EKF_HGT`, `COM_ARM_EKF_VEL`, more not enumerated here), ArduPilot uses one bitmask parameter. Exposing ArduPilot's as a raw integer (same "don't decode" treatment as failsafe actions) is straightforward; PX4 needs its own per-flag UI, a materially bigger piece of work, not a drop-in parallel. |
-| Arming required before flight | - | `ARMING_REQUIRE` | No | ArduPilot-specific; PX4 has no equivalent toggle (arming is always required). |
+| Arming checks enabled | multiple `COM_ARM_*` flags (no single bitmask) | `ARMING_CHECK` | No (karshipta#260) | Structurally different: PX4 spreads this across many individual boolean-ish parameters (`COM_ARM_WO_GPS`, `COM_ARM_EKF_POS`, `COM_ARM_EKF_HGT`, `COM_ARM_EKF_VEL`, more not enumerated here), ArduPilot uses one bitmask parameter. Exposing ArduPilot's as a raw integer (same "don't decode" treatment as failsafe actions) is straightforward; PX4 needs its own per-flag UI, a materially bigger piece of work, not a drop-in parallel. |
+| Arming required before flight | - | `ARMING_REQUIRE` | No (karshipta#260) | ArduPilot-specific; PX4 has no equivalent toggle (arming is always required). |
 
 ## PID - rate gains (inner loop)
 
