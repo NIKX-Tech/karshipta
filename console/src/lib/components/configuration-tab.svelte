@@ -4,6 +4,7 @@
 	import {
 		CURATED_FIELDS,
 		FIELD_GROUP_LABELS,
+		FIELD_GROUP_WARNINGS,
 		bindingFor,
 		type FieldGroup
 	} from '$lib/params/param-spec';
@@ -32,7 +33,15 @@
 		return param.value.$case === 'intValue' ? param.value.intValue : param.value.floatValue;
 	}
 
-	const groups: FieldGroup[] = ['rtl', 'battery', 'rcLoss', 'dataLinkLoss'];
+	const groups: FieldGroup[] = [
+		'rtl',
+		'battery',
+		'rcLoss',
+		'dataLinkLoss',
+		'pidRoll',
+		'pidPitch',
+		'pidYaw'
+	];
 
 	function refresh() {
 		fleet.requestGetParams(wardId);
@@ -50,6 +59,25 @@
 			fetchedForWard = wardId;
 			refresh();
 		}
+	});
+
+	// Which group's warning bubble is open, if any - a click/tap toggles
+	// it (native title= alone covers hover but is unreliable-to-absent on
+	// touch, so the icon needs its own visible bubble too, not just a
+	// tooltip attribute). One at a time; closes on an outside click.
+	let openWarningGroup = $state<FieldGroup | undefined>(undefined);
+	function toggleWarning(group: FieldGroup) {
+		openWarningGroup = openWarningGroup === group ? undefined : group;
+	}
+	$effect(() => {
+		if (!openWarningGroup) return;
+		const closeOnOutsideClick = (event: MouseEvent) => {
+			if (!(event.target instanceof Element) || !event.target.closest('.warning-icon-wrap')) {
+				openWarningGroup = undefined;
+			}
+		};
+		window.addEventListener('click', closeOnOutsideClick, { capture: true });
+		return () => window.removeEventListener('click', closeOnOutsideClick, { capture: true });
 	});
 </script>
 
@@ -91,11 +119,52 @@
 				     of repeating "Docs" on every field row below, confirmed
 				     live as genuinely repetitive and boring-looking. -->
 				{@const groupDocUrl = bindingFor(fieldsInGroup[0], autopilot)?.docUrl}
+				{@const warning = FIELD_GROUP_WARNINGS[group]}
 				<div>
 					<div class="mb-1 flex items-baseline justify-between gap-2">
-						<h3 class="text-[10px] font-medium tracking-widest text-fg-muted uppercase">
-							{FIELD_GROUP_LABELS[group]}
-						</h3>
+						<span class="flex items-center gap-1">
+							<h3 class="text-[10px] font-medium tracking-widest text-fg-muted uppercase">
+								{FIELD_GROUP_LABELS[group]}
+							</h3>
+							{#if warning}
+								<span class="warning-icon-wrap relative inline-flex">
+									<button
+										type="button"
+										class="flex h-3.5 w-3.5 items-center justify-center text-critical"
+										title={warning}
+										aria-expanded={openWarningGroup === group}
+										aria-label="Warning: {warning}"
+										onclick={() => toggleWarning(group)}
+									>
+										<svg
+											width="12"
+											height="12"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											aria-hidden="true"
+										>
+											<path d="M12 9v4" />
+											<path d="M12 17h.01" />
+											<path
+												d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"
+											/>
+										</svg>
+									</button>
+									{#if openWarningGroup === group}
+										<span
+											role="tooltip"
+											class="absolute top-full left-0 z-10 mt-1 w-56 rounded border border-edge bg-ink p-2 text-[10px] font-normal text-fg normal-case shadow-lg"
+										>
+											{warning}
+										</span>
+									{/if}
+								</span>
+							{/if}
+						</span>
 						{#if groupDocUrl}
 							<!-- groupDocUrl is always a hardcoded, fully-qualified external https:// URL from param-spec.ts, never an internal route - resolve() is for this app's own route ids. -->
 							<!-- eslint-disable svelte/no-navigation-without-resolve -->

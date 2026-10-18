@@ -81,18 +81,18 @@ param ID** · **Implemented** (karshipta#212's shipped tier-1 panel) ·
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Roll rate P/I/D | `MC_ROLLRATE_P` / `_I` / `_D` | `ATC_RAT_RLL_P` / `_I` / `_D` | No | PX4 roll-axis naming inferred from the confirmed, documented yaw-axis pattern (`MC_YAWRATE_P/I/D/K`) and PX4's own consistent per-axis convention - not independently confirmed against the parameter reference the way yaw was. Verify before building. |
-| Pitch rate P/I/D | `MC_PITCHRATE_P` / `_I` / `_D` | `ATC_RAT_PIT_P` / `_I` / `_D` | No | Same inferred-naming caveat as roll above. |
-| Yaw rate P/I/D | `MC_YAWRATE_P` / `_I` / `_D` | `ATC_RAT_YAW_P` / `_I` / `_D` | No | PX4 side confirmed directly against the PID tuning guide. Also has a `_K` overall-gain term PX4-side (mixed parallel/standard controller form). |
+| Roll rate P/I/D | `MC_ROLLRATE_P` / `_I` / `_D` | `ATC_RAT_RLL_P` / `_I` / `_D` | Yes | Names confirmed as real, actively-used parameters via multiple independent config files/forum posts before shipping, not just the naming-pattern inference this row originally flagged. |
+| Pitch rate P/I/D | `MC_PITCHRATE_P` / `_I` / `_D` | `ATC_RAT_PIT_P` / `_I` / `_D` | Yes | Same confirmation as roll above. |
+| Yaw rate P/I/D | `MC_YAWRATE_P` / `_I` / `_D` | `ATC_RAT_YAW_P` / `_I` / `_D` | Yes | PX4 side confirmed directly against the PID tuning guide. Also has a `_K` overall-gain term PX4-side (mixed parallel/standard controller form) - not included in the shipped curated set, tier 3 territory. |
 | Max rotation rate (roll/pitch/yaw) | `MC_ROLLRATE_MAX` / `MC_PITCHRATE_MAX` / `MC_YAWRATE_MAX` | not independently researched | No | |
 
 ## PID - attitude/angle gains (outer loop)
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Roll angle P | `MC_ROLL_P` | `ATC_ANG_RLL_P` | No | PX4 side confirmed directly. |
-| Pitch angle P | `MC_PITCH_P` | `ATC_ANG_PIT_P` | No | PX4 side confirmed directly; ArduPilot inferred from the confirmed roll-axis naming pattern. |
-| Yaw angle P | `MC_YAW_P` | `ATC_ANG_YAW_P` | No | Same as pitch above. |
+| Roll angle P | `MC_ROLL_P` | `ATC_ANG_RLL_P` | Yes | PX4 side confirmed directly; ArduPilot confirmed via independent forum usage. |
+| Pitch angle P | `MC_PITCH_P` | `ATC_ANG_PIT_P` | Yes | Same confirmation as roll above. |
+| Yaw angle P | `MC_YAW_P` | `ATC_ANG_YAW_P` | Yes | Same confirmation as roll above. |
 
 ## Camera
 

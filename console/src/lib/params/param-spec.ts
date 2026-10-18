@@ -1,11 +1,15 @@
 import { ParamType } from '$lib/gen/karshipta/v1/parameter';
 
 /**
- * Tier 1 curated safety-critical parameters (karshipta#212): RTL
- * altitude/speed and the battery/RC-loss/data-link-loss failsafe
- * thresholds and actions. Everything here is a human-curated subset of
- * the raw MAVLink parameter set - a vehicle carries hundreds more, left
- * to tier 3 (karshipta#214).
+ * Curated parameters, shipped in tiers (same panel, same infrastructure,
+ * each tier just adds a curated group - karshipta#212's own framing).
+ * Tier 1 (karshipta#212): RTL altitude/speed and the battery/RC-loss/
+ * data-link-loss failsafe thresholds and actions. Tier 2 (karshipta#213):
+ * rate and attitude PID gains for roll/pitch/yaw, one group per axis
+ * ("grouped and labeled by axis, not a raw alphabetical list" - #213's
+ * own scope). Everything here is a human-curated subset of the raw
+ * MAVLink parameter set - a vehicle carries hundreds more, left to tier 3
+ * (karshipta#214).
  *
  * PX4 and ArduPilot differ structurally here, not just in naming,
  * verified against each firmware's own docs rather than assumed (see each
@@ -18,11 +22,24 @@ import { ParamType } from '$lib/gen/karshipta/v1/parameter';
  * not rendered - see bindingFor() and configuration-tab.svelte's use of
  * it - and every description/docUrl below is already per-firmware, never
  * naming the other one.
+ *
+ * PID gain names (tier 2) are confirmed as real, actively-used parameter
+ * names via multiple independent config files, forum posts, and (PX4 only)
+ * the official multicopter tuning guide - not a single canonical
+ * parameter-reference citation the way most of tier 1 has, but solid
+ * practical confirmation, not a bare naming-pattern guess. Unlike tier 1's
+ * failsafe thresholds, there's no documented min/max range for any of
+ * these on either firmware - PID gains are tuned empirically, not bounded
+ * by a published safe range - so none is given here; inventing one would
+ * be worse than leaving it open. A bad gain here causes oscillation or a
+ * crash directly and immediately, categorically higher risk than a
+ * misconfigured failsafe threshold - see FIELD_GROUP_WARNINGS below.
  */
 
 export type AutopilotFamily = 'PX4' | 'ArduPilot';
 
-export type FieldGroup = 'rtl' | 'battery' | 'rcLoss' | 'dataLinkLoss';
+export type FieldGroup =
+	'rtl' | 'battery' | 'rcLoss' | 'dataLinkLoss' | 'pidRoll' | 'pidPitch' | 'pidYaw';
 
 /** Action/enum-valued parameters (failsafe actions) are shown as a raw
  * integer, never decoded to a label: the exact meaning of each code
@@ -87,6 +104,80 @@ const AP_RTL_DOCS = 'https://ardupilot.org/copter/docs/rtl-mode.html';
 const AP_BATTERY_DOCS = 'https://ardupilot.org/copter/docs/failsafe-battery.html';
 const AP_RADIO_DOCS = 'https://ardupilot.org/copter/docs/radio-failsafe.html';
 const AP_GCS_DOCS = 'https://ardupilot.org/copter/docs/gcs-failsafe.html';
+// PX4's multicopter PID tuning guide covers rate and attitude gains for
+// every axis in one page. ArduPilot has no single page naming every
+// ATC_RAT_*/ATC_ANG_* parameter directly (checked); this is the official
+// entry point to Copter's actual tuning process, confirmed to exist and
+// cover tuning (fetched directly), even though it doesn't spell out every
+// parameter name inline - the honest best link, not a guess.
+const PX4_PID_DOCS = 'https://docs.px4.io/main/en/config_mc/pid_tuning_guide_multicopter.html';
+const AP_PID_DOCS = 'https://ardupilot.org/copter/docs/tuning-process-instructions.html';
+
+/**
+ * Builds the 4 curated fields for one PID axis (rate P/I/D + angle P) -
+ * a factory instead of 12 near-identical literal objects, both firmwares
+ * following the exact same naming scheme per axis (karshipta#213):
+ * PX4 rate terms are `MC_{axis}RATE_{P,I,D}`, PX4 angle term is
+ * `MC_{axis}_P`; ArduPilot rate terms are `ATC_RAT_{axis}_{P,I,D}`,
+ * angle term is `ATC_ANG_{axis}_P`.
+ */
+function pidAxisFields(
+	axisLabel: 'Roll' | 'Pitch' | 'Yaw',
+	group: Extract<FieldGroup, 'pidRoll' | 'pidPitch' | 'pidYaw'>,
+	keyPrefix: 'roll' | 'pitch' | 'yaw',
+	px4RatePrefix: string,
+	px4AnglePrefix: string,
+	apAxisCode: 'RLL' | 'PIT' | 'YAW'
+): CuratedField[] {
+	const axisLower = axisLabel.toLowerCase();
+	const rateTerm = (term: 'P' | 'I' | 'D'): CuratedField => ({
+		key: `${keyPrefix}_rate_${term.toLowerCase()}`,
+		label: `${axisLabel} rate ${term}`,
+		group,
+		px4: {
+			name: `${px4RatePrefix}_${term}`,
+			paramType: ParamType.PARAM_TYPE_FLOAT,
+			unit: '',
+			description: `${term} gain for the ${axisLower} rate (inner-loop) controller.`,
+			docUrl: PX4_PID_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		},
+		ardupilot: {
+			name: `ATC_RAT_${apAxisCode}_${term}`,
+			paramType: ParamType.PARAM_TYPE_FLOAT,
+			unit: '',
+			description: `${term} gain for the ${axisLower} rate (inner-loop) controller.`,
+			docUrl: AP_PID_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		}
+	});
+	const angleTerm: CuratedField = {
+		key: `${keyPrefix}_angle_p`,
+		label: `${axisLabel} angle P`,
+		group,
+		px4: {
+			name: `${px4AnglePrefix}_P`,
+			paramType: ParamType.PARAM_TYPE_FLOAT,
+			unit: '',
+			description: `Proportional gain for the ${axisLower} attitude (outer-loop) controller.`,
+			docUrl: PX4_PID_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		},
+		ardupilot: {
+			name: `ATC_ANG_${apAxisCode}_P`,
+			paramType: ParamType.PARAM_TYPE_FLOAT,
+			unit: '',
+			description: `Proportional gain for the ${axisLower} attitude (outer-loop) controller.`,
+			docUrl: AP_PID_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		}
+	};
+	return [rateTerm('P'), rateTerm('I'), rateTerm('D'), angleTerm];
+}
 
 export const CURATED_FIELDS: CuratedField[] = [
 	{
@@ -384,14 +475,35 @@ export const CURATED_FIELDS: CuratedField[] = [
 			toDisplay: identity,
 			toRaw: identity
 		}
-	}
+	},
+	// Tier 2 (karshipta#213): rate and attitude PID gains, one group per
+	// axis - see pidAxisFields()'s own doc comment for the naming scheme.
+	...pidAxisFields('Roll', 'pidRoll', 'roll', 'MC_ROLLRATE', 'MC_ROLL', 'RLL'),
+	...pidAxisFields('Pitch', 'pidPitch', 'pitch', 'MC_PITCHRATE', 'MC_PITCH', 'PIT'),
+	...pidAxisFields('Yaw', 'pidYaw', 'yaw', 'MC_YAWRATE', 'MC_YAW', 'YAW')
 ];
 
 export const FIELD_GROUP_LABELS: Record<FieldGroup, string> = {
 	rtl: 'Return to launch',
 	battery: 'Battery failsafe',
 	rcLoss: 'RC loss failsafe',
-	dataLinkLoss: 'Data link loss failsafe'
+	dataLinkLoss: 'Data link loss failsafe',
+	pidRoll: 'Roll PID',
+	pidPitch: 'Pitch PID',
+	pidYaw: 'Yaw PID'
+};
+
+/** Shown once per matching group, not per field: a change here affects
+ * flight stability directly and immediately (oscillation, loss of
+ * control), categorically higher risk than a misconfigured failsafe
+ * threshold above - unlike those, there's no documented safe range to
+ * fall back on, so the caution has to live in the UI text itself. */
+export const FIELD_GROUP_WARNINGS: Partial<Record<FieldGroup, string>> = {
+	pidRoll:
+		'Directly affects flight stability. Change gains in small increments (the PX4 tuning guide suggests 20-30% per step, less for final tuning) and test cautiously.',
+	pidPitch:
+		'Directly affects flight stability. Change gains in small increments and test cautiously.',
+	pidYaw: 'Directly affects flight stability. Change gains in small increments and test cautiously.'
 };
 
 export function bindingFor(field: CuratedField, autopilot: string): ParamBinding | undefined {
