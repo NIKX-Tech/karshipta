@@ -62,18 +62,10 @@
 		<span class="text-xs font-medium">{label}</span>
 		<span class="font-mono text-[10px] text-fg-muted">{binding.name}</span>
 	</div>
-	<p class="text-[10px] text-fg-muted">
-		{binding.description}
-		<!-- binding.docUrl is always a hardcoded, fully-qualified external https:// URL from param-spec.ts, never an internal route - resolve() is for this app's own route ids. -->
-		<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-		<a href={binding.docUrl} target="_blank" rel="noreferrer" class="underline hover:text-fg">
-			Docs
-		</a>
-	</p>
+	<p class="text-[10px] text-fg-muted">{binding.description}</p>
 	{#if binding.isAction}
 		<p class="text-[9px] text-fg-muted">
-			Numeric failsafe action code - see Docs above for what each value means on this ward's own
-			firmware.
+			Numeric failsafe action code - see this group's Docs link above for what each value means.
 		</p>
 	{/if}
 	<div class="flex items-center gap-1.5">

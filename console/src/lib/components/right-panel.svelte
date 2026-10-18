@@ -187,7 +187,8 @@
 						<line x1="18" y1="12" x2="22" y2="12" />
 					</svg>
 				{:else if tab.id === 'control'}
-					<!-- A joystick/RC-stick glyph: reads as "fly this thing right now,"
+					<!-- A retro arcade-style joystick: wide flat base, tapered boot,
+					     prominent ball grip - reads as "fly this thing right now,"
 					     distinct from Configuration's sliders (stored settings) below. -->
 					<svg
 						width="16"
@@ -200,9 +201,10 @@
 						stroke-linejoin="round"
 						aria-hidden="true"
 					>
-						<rect x="6" y="15" width="12" height="6" rx="1.5" />
-						<line x1="12" y1="15" x2="12" y2="8" />
-						<circle cx="12" cy="5.5" r="2.5" fill="currentColor" stroke="none" />
+						<rect x="4" y="17" width="16" height="3.5" rx="1" />
+						<path d="M9 17c0-2.8 1-4.3 3-4.3s3 1.5 3 4.3" />
+						<line x1="12" y1="12.7" x2="12" y2="7" />
+						<circle cx="12" cy="4.5" r="2.5" fill="currentColor" stroke="none" />
 					</svg>
 				{:else if tab.id === 'mission'}
 					<svg

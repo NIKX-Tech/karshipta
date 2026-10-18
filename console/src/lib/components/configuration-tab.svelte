@@ -84,10 +84,32 @@
 				(field) => field.group === group && bindingFor(field, autopilot)
 			)}
 			{#if fieldsInGroup.length > 0}
+				<!-- Every field in a group shares one doc URL per firmware
+				     (verified: PX4's battery/RC-loss/data-link-loss groups
+				     all point at its one safety-config page; every ArduPilot
+				     group has its own dedicated page) - one link here instead
+				     of repeating "Docs" on every field row below, confirmed
+				     live as genuinely repetitive and boring-looking. -->
+				{@const groupDocUrl = bindingFor(fieldsInGroup[0], autopilot)?.docUrl}
 				<div>
-					<h3 class="mb-1 text-[10px] font-medium tracking-widest text-fg-muted uppercase">
-						{FIELD_GROUP_LABELS[group]}
-					</h3>
+					<div class="mb-1 flex items-baseline justify-between gap-2">
+						<h3 class="text-[10px] font-medium tracking-widest text-fg-muted uppercase">
+							{FIELD_GROUP_LABELS[group]}
+						</h3>
+						{#if groupDocUrl}
+							<!-- groupDocUrl is always a hardcoded, fully-qualified external https:// URL from param-spec.ts, never an internal route - resolve() is for this app's own route ids. -->
+							<!-- eslint-disable svelte/no-navigation-without-resolve -->
+							<a
+								href={groupDocUrl}
+								target="_blank"
+								rel="noreferrer"
+								class="text-[10px] text-fg-muted underline hover:text-fg"
+							>
+								Docs
+							</a>
+							<!-- eslint-enable svelte/no-navigation-without-resolve -->
+						{/if}
+					</div>
 					<div class="rounded border border-edge px-2">
 						{#each fieldsInGroup as field (field.key)}
 							{@const binding = bindingFor(field, autopilot)}
