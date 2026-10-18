@@ -10,6 +10,13 @@ import {
 	type ParamAck,
 	type ParamList
 } from '$lib/gen/karshipta/v1/parameter';
+import {
+	LogDownloadStatus,
+	LogEntryListStatus,
+	type DownloadLogFileAck,
+	type LogEntryList,
+	type LogFileChunk
+} from '$lib/gen/karshipta/v1/log_file';
 import { WebSocketTransport, type FleetTransport } from '$lib/transport';
 import { RelayTransport } from '$lib/transport/relay-transport';
 import { FAKE_FLEET_CENTER, type DemoEngine } from '$lib/fake/fleet-sim';
@@ -64,6 +71,24 @@ export interface ParamWriteTracker {
 	sentAtMs: number;
 }
 
+/** A DownloadLogFile request's progress (karshipta#249): 'pending' until
+ * the DownloadLogFileAck arrives, 'downloading' while LogFileChunk
+ * messages are still coming in, then 'success' (triggers the browser
+ * download) or 'rejected'. Unlike ParamWriteTracker/CommandTracker, this
+ * is not a single request/response - see fleet-store.svelte.ts's own
+ * applyDownloadLogFileAck()/applyLogFileChunk(). */
+export interface LogDownloadTracker {
+	requestId: string;
+	wardId: string;
+	logId: number;
+	status: 'pending' | 'downloading' | 'success' | 'rejected';
+	message: string;
+	totalSizeBytes: number;
+	chunkCount: number;
+	receivedBytes: number;
+	sentAtMs: number;
+}
+
 const MAX_EVENTS = 50;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** trackers in a terminal state linger briefly so the operator sees the outcome */
@@ -107,6 +132,44 @@ export function isParamWriteTerminal(status: ParamAckStatus): boolean {
 		status === ParamAckStatus.PARAM_ACK_STATUS_SUCCESS ||
 		status === ParamAckStatus.PARAM_ACK_STATUS_REJECTED
 	);
+}
+
+export function isLogDownloadTerminal(status: LogDownloadTracker['status']): boolean {
+	return status === 'success' || status === 'rejected';
+}
+
+/**
+ * PX4's own log format is ULog (.ulg); ArduPilot's is a binary dataflash
+ * log, whose own native extension is .bin. Guessing the wrong one for the
+ * connected firmware would be worse than a plain fallback - same "know
+ * your client" rule configuration-tab.svelte's per-firmware fields
+ * already follow - so this only ever claims the firmware-specific
+ * extension when WardInfo.autopilot actually says which firmware
+ * produced the bytes; anything else (unknown, empty) gets the generic
+ * fallback.
+ */
+function logFileName(wardId: string, logId: number, autopilot: string | undefined): string {
+	const extension = autopilot === 'PX4' ? 'ulg' : 'bin';
+	return `${wardId}-log-${logId}.${extension}`;
+}
+
+/** Hands the reassembled file to the browser the only way a page can
+ * trigger a save without a server endpoint: an object URL plus a
+ * transient, never-appended <a download> click. Safe here specifically
+ * because this is the real console app, not a sandboxed preview - not a
+ * pattern to reuse inside an Artifact. */
+function triggerBrowserDownload(filename: string, bytes: Uint8Array): void {
+	// bytes.buffer is typed ArrayBufferLike (could in principle be a
+	// SharedArrayBuffer), which Blob's constructor type doesn't accept;
+	// copying into a fresh Uint8Array (always backed by a plain
+	// ArrayBuffer) satisfies that without changing the actual bytes sent.
+	const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' });
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement('a');
+	link.href = url;
+	link.download = filename;
+	link.click();
+	URL.revokeObjectURL(url);
 }
 
 function readStoredGatewayUrl(): string | undefined {
@@ -184,6 +247,19 @@ class FleetStore {
 	 * newer one still in flight */
 	private paramListRequestIds: Record<string, string> = {};
 	paramWrites = $state<Record<string, ParamWriteTracker>>({});
+	/** last GetLogEntries response per ward (karshipta#249), keyed by ward_id - same shape as paramLists above */
+	logEntries = $state<Record<string, LogEntryList>>({});
+	logEntriesLoading = $state<Record<string, boolean>>({});
+	/** same stale-response guard as paramListRequestIds above */
+	private logEntriesRequestIds: Record<string, string> = {};
+	logDownloads = $state<Record<string, LogDownloadTracker>>({});
+	/** Chunks received so far per in-flight download, indexed by
+	 * chunk_index, sparse until every slot fills. Deliberately NOT $state:
+	 * Uint8Array chunks are write-once binary payloads no component reads
+	 * reactively (logDownloads above is what the UI watches), and routing
+	 * multi-MB transfers through Svelte's reactivity proxy on every chunk
+	 * would be pure overhead. */
+	private logDownloadChunks: Record<string, (Uint8Array | undefined)[]> = {};
 	selectedWardId = $state<string | undefined>(undefined);
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
@@ -569,6 +645,129 @@ class FleetStore {
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
+	/** Sends GetLogEntries for one ward (karshipta#249); the response lands
+	 * in logEntries[wardId] via applyLogEntryList(). Same request/response
+	 * shape as requestGetParams() above, including being refused
+	 * client-side in a read-only session before it ever reaches the wire. */
+	requestGetLogEntries(wardId: string): void {
+		const requestId = crypto.randomUUID();
+		this.logEntriesRequestIds[wardId] = requestId;
+		this.logEntriesLoading[wardId] = true;
+		if (this.readonly) {
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: 'read-only session',
+				entries: []
+			};
+			return;
+		}
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: 'no active channel',
+				entries: []
+			};
+			return;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				if (this.logEntriesRequestIds[wardId] !== requestId) return;
+				this.logEntriesLoading[wardId] = false;
+				this.logEntries[wardId] = {
+					requestId,
+					wardId,
+					status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+					message: 'no response from gateway',
+					entries: []
+				};
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({ payload: { $case: 'getLogEntries', getLogEntries: { requestId, wardId } } });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.logEntriesLoading[wardId] = false;
+			this.logEntries[wardId] = {
+				requestId,
+				wardId,
+				status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+				message: reason,
+				entries: []
+			};
+		}
+	}
+
+	/** Sends DownloadLogFile for one ward (karshipta#249); progress and
+	 * completion land in logDownloads[requestId] via
+	 * applyDownloadLogFileAck()/applyLogFileChunk(). Unlike GetParams/
+	 * SetParam's single request/response, a successful download is a
+	 * DownloadLogFileAck followed by chunkCount LogFileChunk messages
+	 * (gateway/docs/log-download-executor.md); this store reassembles them
+	 * and triggers a real browser download once the last one lands. */
+	requestDownloadLogFile(wardId: string, logId: number): string {
+		const requestId = crypto.randomUUID();
+		if (this.readonly) {
+			this.logDownloads[requestId] = {
+				requestId,
+				wardId,
+				logId,
+				status: 'rejected',
+				message: 'read-only session',
+				totalSizeBytes: 0,
+				chunkCount: 0,
+				receivedBytes: 0,
+				sentAtMs: Date.now()
+			};
+			return requestId;
+		}
+		this.logDownloads[requestId] = {
+			requestId,
+			wardId,
+			logId,
+			status: 'pending',
+			message: '',
+			totalSizeBytes: 0,
+			chunkCount: 0,
+			receivedBytes: 0,
+			sentAtMs: Date.now()
+		};
+		const channel = this.channelFor(wardId);
+		if (!channel) {
+			this.settleLogDownload(requestId, 'no active channel');
+			return requestId;
+		}
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				this.settleLogDownload(requestId, 'no acknowledgment from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+		try {
+			channel.send({
+				payload: { $case: 'downloadLogFile', downloadLogFile: { requestId, wardId, logId } }
+			});
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.settleLogDownload(requestId, reason);
+		}
+		return requestId;
+	}
+
+	/** in-flight and recently settled log downloads for one ward, newest first */
+	logDownloadsFor(wardId: string): LogDownloadTracker[] {
+		return Object.values(this.logDownloads)
+			.filter((tracker) => tracker.wardId === wardId)
+			.sort((a, b) => b.sentAtMs - a.sentAtMs);
+	}
+
 	/**
 	 * Adds a ward through the connected gateway (covers both a simulated
 	 * SITL endpoint and real hardware; the gateway sees no difference). No
@@ -714,6 +913,8 @@ class FleetStore {
 			case 'updateFleetMissionRoutes':
 			case 'getParams':
 			case 'setParam':
+			case 'getLogEntries':
+			case 'downloadLogFile':
 				console.warn(`fleet: ignoring upstream payload kind ${payload.$case} sent downstream`);
 				break;
 			case 'fleet':
@@ -752,6 +953,15 @@ class FleetStore {
 			case 'paramAck':
 				this.applyParamAck(payload.paramAck);
 				break;
+			case 'logEntryList':
+				this.applyLogEntryList(payload.logEntryList);
+				break;
+			case 'downloadLogFileAck':
+				this.applyDownloadLogFileAck(payload.downloadLogFileAck);
+				break;
+			case 'logFileChunk':
+				this.applyLogFileChunk(payload.logFileChunk);
+				break;
 			default: {
 				const unhandled: never = payload;
 				console.warn('fleet: ignoring unknown payload kind', unhandled);
@@ -788,6 +998,11 @@ class FleetStore {
 		this.paramListLoading = {};
 		this.paramListRequestIds = {};
 		this.paramWrites = {};
+		this.logEntries = {};
+		this.logEntriesLoading = {};
+		this.logEntriesRequestIds = {};
+		this.logDownloads = {};
+		this.logDownloadChunks = {};
 		this.selectedWardId = undefined;
 		this.cancelGoto();
 		this.cancelSetHome();
@@ -923,6 +1138,140 @@ class FleetStore {
 				delete this.paramWrites[requestId];
 			}, TRACKER_LINGER_MS);
 		}
+	}
+
+	/** Resolves a GetLogEntries response. Same stale-response guard as
+	 * applyParamList() above. */
+	applyLogEntryList(response: LogEntryList): void {
+		if (this.logEntriesRequestIds[response.wardId] !== response.requestId) return;
+		const timer = this.timeoutTimers.get(response.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(response.requestId);
+		}
+		this.logEntriesLoading[response.wardId] = false;
+		this.logEntries[response.wardId] = response;
+	}
+
+	/** Resolves the immediate accept/reject for a DownloadLogFile request.
+	 * REJECTED ends the download outright; SUCCESS arms this store to
+	 * receive exactly chunk_count LogFileChunk messages next (0 completes
+	 * immediately - an empty file has nothing to wait for). */
+	applyDownloadLogFileAck(ack: DownloadLogFileAck): void {
+		const tracker = this.logDownloads[ack.requestId];
+		if (!tracker || tracker.status !== 'pending') return;
+		const timer = this.timeoutTimers.get(ack.requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(ack.requestId);
+		}
+		if (ack.status === LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED) {
+			this.settleLogDownload(ack.requestId, ack.message);
+			return;
+		}
+		tracker.totalSizeBytes = ack.totalSizeBytes;
+		tracker.chunkCount = ack.chunkCount;
+		if (ack.chunkCount === 0) {
+			this.completeLogDownload(ack.requestId, new Uint8Array(0));
+			return;
+		}
+		tracker.status = 'downloading';
+		// .fill(undefined), not a bare `new Array(n)`: the latter is sparse
+		// (holes, not real undefined values), and every/some/forEach/filter
+		// all SKIP holes per spec - chunks.every(piece => piece !== undefined)
+		// below would then vacuously return true after just one chunk filled
+		// one slot, since the remaining holes are never visited at all. Only
+		// for...of (used to reassemble the bytes) actually visits holes,
+		// yielding literal undefined there - which crashed Uint8Array.set().
+		this.logDownloadChunks[ack.requestId] = new Array(ack.chunkCount).fill(undefined);
+		this.armLogChunkStallTimer(ack.requestId);
+	}
+
+	/** Reassembles LogFileChunk messages for one accepted download. A
+	 * REJECTED chunk means the gateway aborted mid-stream (see
+	 * log_file.proto's own comment on LogFileChunk) - no further chunks
+	 * will follow, so this settles immediately rather than waiting out the
+	 * stall timer. Out-of-range or duplicate indices are ignored
+	 * defensively; a single ordered WebSocket/relay connection should never
+	 * produce either, but silently dropping an impossible frame is safer
+	 * than indexing past the end of the array. */
+	applyLogFileChunk(chunk: LogFileChunk): void {
+		const tracker = this.logDownloads[chunk.requestId];
+		if (!tracker || tracker.status !== 'downloading') return;
+		if (chunk.status === LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED) {
+			delete this.logDownloadChunks[chunk.requestId];
+			this.settleLogDownload(chunk.requestId, chunk.message || 'download aborted mid-stream');
+			return;
+		}
+		const chunks = this.logDownloadChunks[chunk.requestId];
+		if (!chunks || chunk.chunkIndex >= chunks.length || chunks[chunk.chunkIndex] !== undefined) {
+			return;
+		}
+		chunks[chunk.chunkIndex] = chunk.data;
+		tracker.receivedBytes += chunk.data.length;
+		if (chunks.every((piece) => piece !== undefined)) {
+			const bytes = new Uint8Array(tracker.receivedBytes);
+			let offset = 0;
+			for (const piece of chunks) {
+				bytes.set(piece!, offset);
+				offset += piece!.length;
+			}
+			delete this.logDownloadChunks[chunk.requestId];
+			this.completeLogDownload(chunk.requestId, bytes);
+			return;
+		}
+		this.armLogChunkStallTimer(chunk.requestId);
+	}
+
+	/** (Re)arms the "no further chunks" stall timer, reset on every chunk
+	 * received so a large transfer isn't penalized for simply taking a
+	 * while - only silence between chunks is a failure, not total elapsed
+	 * time. */
+	private armLogChunkStallTimer(requestId: string): void {
+		const existing = this.timeoutTimers.get(requestId);
+		if (existing) clearTimeout(existing);
+		this.timeoutTimers.set(
+			requestId,
+			setTimeout(() => {
+				delete this.logDownloadChunks[requestId];
+				this.settleLogDownload(requestId, 'no further chunks received from gateway');
+			}, REQUEST_TIMEOUT_MS)
+		);
+	}
+
+	private completeLogDownload(requestId: string, bytes: Uint8Array): void {
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		const tracker = this.logDownloads[requestId];
+		if (!tracker) return;
+		tracker.status = 'success';
+		tracker.message = '';
+		triggerBrowserDownload(
+			logFileName(tracker.wardId, tracker.logId, this.wards[tracker.wardId]?.info?.autopilot),
+			bytes
+		);
+		setTimeout(() => {
+			delete this.logDownloads[requestId];
+		}, TRACKER_LINGER_MS);
+	}
+
+	private settleLogDownload(requestId: string, message: string): void {
+		const tracker = this.logDownloads[requestId];
+		if (!tracker || isLogDownloadTerminal(tracker.status)) return;
+		const timer = this.timeoutTimers.get(requestId);
+		if (timer) {
+			clearTimeout(timer);
+			this.timeoutTimers.delete(requestId);
+		}
+		delete this.logDownloadChunks[requestId];
+		tracker.status = 'rejected';
+		tracker.message = message;
+		setTimeout(() => {
+			delete this.logDownloads[requestId];
+		}, TRACKER_LINGER_MS);
 	}
 
 	private persistDemoWardHomes(): void {

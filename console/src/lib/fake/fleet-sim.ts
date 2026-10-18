@@ -44,6 +44,13 @@ import {
 	type Param,
 	type SetParam
 } from '$lib/gen/karshipta/v1/parameter';
+import {
+	LogDownloadStatus,
+	LogEntryListStatus,
+	type DownloadLogFile,
+	type GetLogEntries,
+	type LogEntry
+} from '$lib/gen/karshipta/v1/log_file';
 import type { Envelope } from '$lib/gen/karshipta/v1/envelope';
 import type { FleetTransport } from '$lib/transport';
 import type { LatLon } from '$lib/geolocation';
@@ -237,7 +244,28 @@ interface SimWard {
 	 * demo ward reports itself as PX4 (see WardInfo below), so only PX4
 	 * names need seeding here. */
 	params: Map<string, Param>;
+	/** demo stand-in for a real vehicle's flight log list (karshipta#249) -
+	 * fixed, not generated per flight; see defaultDemoLogs(). */
+	logs: LogEntry[];
 }
+
+/** One small (fits in one demo chunk) and one larger (spans several, at
+ * DEMO_LOG_CHUNK_BYTES below) entry, so demo download exercises both the
+ * single-chunk and multi-chunk reassembly paths without needing real
+ * SITL flight logs. */
+function defaultDemoLogs(): LogEntry[] {
+	return [
+		{ logId: 1, date: '2026-10-15T09:12:00Z', sizeBytes: 8_192 },
+		{ logId: 2, date: '2026-10-17T14:03:00Z', sizeBytes: 20_480 }
+	];
+}
+
+/** Demo-only chunk size - deliberately much smaller than the real
+ * gateway's own kLogChunkBytes (main.cpp/log_download_executor.cpp) so
+ * even a small demo log legitimately splits into multiple LogFileChunk
+ * messages, exercising fleet-store.svelte.ts's reassembly logic instead
+ * of trivially completing in one. */
+const DEMO_LOG_CHUNK_BYTES = 4_096;
 
 function defaultDemoParams(): Map<string, Param> {
 	const intParam = (name: string, intValue: number): Param => ({
@@ -309,7 +337,8 @@ function initialWard(spec: WardSpec): SimWard {
 		patrolling: true,
 		target: undefined,
 		missionRun: undefined,
-		params: defaultDemoParams()
+		params: defaultDemoParams(),
+		logs: defaultDemoLogs()
 	};
 }
 
@@ -467,6 +496,12 @@ export class FakeGateway implements DemoEngine {
 				break;
 			case 'setParam':
 				this.handleSetParam(envelope.payload.setParam);
+				break;
+			case 'getLogEntries':
+				this.handleGetLogEntries(envelope.payload.getLogEntries);
+				break;
+			case 'downloadLogFile':
+				this.handleDownloadLogFile(envelope.payload.downloadLogFile);
 				break;
 			default:
 				console.warn(
@@ -1068,6 +1103,118 @@ export class FakeGateway implements DemoEngine {
 	): void {
 		this.onEnvelope({
 			payload: { $case: 'paramAck', paramAck: { requestId, wardId, status, message, param } }
+		});
+	}
+
+	private handleGetLogEntries(request: GetLogEntries): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.onEnvelope({
+				payload: {
+					$case: 'logEntryList',
+					logEntryList: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_REJECTED,
+						message: `unknown ward_id: ${request.wardId}`,
+						entries: []
+					}
+				}
+			});
+			return;
+		}
+		this.onEnvelope({
+			payload: {
+				$case: 'logEntryList',
+				logEntryList: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					status: LogEntryListStatus.LOG_ENTRY_LIST_STATUS_SUCCESS,
+					message: '',
+					entries: ward.logs
+				}
+			}
+		});
+	}
+
+	private handleDownloadLogFile(request: DownloadLogFile): void {
+		const ward = this.wards.get(request.wardId);
+		if (!ward) {
+			this.downloadLogFileAck(
+				request,
+				LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED,
+				`unknown ward_id: ${request.wardId}`,
+				0,
+				0
+			);
+			return;
+		}
+		const entry = ward.logs.find((candidate) => candidate.logId === request.logId);
+		if (!entry) {
+			this.downloadLogFileAck(
+				request,
+				LogDownloadStatus.LOG_DOWNLOAD_STATUS_REJECTED,
+				`unknown log_id ${request.logId}`,
+				0,
+				0
+			);
+			return;
+		}
+		const totalSizeBytes = entry.sizeBytes;
+		const chunkCount = totalSizeBytes === 0 ? 0 : Math.ceil(totalSizeBytes / DEMO_LOG_CHUNK_BYTES);
+		this.downloadLogFileAck(
+			request,
+			LogDownloadStatus.LOG_DOWNLOAD_STATUS_SUCCESS,
+			'',
+			totalSizeBytes,
+			chunkCount
+		);
+		// Deterministic filler bytes (byte index mod 256), not random: lets a
+		// manual check of the downloaded file's content be reproducible,
+		// same reasoning as every other seeded-not-randomized demo value in
+		// this file.
+		for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+			const start = chunkIndex * DEMO_LOG_CHUNK_BYTES;
+			const end = Math.min(start + DEMO_LOG_CHUNK_BYTES, totalSizeBytes);
+			const data = new Uint8Array(end - start);
+			for (let i = 0; i < data.length; i++) data[i] = (start + i) % 256;
+			this.onEnvelope({
+				payload: {
+					$case: 'logFileChunk',
+					logFileChunk: {
+						requestId: request.requestId,
+						wardId: request.wardId,
+						logId: request.logId,
+						status: LogDownloadStatus.LOG_DOWNLOAD_STATUS_SUCCESS,
+						message: '',
+						chunkIndex,
+						data
+					}
+				}
+			});
+		}
+	}
+
+	private downloadLogFileAck(
+		request: DownloadLogFile,
+		status: LogDownloadStatus,
+		message: string,
+		totalSizeBytes: number,
+		chunkCount: number
+	): void {
+		this.onEnvelope({
+			payload: {
+				$case: 'downloadLogFileAck',
+				downloadLogFileAck: {
+					requestId: request.requestId,
+					wardId: request.wardId,
+					logId: request.logId,
+					status,
+					message,
+					totalSizeBytes,
+					chunkCount
+				}
+			}
 		});
 	}
 
