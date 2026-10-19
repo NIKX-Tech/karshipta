@@ -282,6 +282,12 @@ export { default as CommandPanel } from './components/command-panel.svelte';
 export { default as HomePanel } from './components/home-panel.svelte';
 export { default as EventsFeed } from './components/events-feed.svelte';
 export { default as ConfirmDialog } from './components/confirm-dialog.svelte';
+// The generic building block ConfirmDialog/AddWardDialog/CalibrationDialog
+// etc. are all built on (focus trap, Escape/backdrop dismiss, WAI-ARIA
+// dialog/alertdialog roles) - exported directly so a consuming app can build
+// its own dialog content without duplicating that mechanics, which this
+// package's own README already asks consumers not to do by forking source.
+export { default as Dialog } from './components/ui/dialog.svelte';
 // ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
 // self-contained, store-driven content panels, the same category as
 // WardTelemetryTab/WardControlTab/CommandPanel above - not app-shell
