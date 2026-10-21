@@ -50,14 +50,29 @@ message FlightState {
 // Live state of one ward. Published at 2 to 10 Hz per ward.
 message WardState {
   string ward_id = 1;
-  uint64 timestamp_ms = 2;     // unix epoch milliseconds, gateway clock
+  // karshipta#268: for a Herald ward this is the device/event time parsed
+  // from the vendor payload, which can lag ingestion_ms by a lot (store-
+  // and-forward, intermittent cellular - exactly the case Herald exists
+  // for). For a MAVLink ward there is no reliable absolute device-side
+  // clock to read off the wire today (PX4/ArduPilot report boot-relative
+  // time, not wall-clock UTC, in routine telemetry messages), so this is
+  // set to the same gateway wall-clock value as ingestion_ms below; the two
+  // fields read identically for MAVLink until a real device-time source is
+  // wired in, which is a separate, larger piece of work, not this field.
+  uint64 timestamp_ms = 2;     // unix epoch milliseconds, device/event clock where known
+  // karshipta#268: unix epoch milliseconds when the gateway itself received
+  // or computed this reading, independent of timestamp_ms above. Subtracting
+  // the two gives the event-to-ingestion delay the validation matrix on
+  // that issue calls for; comparing this field alone against "now" gives
+  // elapsed-gateway-time, a different, non-interchangeable question.
+  uint64 ingestion_ms = 12;
   GeoPoint position = 3;
   VelocityNed velocity = 4;    // any moving ward has this, not flight-specific
   float heading_deg = 5;       // direction of travel, 0 to 360 true north; any moving ward has this
   Battery battery = 6;
   Gps gps = 7;
   bool health_ok = 8;          // true when the ward is reporting normally (autopilot health checks for flight wards, basic reporting sanity for others)
-  bool connected = 9;          // false when the gateway lost the ward's link
+  bool connected = 9;          // false when the gateway lost the ward's link, or (Herald) when no message has arrived within the configured staleness timeout
   FlightState flight = 10;     // unset for non-flight wards
   repeated string tags = 11;   // operator-defined labels, e.g. "herd-3", "north-region"
 }

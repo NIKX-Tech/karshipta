@@ -1918,6 +1918,10 @@ function stateEnvelope(ward: SimWard, nowMs: number): Envelope {
 			wardState: {
 				wardId: ward.spec.wardId,
 				timestampMs: nowMs,
+				// karshipta#268: the demo engine has no separate device
+				// clock to fake, same as a real MAVLink ward - both
+				// fields are this tick's wall-clock time.
+				ingestionMs: nowMs,
 				position: {
 					latitudeDeg: ward.spec.homeLatDeg + ward.northM / METERS_PER_DEG_LAT,
 					longitudeDeg: ward.spec.homeLonDeg + ward.eastM / metersPerDegLon(ward.spec.homeLatDeg),

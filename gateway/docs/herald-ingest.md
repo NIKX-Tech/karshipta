@@ -90,6 +90,26 @@ followup.
   skipped entirely, never a no-op call.
 - Replay known Herald wards' `WardInfo` to a newly-connected client
   (`send_known_wards`), wired the same way as `WardManager::send_ward_info`.
+- Detect staleness (github issue #268): a Herald source has no MAVLink-style
+  link to watch, just messages that stop arriving. A background checker
+  thread (`run_stale_checker`) wakes roughly every quarter of
+  `stale_timeout_` (a constructor parameter, defaulting to
+  `kDefaultStaleTimeout` = 30s) and, for any ward whose last message is
+  older than that, re-broadcasts its last-known `WardState` with
+  `connected = false` - the same "last known reading, now flagged
+  disconnected" shape a MAVLink link loss already produces, not a
+  fabricated or emptied-out state. The next real message from that
+  `entity_id` clears the flag automatically (`ingest()` always sets
+  `connected = true`), no separate recovery path needed. True per-source
+  configurability via `gateway.yaml` is tracked as follow-up work on #268,
+  not implemented yet - today it is one timeout for every Herald ward.
+- Set `WardState.ingestion_ms` to the gateway's own wall-clock time of
+  receipt, independent of `WardState.timestamp_ms` (the device/event time
+  parsed from the payload, unchanged). The gap between the two is exactly
+  what #268's validation matrix needs to measure event-to-ingestion delay,
+  separate from elapsed-gateway-time. The MAVLink path (`ward_manager.cpp`)
+  sets both fields to the same value, since no reliable absolute device-side
+  clock exists on that path today - a documented limitation, not an oversight.
 
 GT06-specific mapping notes (`Gt06TcpServer`'s `build_herald_message`): GT06
 carries no device-purpose field (only a device-type/model variant), so
@@ -187,8 +207,8 @@ one worked example.
 
 | Member | Behavior |
 |---|---|
-| `HeraldWardManager(Transport&, WardManager&)` | `karshipta-gateway` builds. `WardManager&` is used read-only, via `has_ward()`, to detect an `entity_id` collision. |
-| `HeraldWardManager(Transport&)` | `karshipta-herald` builds (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF`). No `WardManager` exists to collide-check against. |
+| `HeraldWardManager(Transport&, WardManager&, milliseconds stale_timeout = kDefaultStaleTimeout)` | `karshipta-gateway` builds. `WardManager&` is used read-only, via `has_ward()`, to detect an `entity_id` collision. `stale_timeout` is a constructor parameter (not just a constant) so tests can use a short one. |
+| `HeraldWardManager(Transport&, milliseconds stale_timeout = kDefaultStaleTimeout)` | `karshipta-herald` builds (`KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF`). No `WardManager` exists to collide-check against. |
 | `HeraldIngestResult ingest(const herald::v0::Herald&)` | Builds and broadcasts `WardState` (and, on first sight, `WardInfo`). In `karshipta-gateway` builds, returns `kWardIdCollision` and broadcasts nothing if `entity_id` is already a MAVLink `ward_id`. |
 | `void send_known_wards(Transport::ClientId) const` | Sends one `WardInfo` per known Herald `entity_id` to exactly this client. Wire to `Transport::on_connect`. |
 
