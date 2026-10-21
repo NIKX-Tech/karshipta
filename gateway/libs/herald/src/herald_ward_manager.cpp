@@ -163,6 +163,22 @@ void HeraldWardManager::run_stale_checker(std::stop_token stop_token) {
             }
         }
         for (const auto& state : to_broadcast) {
+            // Re-check immediately before the unlocked broadcast: ingest()
+            // on another thread could have received a fresh message for
+            // this exact ward in the gap between marking it stale above and
+            // getting here, which resets marked_stale back to false. Two
+            // unlocked transport_.broadcast() calls on two different
+            // threads have no absolute ordering guarantee on the wire
+            // either way, so this doesn't make the race impossible - but it
+            // closes the far more likely case (ingest() already ran to
+            // completion before this thread gets here), which would
+            // otherwise flicker a just-arrived "connected" update back to
+            // "disconnected" for an operator watching the console.
+            {
+                std::lock_guard lock(mutex_);
+                const auto it = last_seen_.find(state.ward_id());
+                if (it == last_seen_.end() || !it->second.marked_stale) continue;
+            }
             spdlog::warn("herald ward '{}' went stale ({}ms with no message)", state.ward_id(),
                          stale_timeout_.count());
             karshipta::v1::Envelope envelope;
