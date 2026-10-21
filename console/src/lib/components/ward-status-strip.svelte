@@ -16,9 +16,13 @@
 
 	interface Props {
 		wardId: string;
+		/** Same extension point as WardCard's own displayName prop - shown
+		 * in place of the raw wardId when set, falling back to wardId when
+		 * absent. See WardCard's Props comment for the full reasoning. */
+		displayName?: string;
 	}
 
-	const { wardId }: Props = $props();
+	const { wardId, displayName }: Props = $props();
 
 	const ward = $derived(fleet.wards[wardId]);
 	const wardState = $derived(ward?.state);
@@ -135,11 +139,11 @@
 
 <div
 	class="flex flex-col gap-1 border-b border-edge px-3 py-2 text-xs"
-	aria-label="Status for {wardId}"
+	aria-label="Status for {displayName ?? wardId}"
 >
 	<div class="flex items-center justify-between gap-2">
 		<div class="flex min-w-0 items-center gap-1.5">
-			<span class="truncate font-mono text-sm font-semibold">{wardId}</span>
+			<span class="truncate font-mono text-sm font-semibold">{displayName ?? wardId}</span>
 			<span
 				class="h-2 w-2 shrink-0 rounded-full {dotClass}"
 				role="status"
