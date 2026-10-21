@@ -175,15 +175,37 @@ struct MultiVehicleFake {
 // added CPU load, consistent with a real GitHub-hosted runner (2 vCPUs)
 // being meaningfully more constrained than any machine this was developed
 // on, the same conclusion karshipta#237 reached for an unrelated test.
-// Called once per test, after every assertion that still needs the fakes
-// alive; takes the vector by value (moved in) so it can't be used again by
-// mistake afterward.
 void detach_fake_teardown(std::vector<MultiVehicleFake> fakes) {
     for (auto& fake : fakes) {
         std::thread([autopilot = std::move(fake.autopilot)]() mutable { autopilot.reset(); })
             .detach();
     }
 }
+
+// RAII guard around a test's fakes: dispatches detach_fake_teardown() in
+// its own destructor, so it runs on every exit path, not just one reached
+// by falling off the end of a test body. That distinction is the whole
+// point of this type, found by a second reviewer's independent pass
+// before this PR shipped: gtest's ASSERT_* macros expand to a bare
+// `return;` on failure, which still unwinds through ordinary local
+// destructors - an explicit detach_fake_teardown() call placed only at
+// the bottom of a test body is skipped entirely on that path, leaving
+// `fakes` to destruct inline right when a real regression is being
+// reported. That's exactly the hang this whole mechanism exists to
+// prevent, on exactly the path that matters most. Declared right after
+// `fakes` is fully populated in each test; holds a reference, not a copy,
+// so the mid-test explicit drop in MV-02/MV-03 (which moves one fake's
+// autopilot out directly) is unaffected.
+class DetachFakesOnExit {
+public:
+    explicit DetachFakesOnExit(std::vector<MultiVehicleFake>& fakes) : fakes_(fakes) {}
+    ~DetachFakesOnExit() { detach_fake_teardown(std::move(fakes_)); }
+    DetachFakesOnExit(const DetachFakesOnExit&) = delete;
+    DetachFakesOnExit& operator=(const DetachFakesOnExit&) = delete;
+
+private:
+    std::vector<MultiVehicleFake>& fakes_;
+};
 
 // Base fixture: a shared Mavsdk core and a FakeTransport, matching
 // command_executor_test.cpp's "never-connected ward" pattern - nothing
@@ -950,6 +972,7 @@ TEST_F(WardManagerTest, ThreeWardsConnectConcurrentlyEachToOwnSystemId) {
         fakes.push_back(
             MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
     }
+    DetachFakesOnExit detach_guard(fakes);
 
     auto manager = make_manager();
     for (size_t i = 0; i < fakes.size(); ++i) {
@@ -989,8 +1012,6 @@ TEST_F(WardManagerTest, ThreeWardsConnectConcurrentlyEachToOwnSystemId) {
     for (const auto& status : statuses) {
         EXPECT_TRUE(status.connected) << status.ward_id;
     }
-
-    detach_fake_teardown(std::move(fakes));
 }
 
 // karshipta#270, MV-02 (Yigitcan Ozturk's proposed matrix on #270): one
@@ -1022,6 +1043,7 @@ TEST_F(WardManagerTest, OneWardLosesLinkWhileOthersStayConnected) {
         fakes.push_back(
             MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
     }
+    DetachFakesOnExit detach_guard(fakes);
 
     auto manager = make_manager();
     for (size_t i = 0; i < fakes.size(); ++i) {
@@ -1062,8 +1084,6 @@ TEST_F(WardManagerTest, OneWardLosesLinkWhileOthersStayConnected) {
     EXPECT_TRUE(manager.is_connected("mv02-2"));
     const auto statuses = manager.list_status();
     ASSERT_EQ(statuses.size(), 3u);
-
-    detach_fake_teardown(std::move(fakes));
 }
 
 // karshipta#270, MV-03 (Yigitcan Ozturk's proposed matrix on #270): the
@@ -1090,6 +1110,7 @@ TEST_F(WardManagerTest, DisconnectedWardReconnectsUnderSameIdentity) {
         fakes.push_back(
             MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
     }
+    DetachFakesOnExit detach_guard(fakes);
 
     auto manager = make_manager();
     for (size_t i = 0; i < fakes.size(); ++i) {
@@ -1148,8 +1169,6 @@ TEST_F(WardManagerTest, DisconnectedWardReconnectsUnderSameIdentity) {
     // this happened.
     EXPECT_TRUE(manager.is_connected("mv03-0"));
     EXPECT_TRUE(manager.is_connected("mv03-2"));
-
-    detach_fake_teardown(std::move(fakes));
 }
 
 TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsCommandWithAckAndEvent) {
