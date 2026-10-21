@@ -492,6 +492,30 @@ private:
     // Empty disables persistence. Set once at construction, never mutated
     // after, so it's safe to read from any thread without wards_mutex_.
     std::filesystem::path persistence_path_;
+    // The geofence push_geofence() most recently built, re-sent to each
+    // ward run_reconnect_loop brings back up. Its own mutex, independent of
+    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
+    // the shared_ptrs it needs) before calling into any ward's
+    // upload_geofence(), the same snapshot-then-release shape
+    // run_publish_loop already uses, so these two locks are never nested
+    // and need no relative ordering rule.
+    //
+    // Declared before managed_wards_ on purpose (members destroy in reverse
+    // declaration order): every ward's reconnect_worker locks this mutex
+    // from run_reconnect_loop on each (re)connect, and that thread only
+    // stops when managed_wards_ itself is destroyed. Declaring this after
+    // managed_wards_ destroyed it first, so a reconnect_worker still mid-way
+    // through the geofence push at shutdown could lock an already-destroyed
+    // mutex - confirmed live: a test that ends its scope immediately after
+    // a ward's is_connected() first turns true (the moment run_reconnect_loop
+    // is about to touch this mutex) crashed deterministically with "mutex
+    // lock failed: Invalid argument" on every run, while a test that stays
+    // alive for several seconds past connect never saw it, since the
+    // reconnect_worker had long since moved past this section by the time
+    // the destructor ran. Same reasoning publish_worker_ below already
+    // applies correctly relative to managed_wards_; this didn't get it.
+    mutable std::mutex geofence_mutex_;
+    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Structural lock: guards managed_wards_'s shape only (insert, erase,
     // lookup). Does NOT guard any individual ward's busy/executor/
     // reconnect_worker/pending_auto_start_mission_id; those live behind that
@@ -503,15 +527,6 @@ private:
     // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
     std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
-    // The geofence push_geofence() most recently built, re-sent to each
-    // ward run_reconnect_loop brings back up. Its own mutex, independent of
-    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
-    // the shared_ptrs it needs) before calling into any ward's
-    // upload_geofence(), the same snapshot-then-release shape
-    // run_publish_loop already uses, so these two locks are never nested
-    // and need no relative ordering rule.
-    mutable std::mutex geofence_mutex_;
-    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Set-once, see the setters' own doc comments. Never reassigned after
     // start_publishing()/the first dispatch_command(), so reading these from
     // the publish thread or a CommandExecutor worker thread needs no lock.

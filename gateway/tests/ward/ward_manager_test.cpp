@@ -849,6 +849,45 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
     EXPECT_EQ(manager.list_ward_ids().size(), 1u);  // still registered, not removed
 }
 
+// karshipta#270 (regression): WardManager's own destructor used to run
+// into a genuine shutdown-ordering bug, not a test artifact - geofence_mutex_
+// was declared (in ward_manager.h) AFTER managed_wards_, so members destroy
+// in reverse declaration order meant geofence_mutex_ was destroyed BEFORE
+// managed_wards_ - but managed_wards_ is what actually stops and joins every
+// ward's reconnect_worker, and run_reconnect_loop locks geofence_mutex_ on
+// every (re)connect. A reconnect_worker still inside that lock_guard at
+// shutdown could lock an already-destroyed mutex. Reproduced with 100%
+// reliability by ending the test scope immediately after is_connected()
+// first turns true (the exact moment run_reconnect_loop is about to reach
+// that lock) - a test that instead stays alive for several seconds past
+// connect (HandleRemoveWardRejectsWhileAirborne above) never hit it, since
+// the reconnect_worker had long since moved past that section by the time
+// its destructor ran. Fixed by reordering geofence_mutex_/cached_geofence_
+// to before wards_mutex_/managed_wards_ in ward_manager.h, the same
+// reasoning publish_worker_ already correctly applies there. This test
+// failed with "mutex lock failed: Invalid argument" on every run before
+// that fix and is green and fast (not multi-second) after it.
+TEST_F(WardManagerTest, ManagerDestructsCleanlyRightAfterWardFirstConnects) {
+    constexpr uint16_t port = 25300;
+    constexpr uint8_t system_id = 10;
+    FakeInAirAutopilot fake(system_id, port);
+
+    auto manager = make_manager();
+    const auto ack = manager.handle_add_ward(make_add_request(
+        "req-mv01-a", "mv01-a", "udpin://127.0.0.1:" + std::to_string(port), system_id));
+    ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED);
+
+    bool connected = false;
+    for (int attempt = 0; attempt < 100 && !connected; ++attempt) {
+        connected = manager.is_connected("mv01-a");
+        if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(connected) << "fake autopilot never discovered";
+    // manager and fake go out of scope right here, with run_reconnect_loop
+    // most likely still inside (or about to enter) the geofence push it
+    // does on every connect - exactly the window the bug lived in.
+}
+
 TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsCommandWithAckAndEvent) {
     auto manager = make_manager();
 
