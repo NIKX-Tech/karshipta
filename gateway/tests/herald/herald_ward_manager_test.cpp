@@ -306,23 +306,18 @@ TEST_F(HeraldWardManagerStalenessTest, NeverGoesStaleWhileMessagesKeepArriving) 
     }
 }
 
-// karshipta#268: these three tests document ingest()'s current, deliberately
-// unvalidated behavior against the forum thread's own validation matrix
+// karshipta#268/#276: these two tests originally documented ingest()'s
+// unvalidated baseline against the forum thread's own validation matrix
 // ("delayed or out-of-order updates", "replayed older samples", "device
-// clock skew or invalid timestamps") - they are not regression tests for a
-// bug fix, since no fix exists yet. ingest() has no concept of "this
-// message's timestamp_ms is older than the last one I accepted for this
-// ward" at all: every message is accepted, stored, and broadcast exactly as
-// it arrives, unconditionally. These tests make that fact explicit and
-// checkable rather than implicit, so a future decision about whether to add
-// ordering/replay/clock-skew protection starts from a documented baseline,
-// not a guess. See the follow-up issue filed alongside these tests for the
-// actual design question (reject vs. flag vs. leave as-is) - deliberately
-// not decided here: rejecting an out-of-order message outright risks
-// permanently "poisoning" a ward's state if the very first message a
-// tracker ever sends happens to carry a bad clock, since every later,
-// correct message would then look older by comparison.
-TEST_F(HeraldWardManagerTest, AcceptsAnOlderTimestampArrivingAfterANewerOneWithNoProtection) {
+// clock skew or invalid timestamps"). #276 then added the "accept but flag"
+// mechanism (never reject - rejecting outright risks permanently
+// "poisoning" a ward whose very first message happened to carry a bad
+// clock) via the existing Event/WARNING mechanism, the same philosophy
+// isStaleSample() already uses on the console side. Updated here to assert
+// both halves: the data is still accepted exactly as before (nothing about
+// what's displayed changes), and a WARNING Event is now broadcast alongside
+// it.
+TEST_F(HeraldWardManagerTest, AcceptsAnOlderTimestampButFlagsItAsOutOfOrder) {
     auto newer = make_herald("tag-1");
     newer.set_timestamp_ms(2'000'000'000'000ULL);
     newer.mutable_position()->set_latitude_deg(60.0);
@@ -331,8 +326,9 @@ TEST_F(HeraldWardManagerTest, AcceptsAnOlderTimestampArrivingAfterANewerOneWithN
     // Same entity_id, an event timestamp a full day older than the message
     // just accepted - modeling either a delayed/out-of-order delivery or an
     // exact replay of an earlier reading, which look identical from
-    // ingest()'s point of view (it only ever looks at the message in front
-    // of it, never compares against what it last accepted).
+    // ingest()'s point of view (it only ever compares against the last
+    // *accepted* timestamp for this ward, never tries to distinguish the
+    // two cases).
     auto older = make_herald("tag-1");
     older.set_timestamp_ms(newer.timestamp_ms() - 86'400'000);
     older.mutable_position()->set_latitude_deg(10.0);
@@ -340,25 +336,36 @@ TEST_F(HeraldWardManagerTest, AcceptsAnOlderTimestampArrivingAfterANewerOneWithN
 
     const auto envelopes = transport_.broadcast_envelopes();
     const auto& latest_state = envelopes.back().ward_state();
-    // The console now displays the OLDER reading as current, having
-    // overwritten the newer one with no warning anywhere in the wire data -
-    // confirmed here, not assumed. connected() stays true throughout: this
-    // is not a staleness-timeout scenario, the ward is reporting normally
-    // the whole time, just with a message that arrived out of event order.
+    // The console still displays the OLDER reading as current, having
+    // overwritten the newer one - "accept", not "reject", is unchanged.
+    // connected() stays true throughout: this is not a staleness-timeout
+    // scenario, the ward is reporting normally the whole time, just with a
+    // message that arrived out of event order.
     EXPECT_DOUBLE_EQ(latest_state.position().latitude_deg(), 10.0);
     EXPECT_EQ(latest_state.timestamp_ms(), older.timestamp_ms());
     EXPECT_TRUE(latest_state.connected());
+
+    // But now flagged: a WARNING Event for this ward, distinct from the
+    // accepted state, so an operator (or a future automated consumer) can
+    // tell something's off without the data itself being hidden or altered.
+    bool found_event = false;
+    for (const auto& envelope : envelopes) {
+        if (envelope.has_event() && envelope.event().code() == "OUT_OF_ORDER_SAMPLE") {
+            EXPECT_EQ(envelope.event().ward_id(), "tag-1");
+            EXPECT_EQ(envelope.event().severity(), karshipta::v1::SEVERITY_WARNING);
+            found_event = true;
+        }
+    }
+    EXPECT_TRUE(found_event) << "expected an OUT_OF_ORDER_SAMPLE event";
 }
 
-TEST_F(HeraldWardManagerTest, AcceptsAFarFutureTimestampWithNoClockSkewValidation) {
+TEST_F(HeraldWardManagerTest, AcceptsAFarFutureTimestampButFlagsClockSkew) {
     // A device clock far enough ahead of the gateway's own that
     // ingestion_ms - timestamp_ms (the exact quantity isStaleSample() on the
     // console reads, see ward-format.ts) comes out negative - "this sample
     // arrived before its own recorded event time," which should be
     // impossible and is exactly the kind of bad-clock signal the matrix's
-    // "device clock skew or invalid timestamps" item asks about. ingest()
-    // has no sanity check on timestamp_ms at all; this documents that, not
-    // a bug fix.
+    // "device clock skew or invalid timestamps" item asks about.
     auto msg = make_herald("tag-1");
     const uint64_t now_ms =
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -372,8 +379,58 @@ TEST_F(HeraldWardManagerTest, AcceptsAFarFutureTimestampWithNoClockSkewValidatio
     EXPECT_EQ(state.timestamp_ms(), msg.timestamp_ms());
     // ingestion_ms is the gateway's own real wall clock, so this is
     // reliably negative when timestamp_ms claims to be in the future -
-    // exactly the nonsensical value a clock-skew check would need to catch.
+    // exactly the nonsensical value the clock-skew check below is built on.
     const int64_t event_to_ingestion_gap_ms =
         static_cast<int64_t>(state.ingestion_ms()) - static_cast<int64_t>(state.timestamp_ms());
     EXPECT_LT(event_to_ingestion_gap_ms, 0);
+
+    bool found_event = false;
+    for (const auto& envelope : envelopes) {
+        if (envelope.has_event() && envelope.event().code() == "CLOCK_SKEW") {
+            EXPECT_EQ(envelope.event().ward_id(), "tag-1");
+            EXPECT_EQ(envelope.event().severity(), karshipta::v1::SEVERITY_WARNING);
+            found_event = true;
+        }
+    }
+    EXPECT_TRUE(found_event) << "expected a CLOCK_SKEW event";
+}
+
+// karshipta#276: the clock-skew check is independent of ordering history -
+// it must fire on the very first message this ward ever sends, when there
+// is no previous_timestamp_ms to compare against at all (the out-of-order
+// check above only ever applies from the second message onward).
+TEST_F(HeraldWardManagerTest, FlagsClockSkewOnTheFirstMessageFromABrandNewWard) {
+    auto msg = make_herald("brand-new-tag");
+    const uint64_t now_ms =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count());
+    msg.set_timestamp_ms(now_ms + 3'600'000);
+    ASSERT_EQ(herald_manager_.ingest(msg), HeraldIngestResult::kOk);
+
+    bool found_event = false;
+    for (const auto& envelope : transport_.broadcast_envelopes()) {
+        if (envelope.has_event() && envelope.event().code() == "CLOCK_SKEW") {
+            found_event = true;
+        }
+    }
+    EXPECT_TRUE(found_event);
+}
+
+// karshipta#276: a second, in-order message for an already-known ward must
+// never be flagged - the out-of-order check has to compare against history,
+// not fire unconditionally once history exists.
+TEST_F(HeraldWardManagerTest, DoesNotFlagANormalInOrderSecondMessage) {
+    ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+
+    auto second = make_herald("tag-1");
+    second.set_timestamp_ms(second.timestamp_ms() + 1000);  // strictly newer
+    ASSERT_EQ(herald_manager_.ingest(second), HeraldIngestResult::kOk);
+
+    for (const auto& envelope : transport_.broadcast_envelopes()) {
+        if (envelope.has_event()) {
+            EXPECT_NE(envelope.event().code(), "OUT_OF_ORDER_SAMPLE");
+            EXPECT_NE(envelope.event().code(), "CLOCK_SKEW");
+        }
+    }
 }
