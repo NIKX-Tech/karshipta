@@ -7,10 +7,12 @@
 		formatBatteryPct,
 		formatHeadingCompass,
 		formatModeLabel,
+		isStaleSample,
 		linkDotState
 	} from '$lib/ward-format';
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import { formatAltitude, formatSpeed } from '$lib/units/format';
+	import { formatTimeAgo } from '$lib/time-format';
 
 	interface Props {
 		wardId: string;
@@ -19,11 +21,28 @@
 	const { wardId }: Props = $props();
 
 	const ward = $derived(fleet.wards[wardId]);
-	const state = $derived(ward?.state);
+	const wardState = $derived(ward?.state);
 
-	const dotState = $derived(linkDotState(state));
+	const dotState = $derived(linkDotState(wardState));
+	// karshipta#268: ticks independently of connected, same reasoning as
+	// ward-card.svelte's own clock - see that file for the full comment.
+	let now = $state(Date.now());
+	$effect(() => {
+		const interval = setInterval(() => (now = Date.now()), 10_000);
+		return () => clearInterval(interval);
+	});
+	const updatedAgoLabel = $derived(
+		wardState && wardState.ingestionMs > 0 ? formatTimeAgo(wardState.ingestionMs, now) : undefined
+	);
+	const staleSample = $derived(isStaleSample(wardState));
 	const dotLabel = $derived(
-		dotState === 'ok' ? 'Connected' : dotState === 'fault' ? 'Connected, health fault' : 'Link lost'
+		dotState === 'ok'
+			? 'Connected'
+			: dotState === 'fault'
+				? 'Connected, health fault'
+				: updatedAgoLabel
+					? `Link lost - last update ${updatedAgoLabel}`
+					: 'Link lost'
 	);
 	const dotClass = $derived(
 		dotState === 'ok'
@@ -33,8 +52,8 @@
 				: 'border border-fg-muted bg-transparent'
 	);
 
-	const modeLabel = $derived(formatModeLabel(state?.flight));
-	const tier = $derived(batteryTier(state?.battery));
+	const modeLabel = $derived(formatModeLabel(wardState?.flight));
+	const tier = $derived(batteryTier(wardState?.battery));
 	const hintLabel = $derived(batteryHintLabel(tier));
 	// See ward-card.svelte: no autopilot behind this ward at all, not SITL
 	// (a real autopilot binary flying simulated physics).
@@ -53,7 +72,7 @@
 				// above from the same connected flag) is reused rather than a
 				// second ad hoc check, same as this file's own tags already
 				// lean on it for the connectivity dot.
-				state?.flight?.armed
+				wardState?.flight?.armed
 					? dotState === 'lost'
 						? {
 								text: 'ARMED (STALE)',
@@ -69,6 +88,17 @@
 							title: 'No autopilot behind this ward; demo telemetry standing in for one'
 						}
 					: undefined,
+				// karshipta#268: independent of dotState - a connection can be
+				// fully live while still delivering a sample that was already
+				// old on arrival (a Herald tracker buffering before it sends).
+				staleSample
+					? {
+							text: 'STALE SAMPLE',
+							class: 'text-accent',
+							title:
+								"This reading was already old when the gateway received it - the link itself is fine, the sample isn't fresh"
+						}
+					: undefined,
 				hintLabel
 					? { text: hintLabel, class: tier === 'critical' ? 'text-critical' : 'text-accent' }
 					: undefined
@@ -76,21 +106,23 @@
 		).filter((tag): tag is { text: string; class: string; title?: string } => tag !== undefined)
 	);
 
-	const batteryPctLabel = $derived(formatBatteryPct(state?.battery));
+	const batteryPctLabel = $derived(formatBatteryPct(wardState?.battery));
 	const batteryClass = $derived(
 		tier === 'critical' ? 'text-critical' : tier === 'caution' ? 'text-accent' : 'text-fg'
 	);
-	const headingLabel = $derived(formatHeadingCompass(state?.headingDeg));
-	const headingDegValue = $derived(state?.headingDeg);
+	const headingLabel = $derived(formatHeadingCompass(wardState?.headingDeg));
+	const headingDegValue = $derived(wardState?.headingDeg);
 	const altLabel = $derived(
-		state?.position
-			? formatAltitude(state.position.altitudeRelM, unitsStore.current)
+		wardState?.position
+			? formatAltitude(wardState.position.altitudeRelM, unitsStore.current)
 			: unitsStore.current === 'metric'
 				? '? m'
 				: '? ft'
 	);
 	const groundSpeed = $derived(
-		state?.velocity ? Math.hypot(state.velocity.northMS, state.velocity.eastMS) : undefined
+		wardState?.velocity
+			? Math.hypot(wardState.velocity.northMS, wardState.velocity.eastMS)
+			: undefined
 	);
 	const speedLabel = $derived(
 		groundSpeed === undefined
@@ -151,5 +183,10 @@
 			</svg>
 		{/if}
 		{headingLabel} &middot; {altLabel} &middot; {speedLabel}
+		<!-- Same "while disconnected only" reasoning as ward-card.svelte: while
+		     connected this would just repeat "just now" on every tick. -->
+		{#if dotState === 'lost' && updatedAgoLabel}
+			&middot; {updatedAgoLabel}
+		{/if}
 	</span>
 </div>
