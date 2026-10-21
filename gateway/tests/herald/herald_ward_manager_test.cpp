@@ -4,9 +4,11 @@
 #include <herald/v0/herald.pb.h>
 #include <karshipta/v1/envelope.pb.h>
 
+#include <chrono>
 #include <cstddef>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -199,5 +201,107 @@ TEST_F(HeraldWardManagerTest, MapsEveryEntityClassToExpectedWardClass) {
     for (std::size_t i = 0; i < cases.size(); ++i) {
         ASSERT_TRUE(envelopes[i * 2].has_ward_info());
         EXPECT_EQ(envelopes[i * 2].ward_info().ward_class(), cases[i].second);
+    }
+}
+
+// karshipta#268: timestamp_ms (device/event time, from the payload) and
+// ingestion_ms (gateway wall-clock at receipt) are independent fields now;
+// make_herald's fixed timestamp_ms (year 2023) proves this isn't just
+// echoing the same value under a new name - a real gateway receiving that
+// message today has an ingestion_ms far later than its timestamp_ms.
+TEST_F(HeraldWardManagerTest, SetsIngestionTimeIndependentlyOfDeviceEventTime) {
+    ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_EQ(envelopes.size(), 2u);
+    const auto& state = envelopes[1].ward_state();
+    EXPECT_EQ(state.timestamp_ms(), 1700000000000ULL);
+    EXPECT_GT(state.ingestion_ms(), state.timestamp_ms());
+}
+
+// Fixture for staleness tests: a short stale_timeout_ so these don't have to
+// wait out the real 30s default. Separate from HeraldWardManagerTest (which
+// keeps the production default) since none of its own tests run anywhere
+// near long enough for staleness to matter to them either way.
+class HeraldWardManagerStalenessTest : public ::testing::Test {
+   protected:
+    HeraldWardManagerStalenessTest()
+        : core_(WardConnection::create_shared_core()),
+          ward_manager_(core_, transport_),
+          herald_manager_(transport_, ward_manager_, kStaleTimeout) {}
+
+    static constexpr std::chrono::milliseconds kStaleTimeout{100};
+
+    std::shared_ptr<mavsdk::Mavsdk> core_;
+    FakeTransport transport_;
+    WardManager ward_manager_;
+    HeraldWardManager herald_manager_;
+};
+
+TEST_F(HeraldWardManagerStalenessTest, FlipsConnectedFalseAfterTimeoutWithNoNewMessage) {
+    ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+
+    // Poll rather than a fixed sleep: the checker thread's own wake interval
+    // is derived from kStaleTimeout (see stale_check_interval()), not a
+    // value this test controls directly, so a fixed sleep would be guessing
+    // at its schedule instead of just waiting for the effect.
+    bool stale_broadcast_seen = false;
+    for (int attempt = 0; attempt < 100 && !stale_broadcast_seen; ++attempt) {
+        for (const auto& envelope : transport_.broadcast_envelopes()) {
+            if (envelope.has_ward_state() && !envelope.ward_state().connected()) {
+                stale_broadcast_seen = true;
+                break;
+            }
+        }
+        if (!stale_broadcast_seen) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_TRUE(stale_broadcast_seen) << "no stale (connected=false) WardState ever broadcast";
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    ASSERT_GE(envelopes.size(),
+              3u);  // info, first state(connected=true), stale state(connected=false)
+    const auto& stale_state = envelopes.back().ward_state();
+    EXPECT_EQ(stale_state.ward_id(), "tag-1");
+    EXPECT_FALSE(stale_state.connected());
+    // The last-known reading is re-sent, not fabricated: position survives
+    // onto the stale broadcast unchanged.
+    EXPECT_DOUBLE_EQ(stale_state.position().latitude_deg(), 52.37);
+}
+
+TEST_F(HeraldWardManagerStalenessTest, RecoversOnNextMessageAfterGoingStale) {
+    ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+
+    bool stale_broadcast_seen = false;
+    for (int attempt = 0; attempt < 100 && !stale_broadcast_seen; ++attempt) {
+        for (const auto& envelope : transport_.broadcast_envelopes()) {
+            if (envelope.has_ward_state() && !envelope.ward_state().connected()) {
+                stale_broadcast_seen = true;
+                break;
+            }
+        }
+        if (!stale_broadcast_seen) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_TRUE(stale_broadcast_seen) << "no stale (connected=false) WardState ever broadcast";
+
+    ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+
+    const auto envelopes = transport_.broadcast_envelopes();
+    EXPECT_TRUE(envelopes.back().ward_state().connected());
+}
+
+TEST_F(HeraldWardManagerStalenessTest, NeverGoesStaleWhileMessagesKeepArriving) {
+    // Re-ingests faster than kStaleTimeout, well past when a ward with no
+    // staleness-reset logic would have already flipped once - proves the
+    // checker is actually looking at last_seen_at, not just firing once per
+    // ward unconditionally after some fixed delay from first sight.
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_EQ(herald_manager_.ingest(make_herald("tag-1")), HeraldIngestResult::kOk);
+        std::this_thread::sleep_for(HeraldWardManagerStalenessTest::kStaleTimeout / 4);
+    }
+
+    for (const auto& envelope : transport_.broadcast_envelopes()) {
+        if (envelope.has_ward_state()) {
+            EXPECT_TRUE(envelope.ward_state().connected());
+        }
     }
 }

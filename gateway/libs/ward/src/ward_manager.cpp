@@ -127,7 +127,13 @@ karshipta::v1::WardState build_ward_state(const std::string& ward_id,
                                           const TelemetryInfo& telemetry) {
     karshipta::v1::WardState state;
     state.set_ward_id(ward_id);
-    state.set_timestamp_ms(unix_epoch_ms());
+    // karshipta#268: no reliable absolute device-side clock exists on this
+    // path (see WardState.timestamp_ms's own doc comment in telemetry.proto),
+    // so both fields read the same gateway wall-clock value here; a real
+    // MAVLink device-time source is separate, larger work.
+    const uint64_t now_ms = unix_epoch_ms();
+    state.set_timestamp_ms(now_ms);
+    state.set_ingestion_ms(now_ms);
 
     const auto position = telemetry.get_position();
     auto* proto_position = state.mutable_position();
