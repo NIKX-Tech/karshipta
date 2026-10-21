@@ -23,9 +23,16 @@
 		 * per-ward status concept this library has no notion of. Absent by
 		 * default; this library never sets it itself. */
 		statusBadge?: StatusBadge;
+		/** A consumer-assigned friendly name for this ward, shown in place
+		 * of the raw wardId when set. This library has no notion of a ward
+		 * name itself (WardInfo carries no such field over the wire) - a
+		 * consumer that lets an operator rename a ward in its own storage
+		 * passes the result here. Falls back to wardId when absent, same as
+		 * today. */
+		displayName?: string;
 	}
 
-	const { wardId, ward, readonly, statusBadge }: Props = $props();
+	const { wardId, ward, readonly, statusBadge, displayName }: Props = $props();
 	const statusBadgeToneClass: Record<StatusBadge['tone'], string> = {
 		muted: 'text-fg-muted',
 		warning: 'text-accent',
@@ -145,7 +152,7 @@
 		     the dot and remove button must never drop to a second line, or a
 		     card in a narrow rail can render with an apparently-missing
 		     remove button that's actually just wrapped out of view below. -->
-		<h2 class="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{wardId}</h2>
+		<h2 class="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{displayName ?? wardId}</h2>
 		{#if synthetic}
 			<span
 				class="shrink-0 text-[9px] font-medium tracking-widest text-synthetic"
