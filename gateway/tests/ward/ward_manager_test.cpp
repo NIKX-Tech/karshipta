@@ -1,5 +1,6 @@
 #include "ward_manager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -146,6 +147,64 @@ private:
     std::shared_ptr<mavsdk::Mavsdk> core_;
     mavsdk::TelemetryServer telemetry_server_;
     std::jthread publisher_;
+};
+
+// A fake autopilot bound to a chosen port/system id, used by the MV-01/02/03
+// multi-vehicle tests below (karshipta#270) - several of these exist at
+// once in each of those tests, which plain FakeInAirAutopilot alone does
+// not need to track (ward_id/port/system_id all come from the test's own
+// loop variables there).
+struct MultiVehicleFake {
+    uint16_t port;
+    uint8_t system_id;
+    std::unique_ptr<FakeInAirAutopilot> autopilot;
+};
+
+// Dispatches every fake's destruction onto its own detached thread, the
+// same reasoning as WardConnection::disconnect()'s own karshipta#274 fix:
+// each fake is a raw mavsdk::Mavsdk core (constructed directly, not through
+// WardConnection), so it has none of that fix's protection against
+// karshipta#273's vendored remove_connection() hazard on its own. This is
+// not a hypothetical concern: the first version of
+// ThreeWardsConnectConcurrentlyEachToOwnSystemId below destroyed its three
+// fakes inline at scope-end (safe for one fake alone, per
+// ManagerDestructsCleanlyRightAfterWardFirstConnects above - but tearing
+// down three real MAVSDK cores synchronously, one after another, on a
+// loaded CI runner is a much larger window) and timed out in CI's clang
+// job on the very first PR run - never reproduced locally even under
+// added CPU load, consistent with a real GitHub-hosted runner (2 vCPUs)
+// being meaningfully more constrained than any machine this was developed
+// on, the same conclusion karshipta#237 reached for an unrelated test.
+void detach_fake_teardown(std::vector<MultiVehicleFake> fakes) {
+    for (auto& fake : fakes) {
+        std::thread([autopilot = std::move(fake.autopilot)]() mutable { autopilot.reset(); })
+            .detach();
+    }
+}
+
+// RAII guard around a test's fakes: dispatches detach_fake_teardown() in
+// its own destructor, so it runs on every exit path, not just one reached
+// by falling off the end of a test body. That distinction is the whole
+// point of this type, found by a second reviewer's independent pass
+// before this PR shipped: gtest's ASSERT_* macros expand to a bare
+// `return;` on failure, which still unwinds through ordinary local
+// destructors - an explicit detach_fake_teardown() call placed only at
+// the bottom of a test body is skipped entirely on that path, leaving
+// `fakes` to destruct inline right when a real regression is being
+// reported. That's exactly the hang this whole mechanism exists to
+// prevent, on exactly the path that matters most. Declared right after
+// `fakes` is fully populated in each test; holds a reference, not a copy,
+// so the mid-test explicit drop in MV-02/MV-03 (which moves one fake's
+// autopilot out directly) is unaffected.
+class DetachFakesOnExit {
+public:
+    explicit DetachFakesOnExit(std::vector<MultiVehicleFake>& fakes) : fakes_(fakes) {}
+    ~DetachFakesOnExit() { detach_fake_teardown(std::move(fakes_)); }
+    DetachFakesOnExit(const DetachFakesOnExit&) = delete;
+    DetachFakesOnExit& operator=(const DetachFakesOnExit&) = delete;
+
+private:
+    std::vector<MultiVehicleFake>& fakes_;
 };
 
 // Base fixture: a shared Mavsdk core and a FakeTransport, matching
@@ -847,6 +906,269 @@ TEST_F(WardManagerTest, HandleRemoveWardRejectsWhileAirborne) {
     EXPECT_EQ(remove_ack.status(), karshipta::v1::WARD_CONFIG_STATUS_REJECTED);
     EXPECT_NE(remove_ack.message().find("air"), std::string::npos) << remove_ack.message();
     EXPECT_EQ(manager.list_ward_ids().size(), 1u);  // still registered, not removed
+}
+
+// karshipta#270 (regression): WardManager's own destructor used to run
+// into a genuine shutdown-ordering bug, not a test artifact - geofence_mutex_
+// was declared (in ward_manager.h) AFTER managed_wards_, so members destroy
+// in reverse declaration order meant geofence_mutex_ was destroyed BEFORE
+// managed_wards_ - but managed_wards_ is what actually stops and joins every
+// ward's reconnect_worker, and run_reconnect_loop locks geofence_mutex_ on
+// every (re)connect. A reconnect_worker still inside that lock_guard at
+// shutdown could lock an already-destroyed mutex. Reproduced with 100%
+// reliability by ending the test scope immediately after is_connected()
+// first turns true (the exact moment run_reconnect_loop is about to reach
+// that lock) - a test that instead stays alive for several seconds past
+// connect (HandleRemoveWardRejectsWhileAirborne above) never hit it, since
+// the reconnect_worker had long since moved past that section by the time
+// its destructor ran. Fixed by reordering geofence_mutex_/cached_geofence_
+// to before wards_mutex_/managed_wards_ in ward_manager.h, the same
+// reasoning publish_worker_ already correctly applies there. This test
+// failed with "mutex lock failed: Invalid argument" on every run before
+// that fix and is green and fast (not multi-second) after it.
+TEST_F(WardManagerTest, ManagerDestructsCleanlyRightAfterWardFirstConnects) {
+    constexpr uint16_t port = 25300;
+    constexpr uint8_t system_id = 10;
+    FakeInAirAutopilot fake(system_id, port);
+
+    auto manager = make_manager();
+    const auto ack = manager.handle_add_ward(make_add_request(
+        "req-mv01-a", "mv01-a", "udpin://127.0.0.1:" + std::to_string(port), system_id));
+    ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED);
+
+    bool connected = false;
+    for (int attempt = 0; attempt < 100 && !connected; ++attempt) {
+        connected = manager.is_connected("mv01-a");
+        if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(connected) << "fake autopilot never discovered";
+    // manager and fake go out of scope right here, with run_reconnect_loop
+    // most likely still inside (or about to enter) the geofence push it
+    // does on every connect - exactly the window the bug lived in.
+}
+
+// karshipta#270, MV-01 (Yigitcan Ozturk's proposed regression matrix on
+// #270: three wards connect concurrently, each binding to its own expected
+// system id). The single-ward fallout of originally attempting this test is
+// already covered above (ManagerDestructsCleanlyRightAfterWardFirstConnects,
+// named after this one since that is what it was trying to be before the
+// destructor bug it found got its own focused regression test); this is the
+// real three-ward version, now that #271 (the destructor-ordering bug) is
+// fixed. This test never tears any ward down mid-test, only at scope-end,
+// where disconnect()'s own detached-thread dispatch (karshipta#274) means a
+// stuck remove_connection() cannot block this test's exit either - but that
+// fix lives in WardConnection, not in the three fakes, which are raw
+// mavsdk::Mavsdk cores with no such protection; see detach_fake_teardown's
+// own comment for why their teardown is dispatched the same way, and why
+// this is not a hypothetical precaution. Verified locally with the
+// detached fake teardown in place: 8 consecutive runs under added CPU
+// load, all green, ~4.4s each (see detach_fake_teardown's own comment for
+// why "under added load" matters here and wasn't enough on its own before
+// that fix).
+TEST_F(WardManagerTest, ThreeWardsConnectConcurrentlyEachToOwnSystemId) {
+    std::vector<MultiVehicleFake> fakes;
+    for (const auto& [port, system_id] :
+         std::vector<std::pair<uint16_t, uint8_t>>{{25310, 21}, {25311, 22}, {25312, 23}}) {
+        fakes.push_back(
+            MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
+    }
+    DetachFakesOnExit detach_guard(fakes);
+
+    auto manager = make_manager();
+    for (size_t i = 0; i < fakes.size(); ++i) {
+        const auto ward_id = "mv01-" + std::to_string(i);
+        const auto ack = manager.handle_add_ward(make_add_request(
+            "req-" + ward_id, ward_id, "udpin://127.0.0.1:" + std::to_string(fakes[i].port),
+            fakes[i].system_id));
+        ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED) << ward_id;
+    }
+
+    // Poll all three together rather than one at a time: sequential polling
+    // would hide any cross-ward interference in WardManager's shared
+    // discovery/dispatch path, which is the entire point of this test over
+    // the single-ward version above.
+    std::array<bool, 3> connected{false, false, false};
+    for (int attempt = 0; attempt < 100 && !(connected[0] && connected[1] && connected[2]);
+         ++attempt) {
+        for (size_t i = 0; i < fakes.size(); ++i) {
+            connected[i] = manager.is_connected("mv01-" + std::to_string(i));
+        }
+        if (!(connected[0] && connected[1] && connected[2])) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    for (size_t i = 0; i < fakes.size(); ++i) {
+        EXPECT_TRUE(connected[i]) << "mv01-" << i << " never connected";
+    }
+
+    // Each ward bound to its OWN system id, not a neighbor's: list_status()
+    // exposes connected per ward_id, and each ward_id's connection_url
+    // targets a distinct fake, so a cross-wiring bug would show as one of
+    // the three staying permanently unconnected (its real fake's packets
+    // arriving on the wrong ward) rather than a wrong-but-connected state -
+    // already ruled out by the ASSERT above, which requires all three.
+    const auto statuses = manager.list_status();
+    ASSERT_EQ(statuses.size(), 3u);
+    for (const auto& status : statuses) {
+        EXPECT_TRUE(status.connected) << status.ward_id;
+    }
+}
+
+// karshipta#270, MV-02 (Yigitcan Ozturk's proposed matrix on #270): one
+// ward loses its link while the other two remain connected and keep
+// reporting their own state, unaffected.
+//
+// "Losing a link" here means destroying that one ward's fake autopilot, so
+// the real WardConnection simply stops hearing heartbeats and MAVSDK's own
+// timeout (not anything karshipta drives directly) eventually flips
+// is_connected() to false - the same mechanism a real radio dropout would
+// trigger, not a synthetic shortcut. The fake's destruction is dispatched
+// onto its own detached thread before waiting on anything, deliberately
+// mirroring WardConnection::disconnect()'s own karshipta#274 fix: the fake
+// is a raw mavsdk::Mavsdk core, constructed directly rather than through
+// WardConnection, so it has no equivalent protection against #273's
+// MavsdkImpl::remove_connection() hazard on its own - destroying it inline
+// on this thread would reintroduce exactly the risk #274 fixed, just on
+// the test's side of the connection instead of karshipta's. The other two
+// fakes, never dropped, still get the same detached teardown at the end
+// of this test for the reason detach_fake_teardown's own comment gives -
+// tearing down several real MAVSDK cores inline at once is the actual
+// risk, not just the one this test deliberately drops. Verified locally
+// with the detached fake teardown in place: 8 consecutive runs under
+// added CPU load, all green, ~5.4s each.
+TEST_F(WardManagerTest, OneWardLosesLinkWhileOthersStayConnected) {
+    std::vector<MultiVehicleFake> fakes;
+    for (const auto& [port, system_id] :
+         std::vector<std::pair<uint16_t, uint8_t>>{{25320, 31}, {25321, 32}, {25322, 33}}) {
+        fakes.push_back(
+            MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
+    }
+    DetachFakesOnExit detach_guard(fakes);
+
+    auto manager = make_manager();
+    for (size_t i = 0; i < fakes.size(); ++i) {
+        const auto ward_id = "mv02-" + std::to_string(i);
+        const auto ack = manager.handle_add_ward(make_add_request(
+            "req-" + ward_id, ward_id, "udpin://127.0.0.1:" + std::to_string(fakes[i].port),
+            fakes[i].system_id));
+        ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED) << ward_id;
+    }
+
+    auto all_connected = [&manager] {
+        for (size_t i = 0; i < 3; ++i) {
+            if (!manager.is_connected("mv02-" + std::to_string(i))) return false;
+        }
+        return true;
+    };
+    for (int attempt = 0; attempt < 100 && !all_connected(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(all_connected()) << "not all three wards connected before the drop";
+
+    // Drop mv02-1's link. See this test's own doc comment for why the
+    // fake's destruction runs on a detached thread rather than inline here.
+    std::thread([fake = std::move(fakes[1].autopilot)]() mutable { fake.reset(); }).detach();
+
+    bool dropped = false;
+    for (int attempt = 0; attempt < 200 && !dropped; ++attempt) {
+        dropped = !manager.is_connected("mv02-1");
+        if (!dropped) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_TRUE(dropped) << "mv02-1 never registered as disconnected";
+
+    // The other two must not have been affected at all: still connected,
+    // still their own status entries, no cross-ward interference from the
+    // drop or from mv02-1's own reconnect_worker now retrying in the
+    // background.
+    EXPECT_TRUE(manager.is_connected("mv02-0"));
+    EXPECT_TRUE(manager.is_connected("mv02-2"));
+    const auto statuses = manager.list_status();
+    ASSERT_EQ(statuses.size(), 3u);
+}
+
+// karshipta#270, MV-03 (Yigitcan Ozturk's proposed matrix on #270): the
+// disconnected ward reconnects under the same identity without duplicate
+// registration or cross-vehicle state contamination. Builds directly on
+// MV-02 above (same drop mechanism and the same reasoning for why the old
+// fake's destruction is dispatched to a detached thread); the new step
+// here is standing a fresh fake back up on the dropped ward's own port and
+// system id and confirming WardManager's existing reconnect_worker (still
+// running the whole time, never stopped or re-started) picks it back up
+// on its own, with no new ward_id ever created and the other two wards
+// never affected. This is closer to #273's own documented residual gap
+// than MV-01/MV-02 are (a connect racing a teardown, now both involving
+// the same ward's own reconnect path rather than a different ward's), so
+// it is the one most likely to surface anything left. The two wards never
+// dropped also get the same detached teardown as the others at the end of
+// this test, for detach_fake_teardown's own reasons. Verified locally
+// with the detached fake teardown in place: 8 consecutive runs under
+// added CPU load, all green, ~7.4s each.
+TEST_F(WardManagerTest, DisconnectedWardReconnectsUnderSameIdentity) {
+    std::vector<MultiVehicleFake> fakes;
+    for (const auto& [port, system_id] :
+         std::vector<std::pair<uint16_t, uint8_t>>{{25330, 41}, {25331, 42}, {25332, 43}}) {
+        fakes.push_back(
+            MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
+    }
+    DetachFakesOnExit detach_guard(fakes);
+
+    auto manager = make_manager();
+    for (size_t i = 0; i < fakes.size(); ++i) {
+        const auto ward_id = "mv03-" + std::to_string(i);
+        const auto ack = manager.handle_add_ward(make_add_request(
+            "req-" + ward_id, ward_id, "udpin://127.0.0.1:" + std::to_string(fakes[i].port),
+            fakes[i].system_id));
+        ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED) << ward_id;
+    }
+
+    auto all_connected = [&manager] {
+        for (size_t i = 0; i < 3; ++i) {
+            if (!manager.is_connected("mv03-" + std::to_string(i))) return false;
+        }
+        return true;
+    };
+    for (int attempt = 0; attempt < 100 && !all_connected(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(all_connected()) << "not all three wards connected before the drop";
+
+    const uint16_t dropped_port = fakes[1].port;
+    const uint8_t dropped_system_id = fakes[1].system_id;
+    std::thread([fake = std::move(fakes[1].autopilot)]() mutable { fake.reset(); }).detach();
+
+    bool dropped = false;
+    for (int attempt = 0; attempt < 200 && !dropped; ++attempt) {
+        dropped = !manager.is_connected("mv03-1");
+        if (!dropped) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(dropped) << "mv03-1 never registered as disconnected";
+
+    // Stand a fresh fake back up on the SAME port and system id. The
+    // existing reconnect_worker for mv03-1 (started once, never stopped)
+    // is already looping on connect_with_retry() in the background and
+    // should find this without any further action from the test.
+    fakes[1].autopilot = std::make_unique<FakeInAirAutopilot>(dropped_system_id, dropped_port);
+
+    bool reconnected = false;
+    for (int attempt = 0; attempt < 100 && !reconnected; ++attempt) {
+        reconnected = manager.is_connected("mv03-1");
+        if (!reconnected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_TRUE(reconnected) << "mv03-1 never reconnected under its original identity";
+
+    // No duplicate registration: still exactly the 3 original ward_ids,
+    // nothing new created by the reconnect.
+    const auto ids = manager.list_ward_ids();
+    EXPECT_EQ(ids.size(), 3u);
+    for (const auto& ward_id : {"mv03-0", "mv03-1", "mv03-2"}) {
+        EXPECT_NE(std::find(ids.begin(), ids.end(), ward_id), ids.end()) << ward_id;
+    }
+
+    // No cross-vehicle contamination: the two wards that were never
+    // touched are still exactly as connected as they were before any of
+    // this happened.
+    EXPECT_TRUE(manager.is_connected("mv03-0"));
+    EXPECT_TRUE(manager.is_connected("mv03-2"));
 }
 
 TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsCommandWithAckAndEvent) {

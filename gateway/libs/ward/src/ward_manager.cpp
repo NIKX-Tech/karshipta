@@ -127,7 +127,13 @@ karshipta::v1::WardState build_ward_state(const std::string& ward_id,
                                           const TelemetryInfo& telemetry) {
     karshipta::v1::WardState state;
     state.set_ward_id(ward_id);
-    state.set_timestamp_ms(unix_epoch_ms());
+    // karshipta#268: no reliable absolute device-side clock exists on this
+    // path (see WardState.timestamp_ms's own doc comment in telemetry.proto),
+    // so both fields read the same gateway wall-clock value here; a real
+    // MAVLink device-time source is separate, larger work.
+    const uint64_t now_ms = unix_epoch_ms();
+    state.set_timestamp_ms(now_ms);
+    state.set_ingestion_ms(now_ms);
 
     const auto position = telemetry.get_position();
     auto* proto_position = state.mutable_position();
@@ -350,6 +356,66 @@ WardManager::~WardManager() {
             lock.lock();
         }
     }
+    // Drop this snapshot's own shared_ptr copies now, explicitly, rather
+    // than leaving them to release whenever `wards` goes out of scope at
+    // the end of this function (after the detached-dispatch code below).
+    // Caught empirically, not by inspection: without this, `wards` is
+    // still holding a reference to every ManagedWard at that point, so
+    // it - not the detached thread's own copy - ends up being whichever
+    // holder drops the LAST reference, and shared_ptr runs the real
+    // destructor on whichever thread does that. That silently defeated
+    // the whole point of the code below: the main thread ran every
+    // ManagedWard's actual teardown anyway, synchronously, via `wards`'
+    // own implicit destructor at function exit. managed_wards_ itself
+    // still holds its own independent copy at this point (untouched
+    // below until the lock is taken again), so this is a safe refcount
+    // decrement here, not a premature teardown.
+    wards.clear();
+
+    // karshipta#284: move managed_wards_ out and let its real destruction
+    // (every ManagedWard's reconnect_worker join, then its
+    // WardConnection's own already-detached teardown) happen on a
+    // detached thread instead of this one. `wards` above (this
+    // destructor's local snapshot) has already gone out of scope by the
+    // time this runs, so this is genuinely the last set of references;
+    // moving the map does not race it.
+    //
+    // Waits briefly for that teardown before returning, rather than
+    // detaching unconditionally - a second independent review caught why
+    // this matters: make_executor()/make_log_executor()/
+    // make_calibration_executor() capture &transport_ directly (not a
+    // shared_ptr; see their own doc comments), reasoning that "main.cpp
+    // builds Transport before WardManager" makes it safe. That reasoning
+    // only holds if every transport_-touching teardown call (a
+    // CommandExecutor rejecting its still-queued commands on shutdown,
+    // for instance) finishes before this destructor returns - true when
+    // teardown was synchronous, no longer true if it is unconditionally
+    // detached: the caller (main.cpp) could destroy the real Transport
+    // object right after ~WardManager() returns, while the detached
+    // thread is still mid-teardown and about to call back into it.
+    // Waiting here, bounded, preserves the original guarantee for the
+    // overwhelmingly common case (teardown normally finishes in well
+    // under a second, confirmed empirically - see this change's own PR),
+    // and only falls back to the unconditional-detach behavior in the
+    // rare case this bound is actually hit, which by construction means
+    // something in that teardown is stuck on the same already-documented
+    // #273 vendored-library lock this whole fix exists to route around -
+    // the same trade #274 already made for one connection's teardown,
+    // now bounded instead of unconditional so it only actually applies
+    // when the pathological case is the reason, not routinely.
+    constexpr auto kTeardownWaitBound = std::chrono::seconds(5);
+    std::map<std::string, std::shared_ptr<ManagedWard>> wards_to_destroy;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards_to_destroy = std::move(managed_wards_);
+    }
+    auto teardown_done = std::make_shared<std::promise<void>>();
+    std::future<void> teardown_future = teardown_done->get_future();
+    std::thread([wards = std::move(wards_to_destroy), teardown_done]() mutable {
+        wards.clear();
+        teardown_done->set_value();
+    }).detach();
+    teardown_future.wait_for(kTeardownWaitBound);
 }
 
 std::shared_ptr<ManagedWard> WardManager::find_shared_locked(const std::string& ward_id) const {

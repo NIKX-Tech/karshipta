@@ -160,7 +160,35 @@ void WardConnection::disconnect() {
     system_.reset();
 
     if (connection_added_) {
-        mavsdk_->remove_connection(connection_handle_);
+        // karshipta#273: mavsdk_->remove_connection() can hang forever -
+        // confirmed via a live thread dump that MAVSDK's own
+        // MavsdkImpl::remove_connection() can deadlock against its own
+        // connection's receive thread over an internal mutex (a bug in the
+        // vendored library itself, not something fixable here) whenever a
+        // packet is in flight on that connection at the moment it is torn
+        // down. This object is held by shared_ptr (see ManagedWard's own
+        // lifetime invariant) and can be destroyed on whichever thread
+        // happens to drop the last reference - confirmed live to sometimes
+        // be WardManager's own single shared run_publish_loop thread, which
+        // serves every ward's telemetry, not just this one. A hang there
+        // previously took down the entire fleet's telemetry permanently,
+        // with no recovery short of killing the gateway process.
+        //
+        // Dispatched onto its own disposable, intentionally never-joined
+        // thread (plain std::thread + detach(), not std::jthread: a jthread
+        // implies something owns and eventually joins it, which is exactly
+        // what must never happen here) so a hang can only ever strand that
+        // one thread. In the overwhelmingly common case this call returns
+        // in milliseconds and the detached thread's resources are reclaimed
+        // immediately; in the rare hang case this leaks one OS thread for
+        // the life of the process instead of freezing every ward's
+        // telemetry forever - a trade worth making until the underlying
+        // MAVSDK bug is fixed upstream. mavsdk_ is captured by value (the
+        // shared_ptr, not `this`) specifically so this lambda stays valid
+        // even after this WardConnection itself has finished destructing.
+        std::thread([mavsdk = mavsdk_, handle = connection_handle_] {
+            mavsdk->remove_connection(handle);
+        }).detach();
         connection_added_ = false;
     }
 }

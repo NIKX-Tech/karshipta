@@ -7,10 +7,17 @@
 #include <ward_manager.h>
 #endif
 
+#include <optional>
 #include <utility>
 #include <vector>
 
 namespace {
+
+uint64_t unix_epoch_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
+}
 
 // Duplicated from ward_manager.cpp/fleet_manager.cpp rather than shared
 // across libraries for one small function; matches this repo's existing
@@ -56,10 +63,17 @@ karshipta::v1::WardClass to_ward_class(const herald::v0::EntityClass entity_clas
 // a Herald-reporting source for that data to describe, so flight stays
 // unset, exactly as WardState's own doc comment describes for a non-flight
 // ward.
-karshipta::v1::WardState build_ward_state(const herald::v0::Herald& msg) {
+karshipta::v1::WardState build_ward_state(const herald::v0::Herald& msg,
+                                          const uint64_t ingestion_ms) {
     karshipta::v1::WardState state;
     state.set_ward_id(msg.entity_id());
+    // karshipta#268: timestamp_ms is the device's own sample time (parsed
+    // from the vendor payload by herald_field_mapper), ingestion_ms is when
+    // the gateway actually received this message - the two can differ a
+    // lot for a store-and-forward tracker, which is the whole reason this
+    // field exists.
     state.set_timestamp_ms(msg.timestamp_ms());
+    state.set_ingestion_ms(ingestion_ms);
 
     const auto& position = msg.position();
     auto* proto_position = state.mutable_position();
@@ -114,11 +128,95 @@ karshipta::v1::WardState build_ward_state(const herald::v0::Herald& msg) {
 }  // namespace
 
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
-HeraldWardManager::HeraldWardManager(Transport& transport, WardManager& ward_manager)
-    : transport_(transport), ward_manager_(ward_manager) {}
+HeraldWardManager::HeraldWardManager(Transport& transport, WardManager& ward_manager,
+                                     std::chrono::milliseconds stale_timeout)
+    : transport_(transport),
+      ward_manager_(ward_manager),
+      stale_timeout_(stale_timeout),
+      stale_checker_([this](const std::stop_token& stop_token) { run_stale_checker(stop_token); }) {
+}
 #else
-HeraldWardManager::HeraldWardManager(Transport& transport) : transport_(transport) {}
+HeraldWardManager::HeraldWardManager(Transport& transport, std::chrono::milliseconds stale_timeout)
+    : transport_(transport),
+      stale_timeout_(stale_timeout),
+      stale_checker_([this](const std::stop_token& stop_token) { run_stale_checker(stop_token); }) {
+}
 #endif
+
+void HeraldWardManager::run_stale_checker(std::stop_token stop_token) {
+    const auto interval = stale_check_interval();
+    while (!stop_token.stop_requested()) {
+        // karshipta#268: collect under the lock, broadcast unlocked - same
+        // snapshot-then-release shape ingest() and WardManager's own
+        // run_publish_loop/push_geofence already use (broadcast() is a
+        // blocking socket write per client and must not run while mutex_
+        // is held).
+        std::vector<karshipta::v1::WardState> to_broadcast;
+        {
+            std::lock_guard lock(mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto& [entity_id, entry] : last_seen_) {
+                if (entry.marked_stale) continue;
+                if (now - entry.last_seen_at < stale_timeout_) continue;
+                entry.marked_stale = true;
+                entry.last_state.set_connected(false);
+                to_broadcast.push_back(entry.last_state);
+            }
+        }
+        for (const auto& state : to_broadcast) {
+            // Re-check immediately before the unlocked broadcast: ingest()
+            // on another thread could have received a fresh message for
+            // this exact ward in the gap between marking it stale above and
+            // getting here, which resets marked_stale back to false. Two
+            // unlocked transport_.broadcast() calls on two different
+            // threads have no absolute ordering guarantee on the wire
+            // either way, so this doesn't make the race impossible - but it
+            // closes the far more likely case (ingest() already ran to
+            // completion before this thread gets here), which would
+            // otherwise flicker a just-arrived "connected" update back to
+            // "disconnected" for an operator watching the console.
+            {
+                std::lock_guard lock(mutex_);
+                const auto it = last_seen_.find(state.ward_id());
+                if (it == last_seen_.end() || !it->second.marked_stale) continue;
+            }
+            spdlog::warn("herald ward '{}' went stale ({}ms with no message)", state.ward_id(),
+                         stale_timeout_.count());
+            karshipta::v1::Envelope envelope;
+            *envelope.mutable_ward_state() = state;
+            transport_.broadcast(serialize_envelope(envelope));
+        }
+
+        // Slept in small steps rather than one sleep_for(interval): a
+        // jthread's stop_token is cooperative, not something that
+        // interrupts a blocking sleep, so one big sleep would make
+        // ~HeraldWardManager() (which requests stop then joins) wait out
+        // however much of interval was left - confirmed live, every
+        // existing test's teardown got up to 7.5s slower (a quarter of the
+        // 30s production default) the first time this used a single
+        // sleep_for. 50ms caps that shutdown latency regardless of how long
+        // interval itself is.
+        constexpr auto kSleepStep = std::chrono::milliseconds(50);
+        auto remaining = interval;
+        while (remaining > std::chrono::milliseconds::zero() && !stop_token.stop_requested()) {
+            const auto step = std::min(remaining, kSleepStep);
+            std::this_thread::sleep_for(step);
+            remaining -= step;
+        }
+    }
+}
+
+void HeraldWardManager::broadcast_herald_event(const std::string& ward_id, const std::string& code,
+                                                const std::string& message) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_ward_id(ward_id);
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code(code);
+    event->set_message(message);
+    transport_.broadcast(serialize_envelope(envelope));
+}
 
 HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     const std::string& entity_id = msg.entity_id();
@@ -156,8 +254,53 @@ HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
         transport_.broadcast(serialize_envelope(info_envelope));
     }
 
+    const karshipta::v1::WardState state = build_ward_state(msg, unix_epoch_ms());
+
+    // karshipta#276: captured before last_seen_ is overwritten below, so the
+    // out-of-order check below compares against what was actually accepted
+    // last, not the sample currently being ingested.
+    std::optional<uint64_t> previous_timestamp_ms;
+
+    // karshipta#268: a real message always means "alive, as of now" -
+    // refresh last_seen_at and clear marked_stale regardless of whether the
+    // staleness checker had already flipped this ward to disconnected,
+    // which is what lets a tracker recover automatically on its next
+    // message with no separate code path.
+    {
+        std::lock_guard lock(mutex_);
+        const auto it = last_seen_.find(entity_id);
+        if (it != last_seen_.end()) {
+            previous_timestamp_ms = it->second.last_state.timestamp_ms();
+        }
+        last_seen_[entity_id] = LastSeen{.last_state = state,
+                                         .last_seen_at = std::chrono::steady_clock::now(),
+                                         .marked_stale = false};
+    }
+
+    // karshipta#276: "accept but flag," never reject - both checks run
+    // regardless of each other and regardless of whether the sample is
+    // accepted (it always is), since they answer different questions. See
+    // broadcast_herald_event's own doc comment for why rejecting outright
+    // isn't done instead.
+    if (previous_timestamp_ms.has_value() && state.timestamp_ms() < *previous_timestamp_ms) {
+        constexpr auto* message =
+            "sample timestamp is older than the last accepted reading for this ward";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "OUT_OF_ORDER_SAMPLE", message);
+    }
+    // Independent of the check above: a skewed-forward clock wouldn't look
+    // "out of order" against the *next* legitimate sample (it would still
+    // read as the most recent one), so this needs its own direct check
+    // against the gateway's own clock, on the sample that's actually wrong
+    // rather than one tick later.
+    if (state.timestamp_ms() > state.ingestion_ms()) {
+        constexpr auto* message = "sample timestamp is ahead of the gateway's own clock";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "CLOCK_SKEW", message);
+    }
+
     karshipta::v1::Envelope state_envelope;
-    *state_envelope.mutable_ward_state() = build_ward_state(msg);
+    *state_envelope.mutable_ward_state() = state;
     transport_.broadcast(serialize_envelope(state_envelope));
 
     return HeraldIngestResult::kOk;

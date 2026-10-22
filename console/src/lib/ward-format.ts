@@ -26,6 +26,29 @@ export function batteryHintLabel(tier: BatteryTier): string | undefined {
 	return undefined;
 }
 
+// karshipta#268: ingestionMs (gateway receipt time) and timestampMs
+// (device/event time) are independent axes from connected - a connection
+// can be fully healthy while still delivering a sample that was already old
+// when it arrived (a Herald tracker that buffered a reading before finally
+// transmitting it). 5s comfortably clears MAVLink, where the gateway sets
+// both fields to the same value (see telemetry.proto's own doc comment on
+// timestampMs), so this only ever fires for a real event-to-ingestion gap,
+// never processing jitter.
+const STALE_SAMPLE_THRESHOLD_MS = 5_000;
+
+/**
+ * True when this specific reading was already old by the time the gateway
+ * received it, regardless of whether the link is currently connected.
+ * ingestionMs === 0 means an older gateway that predates karshipta#268 sent
+ * this state (the field is new; proto3 leaves an unset uint64 at 0) - that
+ * is "unknown", not "fresh", so it reads as not-stale rather than
+ * (incorrectly) decades-stale against the unix epoch.
+ */
+export function isStaleSample(state: WardState | undefined): boolean {
+	if (!state || state.ingestionMs === 0) return false;
+	return state.ingestionMs - state.timestampMs > STALE_SAMPLE_THRESHOLD_MS;
+}
+
 export type LinkDotState = 'ok' | 'fault' | 'lost';
 
 /**
