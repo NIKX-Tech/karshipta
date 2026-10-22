@@ -110,6 +110,20 @@ followup.
   separate from elapsed-gateway-time. The MAVLink path (`ward_manager.cpp`)
   sets both fields to the same value, since no reliable absolute device-side
   clock exists on that path today - a documented limitation, not an oversight.
+- Flag, never reject, an out-of-order/replayed or clock-skewed sample
+  (github issue #276, the rest of #268's validation matrix): an
+  `OUT_OF_ORDER_SAMPLE` `Event` (SEVERITY_WARNING) when a message's
+  `timestamp_ms` is older than the last one accepted for that `entity_id`,
+  and an independent `CLOCK_SKEW` `Event` when `timestamp_ms` is ahead of
+  `ingestion_ms` - checked directly against the gateway's own clock, not
+  via ordering, since a skewed-forward timestamp wouldn't look
+  out-of-order against the next legitimate sample. Both checks are purely
+  additive: the sample is still accepted, stored, and broadcast exactly as
+  before, same "show it, let the operator judge" philosophy the staleness
+  flag above already uses. Rejecting outright was considered and
+  deliberately not done: a bad clock on a tracker's very first-ever
+  message would otherwise permanently poison it, since every later,
+  correct message would look older by comparison.
 
 GT06-specific mapping notes (`Gt06TcpServer`'s `build_herald_message`): GT06
 carries no device-purpose field (only a device-type/model variant), so

@@ -7,6 +7,7 @@
 #include <ward_manager.h>
 #endif
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -205,6 +206,18 @@ void HeraldWardManager::run_stale_checker(std::stop_token stop_token) {
     }
 }
 
+void HeraldWardManager::broadcast_herald_event(const std::string& ward_id, const std::string& code,
+                                                const std::string& message) const {
+    karshipta::v1::Envelope envelope;
+    auto* event = envelope.mutable_event();
+    event->set_ward_id(ward_id);
+    event->set_timestamp_ms(unix_epoch_ms());
+    event->set_severity(karshipta::v1::SEVERITY_WARNING);
+    event->set_code(code);
+    event->set_message(message);
+    transport_.broadcast(serialize_envelope(envelope));
+}
+
 HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     const std::string& entity_id = msg.entity_id();
 
@@ -243,6 +256,11 @@ HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
 
     const karshipta::v1::WardState state = build_ward_state(msg, unix_epoch_ms());
 
+    // karshipta#276: captured before last_seen_ is overwritten below, so the
+    // out-of-order check below compares against what was actually accepted
+    // last, not the sample currently being ingested.
+    std::optional<uint64_t> previous_timestamp_ms;
+
     // karshipta#268: a real message always means "alive, as of now" -
     // refresh last_seen_at and clear marked_stale regardless of whether the
     // staleness checker had already flipped this ward to disconnected,
@@ -250,9 +268,35 @@ HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     // message with no separate code path.
     {
         std::lock_guard lock(mutex_);
+        const auto it = last_seen_.find(entity_id);
+        if (it != last_seen_.end()) {
+            previous_timestamp_ms = it->second.last_state.timestamp_ms();
+        }
         last_seen_[entity_id] = LastSeen{.last_state = state,
                                          .last_seen_at = std::chrono::steady_clock::now(),
                                          .marked_stale = false};
+    }
+
+    // karshipta#276: "accept but flag," never reject - both checks run
+    // regardless of each other and regardless of whether the sample is
+    // accepted (it always is), since they answer different questions. See
+    // broadcast_herald_event's own doc comment for why rejecting outright
+    // isn't done instead.
+    if (previous_timestamp_ms.has_value() && state.timestamp_ms() < *previous_timestamp_ms) {
+        constexpr auto* message =
+            "sample timestamp is older than the last accepted reading for this ward";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "OUT_OF_ORDER_SAMPLE", message);
+    }
+    // Independent of the check above: a skewed-forward clock wouldn't look
+    // "out of order" against the *next* legitimate sample (it would still
+    // read as the most recent one), so this needs its own direct check
+    // against the gateway's own clock, on the sample that's actually wrong
+    // rather than one tick later.
+    if (state.timestamp_ms() > state.ingestion_ms()) {
+        constexpr auto* message = "sample timestamp is ahead of the gateway's own clock";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "CLOCK_SKEW", message);
     }
 
     karshipta::v1::Envelope state_envelope;

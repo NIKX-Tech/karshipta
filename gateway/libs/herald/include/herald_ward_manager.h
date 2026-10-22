@@ -142,6 +142,16 @@ class HeraldWardManager {
     // Body of stale_checker_, started in the constructor.
     void run_stale_checker(std::stop_token stop_token);
 
+    // karshipta#276: "accept but flag," the same philosophy
+    // isStaleSample() already applies on the console side (karshipta#268) -
+    // never reject a sample outright (rejecting risks permanently
+    // "poisoning" a ward whose very first message happened to carry a bad
+    // clock), just surface that something looks wrong via the existing
+    // Event/WARNING mechanism and let the operator judge. Mirrors
+    // WardManager::broadcast_mission_event's own shape.
+    void broadcast_herald_event(const std::string& ward_id, const std::string& code,
+                                const std::string& message) const;
+
     // Declared last (after mutex_/known_wards_/last_seen_, which it reads,
     // and after stale_timeout_, which it only reads too): members destroy
     // in reverse declaration order, so this stops and joins first, before
