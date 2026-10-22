@@ -329,6 +329,11 @@ function defaultDemoParams(): Map<string, Param> {
 			intParam('NAV_RCL_ACT', 2),
 			floatParam('COM_DL_LOSS_T', 10),
 			intParam('NAV_DLL_ACT', 2),
+			// karshipta#258: same generic demo placeholder as every other
+			// *_ACT field above, not a claim about what "2" actually
+			// means for GF_ACTION - never decoded in the UI either, see
+			// param-spec.ts's own isAction comment.
+			intParam('GF_ACTION', 2),
 			// Tier 2 (karshipta#213): plausible PX4 PID defaults, same
 			// "not a claim of real firmware defaults" caveat as above.
 			floatParam('MC_ROLLRATE_P', 0.15),

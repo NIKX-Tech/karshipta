@@ -56,11 +56,11 @@ param ID** · **Implemented** (karshipta#212's shipped tier-1 panel) ·
 
 | Configuration | PX4 param ID | ArduPilot param ID | Implemented | Notes |
 |---|---|---|---|---|
-| Fence breach action | `GF_ACTION` | `FENCE_ACTION` | No (karshipta#258) | What happens when the vehicle crosses the boundary karshipta#247 already enforces as a real MAVSDK geofence - the natural next addition, since the shape is already pushed but what happens on breach isn't surfaced yet. |
+| Fence breach action | `GF_ACTION` | `FENCE_ACTION` | Yes | What happens when the vehicle crosses the boundary karshipta#247 already enforces as a real MAVSDK geofence. Raw integer, per-firmware docs link, same "don't decode the action code" treatment as the other `*_ACT`/`*_ACTION` fields above. |
 | Fence enable | implicit (set via `GF_ACTION` ≠ none) | `FENCE_ENABLE` | No | ArduPilot gates the whole feature behind one enable flag; PX4 has no separate enable, a 0 action effectively disables it. |
 | Max horizontal distance/radius | `GF_MAX_HOR_DIST` | `FENCE_RADIUS` | No | Meters on both. 0 disables on PX4. This is the shape karshipta#247 already pushes as a polygon - these legacy cylinder params are PX4/ArduPilot's own built-in fallback fence, separate from (and possibly redundant with) our own geofence push. Worth confirming how the two interact before building a UI for this row. |
 | Max altitude | `GF_MAX_VER_DIST` | `FENCE_ALT_MAX` | No | Meters. The altitude-enforcement gap tracked separately as karshipta#251. |
-| Flight termination circuit breaker | `CBRK_FLIGHTTERM` | - | No (karshipta#258) | Must be explicitly reset for `GF_ACTION=Terminate` to actually kill the vehicle - a safety interlock on top of the action itself, not optional to skip if ever exposing Terminate as a selectable action. |
+| Flight termination circuit breaker | `CBRK_FLIGHTTERM` | - | No | Not exposed as its own field (tier 1 is curated, not a full breaker-reset UI) - must be explicitly reset elsewhere for PX4's `GF_ACTION=Terminate` to actually kill the vehicle. The fence breach action field above carries its own FIELD_GROUP_WARNINGS entry calling this interlock out explicitly, so the operator learns about it before setting the field, not after. |
 
 ## EKF / position failsafe
 

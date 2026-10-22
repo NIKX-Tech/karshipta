@@ -40,6 +40,7 @@
 		'battery',
 		'rcLoss',
 		'dataLinkLoss',
+		'geofence',
 		'pidRoll',
 		'pidPitch',
 		'pidYaw'
