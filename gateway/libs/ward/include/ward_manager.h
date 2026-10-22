@@ -189,11 +189,21 @@ public:
     // ward mutexes, which a single condition_variable's one-mutex contract
     // can't wait across); each ward is polled on its own mutex_ instead,
     // acceptable because this runs once, at shutdown, never on a hot path.
-    // Once every snapshot ward's busy flag has cleared, the local
-    // snapshot's shared_ptrs go out of scope and managed_wards_ destroys
-    // each ManagedWard's members in reverse declaration order:
-    // reconnect_worker stops and joins first, then the executor (rejecting
-    // whatever it still queued), then mission/actions/telemetry/connection.
+    // Once every snapshot ward's busy flag has cleared, managed_wards_
+    // itself is moved out and its actual destruction (each ManagedWard's
+    // members in reverse declaration order: reconnect_worker stops and
+    // joins first, then the executor, then mission/actions/telemetry/
+    // connection) is dispatched onto a detached thread (karshipta#284) -
+    // see that issue and WardConnection::disconnect()'s own karshipta#274
+    // fix for why: reconnect_worker's join can block forever on the same
+    // vendored MAVSDK lock #273/#274 already document, if a sibling
+    // ward's own WardConnection teardown (already detached, but still
+    // holding that lock for as long as it runs) is concurrently stuck.
+    // Nothing about this process can make that join safe to call
+    // synchronously here; the only thing this destructor can guarantee is
+    // that it, and whatever called it, never blocks waiting for it to
+    // resolve - the same trade #274 already made for one ward's
+    // connection teardown, now extended to a ward's full teardown.
     // This does NOT proactively RTL wards that were never told to stop;
     // graceful shutdown of a still-flying, never-force_stop()ped fleet needs
     // main.cpp to call force_stop_all() before dropping the WardManager,

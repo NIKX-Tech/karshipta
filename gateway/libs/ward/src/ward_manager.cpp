@@ -356,6 +356,20 @@ WardManager::~WardManager() {
             lock.lock();
         }
     }
+
+    // karshipta#284: move managed_wards_ out and let its real destruction
+    // (every ManagedWard's reconnect_worker join, then its
+    // WardConnection's own already-detached teardown) happen on a
+    // detached thread instead of this one. `wards` above (this
+    // destructor's local snapshot) has already gone out of scope by the
+    // time this runs, so this is genuinely the last set of references;
+    // moving the map does not race it.
+    std::map<std::string, std::shared_ptr<ManagedWard>> wards_to_destroy;
+    {
+        std::lock_guard lock(wards_mutex_);
+        wards_to_destroy = std::move(managed_wards_);
+    }
+    std::thread([wards = std::move(wards_to_destroy)]() mutable { wards.clear(); }).detach();
 }
 
 std::shared_ptr<ManagedWard> WardManager::find_shared_locked(const std::string& ward_id) const {
