@@ -434,3 +434,36 @@ TEST_F(HeraldWardManagerTest, DoesNotFlagANormalInOrderSecondMessage) {
         }
     }
 }
+
+// karshipta#276: the two checks are independent, not mutually exclusive -
+// a sample that is both older than the last accepted reading AND still
+// ahead of the gateway's own clock (a device whose clock is skewed far
+// enough into the future that even "the previous message, minus a day"
+// is still later than real time) must raise both events, not just
+// whichever check happens to run first.
+TEST_F(HeraldWardManagerTest, FlagsBothOutOfOrderAndClockSkewWhenBothApply) {
+    const uint64_t now_ms =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count());
+
+    auto first = make_herald("tag-1");
+    first.set_timestamp_ms(now_ms + 48 * 3'600'000);  // 2 days in the future
+    ASSERT_EQ(herald_manager_.ingest(first), HeraldIngestResult::kOk);
+
+    auto second = make_herald("tag-1");
+    second.set_timestamp_ms(first.timestamp_ms() - 24 * 3'600'000);  // 1 day older than
+                                                                      // `first`, but still
+                                                                      // ~1 day ahead of now
+    ASSERT_EQ(herald_manager_.ingest(second), HeraldIngestResult::kOk);
+
+    bool found_out_of_order = false;
+    bool found_clock_skew = false;
+    for (const auto& envelope : transport_.broadcast_envelopes()) {
+        if (!envelope.has_event()) continue;
+        if (envelope.event().code() == "OUT_OF_ORDER_SAMPLE") found_out_of_order = true;
+        if (envelope.event().code() == "CLOCK_SKEW") found_clock_skew = true;
+    }
+    EXPECT_TRUE(found_out_of_order) << "expected an OUT_OF_ORDER_SAMPLE event";
+    EXPECT_TRUE(found_clock_skew) << "expected a CLOCK_SKEW event";
+}

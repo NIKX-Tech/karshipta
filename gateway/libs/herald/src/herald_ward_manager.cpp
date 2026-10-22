@@ -283,9 +283,10 @@ HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     // broadcast_herald_event's own doc comment for why rejecting outright
     // isn't done instead.
     if (previous_timestamp_ms.has_value() && state.timestamp_ms() < *previous_timestamp_ms) {
-        broadcast_herald_event(
-            entity_id, "OUT_OF_ORDER_SAMPLE",
-            "sample timestamp is older than the last accepted reading for this ward");
+        constexpr auto* message =
+            "sample timestamp is older than the last accepted reading for this ward";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "OUT_OF_ORDER_SAMPLE", message);
     }
     // Independent of the check above: a skewed-forward clock wouldn't look
     // "out of order" against the *next* legitimate sample (it would still
@@ -293,8 +294,9 @@ HeraldIngestResult HeraldWardManager::ingest(const herald::v0::Herald& msg) {
     // against the gateway's own clock, on the sample that's actually wrong
     // rather than one tick later.
     if (state.timestamp_ms() > state.ingestion_ms()) {
-        broadcast_herald_event(entity_id, "CLOCK_SKEW",
-                                "sample timestamp is ahead of the gateway's own clock");
+        constexpr auto* message = "sample timestamp is ahead of the gateway's own clock";
+        spdlog::warn("herald ward '{}': {}", entity_id, message);
+        broadcast_herald_event(entity_id, "CLOCK_SKEW", message);
     }
 
     karshipta::v1::Envelope state_envelope;
