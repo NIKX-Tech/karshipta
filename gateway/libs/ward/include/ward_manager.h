@@ -189,11 +189,32 @@ public:
     // ward mutexes, which a single condition_variable's one-mutex contract
     // can't wait across); each ward is polled on its own mutex_ instead,
     // acceptable because this runs once, at shutdown, never on a hot path.
-    // Once every snapshot ward's busy flag has cleared, the local
-    // snapshot's shared_ptrs go out of scope and managed_wards_ destroys
-    // each ManagedWard's members in reverse declaration order:
-    // reconnect_worker stops and joins first, then the executor (rejecting
-    // whatever it still queued), then mission/actions/telemetry/connection.
+    // Once every snapshot ward's busy flag has cleared, managed_wards_
+    // itself is moved out and its actual destruction (each ManagedWard's
+    // members in reverse declaration order: reconnect_worker stops and
+    // joins first, then the executor, then mission/actions/telemetry/
+    // connection) is dispatched onto a detached thread (karshipta#284) -
+    // see that issue and WardConnection::disconnect()'s own karshipta#274
+    // fix for why: reconnect_worker's join can block forever on the same
+    // vendored MAVSDK lock #273/#274 already document, if a sibling
+    // ward's own WardConnection teardown (already detached, but still
+    // holding that lock for as long as it runs) is concurrently stuck.
+    // This destructor then waits up to a bounded timeout for that
+    // detached teardown to finish before returning - not unconditional
+    // detach-and-forget, because make_executor()'s own doc comment
+    // depends on every transport_-touching teardown call finishing before
+    // this destructor returns (main.cpp destroys the real Transport
+    // object right after WardManager, so a still-running detached
+    // teardown could otherwise call back into an already-destroyed
+    // Transport - caught in review, not theoretical). The bound exists
+    // because that same wait, made unconditional, would reintroduce the
+    // exact hang #284 fixed. In the overwhelmingly common case (teardown
+    // normally finishes in well under the bound) this preserves the
+    // original synchronous guarantee exactly; only when the bound is
+    // actually hit - which by construction means the vendored lock is
+    // genuinely stuck - does this destructor return anyway, the same
+    // trade #274 already made for one connection's teardown, now applied
+    // only to the pathological case instead of unconditionally.
     // This does NOT proactively RTL wards that were never told to stop;
     // graceful shutdown of a still-flying, never-force_stop()ped fleet needs
     // main.cpp to call force_stop_all() before dropping the WardManager,
@@ -576,7 +597,14 @@ private:
     // when WardManager is destroyed, and this callback must stay safe to
     // invoke even then. transport_'s referent is guaranteed by the whole
     // system's construction order (main.cpp builds Transport before
-    // WardManager) to outlive it regardless.
+    // WardManager) to outlive it in the normal case - but only because
+    // ~WardManager() (karshipta#284) waits, bounded, for every
+    // transport_-touching teardown call to finish before returning. That
+    // guarantee has a documented, narrow exception: if the wait times out
+    // (the already-known #273 pathological case), a detached teardown
+    // thread could still be running, calling back into this reference,
+    // after the caller destroys the real Transport object. Accepted as
+    // the same trade #274 already made elsewhere, not fixed here.
     [[nodiscard]] std::unique_ptr<CommandExecutor> make_executor(ManagedWard& ward);
 
     // Builds the LogDownloadExecutor wired to send its results to whichever
