@@ -67,7 +67,14 @@ jobs:
       # stability across the two is what makes this safe, not assumed.
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install mavsdk spdlog llvm
+        # brew update first: the runner's preinstalled Homebrew can lag
+        # behind the real homebrew-core HEAD, so a bare `brew install`
+        # silently resolved mavsdk to a stale 3.17.4 bottle manifest
+        # instead of the current 4.0.6 stable formula (confirmed via a
+        # workflow_dispatch dry run on the MAVSDK v4 migration branch).
+        run: |
+          brew update
+          brew install mavsdk spdlog llvm
 
       # libssl-dev: only needed once a build actually turns relay on
       # (KARSHIPTA_GATEWAY_ENABLE_RELAY=ON forces ixwebsocket's USE_TLS=ON,
