@@ -43,6 +43,12 @@ release onward.
 
 ### Fixed
 
+- Gateway: stale-vs-fresh broadcast race in `HeraldWardManager`
+  (karshipta#272). A ward marked stale by `run_stale_checker()` could
+  still have its queued "disconnected" `WardState` go out after
+  `ingest()` had already received and broadcast a fresher "connected"
+  update for the same ward in the gap between the two, flickering a
+  just-arrived ward back to disconnected on the console.
 - Gateway: `WardManager` destructor-ordering race on `geofence_mutex_`.
   Member declaration order meant the mutex could destruct before the
   ward threads that lock it were actually joined, a crash-on-shutdown
