@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libprotobuf-dev \
         libspdlog-dev \
     && curl -fsSL -o /tmp/mavsdk.deb \
-        https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb \
+        https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/libmavsdk-dev_4.0.6_ubuntu22.04_amd64.deb \
     && apt-get install -y --no-install-recommends /tmp/mavsdk.deb \
     && rm -rf /tmp/mavsdk.deb /var/lib/apt/lists/*
 
@@ -65,7 +65,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libprotobuf-dev \
         libspdlog-dev \
     && curl -fsSL -o /tmp/mavsdk.deb \
-        https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb \
+        https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/libmavsdk-dev_4.0.6_ubuntu22.04_amd64.deb \
     && apt-get install -y --no-install-recommends /tmp/mavsdk.deb \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /tmp/mavsdk.deb /var/lib/apt/lists/*

@@ -13,7 +13,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <mavsdk/plugins/telemetry_server/telemetry_server.h>
+#include <mavsdk/plugins/telemetry_server/telemetry_server.hpp>
 
 #include <karshipta/v1/envelope.pb.h>
 

@@ -2,7 +2,7 @@
 #define KARSHIPTA_GATEWAY_MISSION_IMPORTER_H
 
 #include <karshipta/v1/command.pb.h>
-#include <mavsdk/plugins/mission_raw/mission_raw.h>
+#include <mavsdk/plugins/mission_raw/mission_raw.hpp>
 
 #include <memory>
 #include <mutex>

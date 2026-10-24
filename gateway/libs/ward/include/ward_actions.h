@@ -1,12 +1,12 @@
 #ifndef KARSHIPTA_GATEWAY_WARD_ACTIONS_H
 #define KARSHIPTA_GATEWAY_WARD_ACTIONS_H
 
-#include <mavsdk/plugins/action/action.h>
-#include <mavsdk/plugins/calibration/calibration.h>
-#include <mavsdk/plugins/geofence/geofence.h>
-#include <mavsdk/plugins/log_files/log_files.h>
-#include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
-#include <mavsdk/plugins/param/param.h>
+#include <mavsdk/plugins/action/action.hpp>
+#include <mavsdk/plugins/calibration/calibration.hpp>
+#include <mavsdk/plugins/geofence/geofence.hpp>
+#include <mavsdk/plugins/log_files/log_files.hpp>
+#include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.hpp>
+#include <mavsdk/plugins/param/param.hpp>
 
 #include <cstdint>
 #include <functional>

@@ -2,7 +2,7 @@
 #define KARSHIPTA_GATEWAY_WARD_MISSION_H
 
 #include <karshipta/v1/command.pb.h>
-#include <mavsdk/plugins/mission/mission.h>
+#include <mavsdk/plugins/mission/mission.hpp>
 
 #include <condition_variable>
 #include <cstdint>
