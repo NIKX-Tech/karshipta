@@ -25,6 +25,14 @@ if(MSVC)
 else()
   target_compile_options(karshipta_warnings INTERFACE -Wall -Wextra -Werror)
 endif()
+# windows.h's own max/min macros otherwise shadow std::max/std::min (and
+# anything else named max/min) everywhere a header transitively pulls in
+# windows.h on this platform - MSVC-only build failure (error C2589),
+# never seen on the gcc/clang CI matrix since windows.h is never in that
+# include graph at all.
+if(WIN32)
+  target_compile_definitions(karshipta_warnings INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 # karshipta-gateway (drones, MAVLink) and karshipta-herald (generic tags/GPS
 # devices via Herald ingest) are two separate, fixed release artifacts built
