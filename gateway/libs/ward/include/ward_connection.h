@@ -95,6 +95,14 @@ class WardConnection {
     // DroneActions/TelemetryInfo already holding a System/Mavsdk shared_ptr can
     // keep operating, and other WardConnections sharing the same core are
     // unaffected. Safe to call when already disconnected (no-op).
+    //
+    // karshipta#273: returns before the underlying mavsdk_->remove_connection()
+    // call necessarily completes - that call is dispatched onto its own
+    // detached thread, not awaited here. See the .cpp for why: it can hang
+    // forever inside MAVSDK's own internals, and whichever thread calls this
+    // (this object is held by shared_ptr and can be destroyed on literally
+    // any thread, confirmed live to sometimes be WardManager's own shared
+    // publish thread) must never be the one to find that out.
     void disconnect();
     // True only while a System was discovered AND MAVSDK currently reports the
     // heartbeat link as up; becomes false the instant the link drops, even if

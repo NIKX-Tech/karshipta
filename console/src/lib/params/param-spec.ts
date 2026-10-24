@@ -39,7 +39,7 @@ import { ParamType } from '$lib/gen/karshipta/v1/parameter';
 export type AutopilotFamily = 'PX4' | 'ArduPilot';
 
 export type FieldGroup =
-	'rtl' | 'battery' | 'rcLoss' | 'dataLinkLoss' | 'pidRoll' | 'pidPitch' | 'pidYaw';
+	'rtl' | 'battery' | 'rcLoss' | 'dataLinkLoss' | 'geofence' | 'pidRoll' | 'pidPitch' | 'pidYaw';
 
 /** Action/enum-valued parameters (failsafe actions) are shown as a raw
  * integer, never decoded to a label: the exact meaning of each code
@@ -104,6 +104,13 @@ const AP_RTL_DOCS = 'https://ardupilot.org/copter/docs/rtl-mode.html';
 const AP_BATTERY_DOCS = 'https://ardupilot.org/copter/docs/failsafe-battery.html';
 const AP_RADIO_DOCS = 'https://ardupilot.org/copter/docs/radio-failsafe.html';
 const AP_GCS_DOCS = 'https://ardupilot.org/copter/docs/gcs-failsafe.html';
+// PX4's one safety-config page (PX4_SAFETY_DOCS above) already covers
+// GF_ACTION directly, including its own explicit Terminate warning
+// ("Setting GF_ACTION to terminate will kill the vehicle on violation of
+// the fence") - confirmed by reading the live page, not assumed; no
+// separate PX4 constant needed. ArduPilot has no equivalent safety-config
+// page for this, so it gets its own, same as battery/RC/GCS above.
+const AP_FENCE_DOCS = 'https://ardupilot.org/copter/docs/common-geofencing-landing-page.html';
 // PX4's multicopter PID tuning guide covers rate and attitude gains for
 // every axis in one page. ArduPilot has no single page naming every
 // ATC_RAT_*/ATC_ANG_* parameter directly (checked); this is the official
@@ -476,6 +483,40 @@ export const CURATED_FIELDS: CuratedField[] = [
 			toRaw: identity
 		}
 	},
+	{
+		// karshipta#258: the geofence shape itself is already pushed and
+		// enforced (karshipta#247/#252 - shipped), but what happens on
+		// breach was still whatever the vehicle's own default is, never
+		// surfaced here. Same "raw integer, per-firmware docs link, don't
+		// decode the action code" treatment as every other *_action field
+		// above - the option meanings differ by firmware and version, and
+		// one of PX4's values (Terminate) is a real kill action, which is
+		// exactly why this group carries its own FIELD_GROUP_WARNINGS
+		// entry below rather than only relying on isAction's generic hint.
+		key: 'geofence_breach_action',
+		label: 'Fence breach action',
+		group: 'geofence',
+		px4: {
+			name: 'GF_ACTION',
+			paramType: ParamType.PARAM_TYPE_INT,
+			unit: '',
+			isAction: true,
+			description: 'What the ward does when it crosses the enforced geofence boundary.',
+			docUrl: PX4_SAFETY_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		},
+		ardupilot: {
+			name: 'FENCE_ACTION',
+			paramType: ParamType.PARAM_TYPE_INT,
+			unit: '',
+			isAction: true,
+			description: 'What the ward does when it crosses the enforced geofence boundary.',
+			docUrl: AP_FENCE_DOCS,
+			toDisplay: identity,
+			toRaw: identity
+		}
+	},
 	// Tier 2 (karshipta#213): rate and attitude PID gains, one group per
 	// axis - see pidAxisFields()'s own doc comment for the naming scheme.
 	...pidAxisFields('Roll', 'pidRoll', 'roll', 'MC_ROLLRATE', 'MC_ROLL', 'RLL'),
@@ -488,6 +529,7 @@ export const FIELD_GROUP_LABELS: Record<FieldGroup, string> = {
 	battery: 'Battery failsafe',
 	rcLoss: 'RC loss failsafe',
 	dataLinkLoss: 'Data link loss failsafe',
+	geofence: 'Geofence breach',
 	pidRoll: 'Roll PID',
 	pidPitch: 'Pitch PID',
 	pidYaw: 'Yaw PID'
@@ -499,6 +541,16 @@ export const FIELD_GROUP_LABELS: Record<FieldGroup, string> = {
  * threshold above - unlike those, there's no documented safe range to
  * fall back on, so the caution has to live in the UI text itself. */
 export const FIELD_GROUP_WARNINGS: Partial<Record<FieldGroup, string>> = {
+	// karshipta#258: on PX4, one of GF_ACTION's valid values (Terminate)
+	// kills the vehicle outright on breach, and is itself gated behind a
+	// separate circuit breaker (CBRK_FLIGHTTERM) that must be explicitly
+	// reset for it to actually take effect - not exposed as its own field
+	// here (tier 1 is curated, not a full breaker-reset UI), but the
+	// operator setting this field needs to know that interlock exists
+	// before they go looking for it, not discover it by setting Terminate
+	// and nothing happening, or worse, having already reset it elsewhere.
+	geofence:
+		'One of the valid values for this field (PX4: Terminate) kills the vehicle outright on geofence breach. On PX4 it only takes effect if CBRK_FLIGHTTERM has also been explicitly reset elsewhere - check the docs link before setting this to anything you have not verified the meaning of for this firmware and version.',
 	pidRoll:
 		'Directly affects flight stability. Change gains in small increments (the PX4 tuning guide suggests 20-30% per step, less for final tuning) and test cautiously.',
 	pidPitch:

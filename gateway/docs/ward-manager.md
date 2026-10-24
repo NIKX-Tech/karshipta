@@ -195,6 +195,25 @@ generated `fleet_state.yaml` itself is gitignored.
   `this`, so a `CommandExecutor` that (incorrectly) outlived `WardManager`
   via a leaked `shared_ptr<ManagedWard>` copy still couldn't touch a
   destroyed `WardManager` through it.
+- `geofence_mutex_`/`cached_geofence_` (karshipta#270, fixed): the same
+  reverse-declaration-order reasoning above applies to these two members
+  too, in the other direction - every ward's `reconnect_worker` locks
+  `geofence_mutex_` on each (re)connect, and that thread only stops when
+  `managed_wards_` is destroyed, so `geofence_mutex_` must outlive
+  `managed_wards_`, meaning it must be declared *before* it (members
+  destroy in reverse declaration order). It used to be declared *after*,
+  which meant it was destroyed first - a `reconnect_worker` still inside
+  that `lock_guard` at shutdown could lock an already-destroyed mutex.
+  Reproduced with 100% reliability by a test that ends its scope
+  immediately after a ward's `is_connected()` first turns true (the exact
+  moment `run_reconnect_loop` is about to reach that lock) -
+  `WardManagerTest.ManagerDestructsCleanlyRightAfterWardFirstConnects`.
+  A test that instead stays alive for several seconds past connect
+  (`HandleRemoveWardRejectsWhileAirborne`) never hit it, since the
+  `reconnect_worker` had long since moved past that section by the time its
+  destructor ran - which is exactly why this went unnoticed until a test
+  was written that ends sooner. Fixed by moving both members' declaration
+  to before `wards_mutex_`/`managed_wards_` in `ward_manager.h`.
 
 ## Automated tests
 

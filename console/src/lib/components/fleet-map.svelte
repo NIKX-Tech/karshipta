@@ -175,6 +175,14 @@
 		 * starting point.
 		 */
 		onMapMove?: (view: { lat: number; lon: number; zoom: number }) => void;
+		/**
+		 * Friendly name for the selected ward's marker badge, in place of
+		 * the raw wardId - same "a consumer-owned concept this library has
+		 * no notion of" reasoning as ownerFor above. Falls back to wardId
+		 * when absent or when this callback itself returns undefined for a
+		 * given ward (no name set for it).
+		 */
+		nameFor?: (wardId: string) => string | undefined;
 	}
 
 	const {
@@ -185,7 +193,8 @@
 		crosshair,
 		placementPoint,
 		ownerFor,
-		onMapMove
+		onMapMove,
+		nameFor
 	}: Props = $props();
 
 	// City-scale, not street-block: the first thing a viewer needs is "where
@@ -3052,7 +3061,7 @@
 			handle.badge.classList.toggle('hidden', !selected);
 			handle.badge.classList.toggle('flex', selected);
 			if (selected) {
-				handle.nameEl.textContent = wardId;
+				handle.nameEl.textContent = nameFor?.(wardId) ?? wardId;
 				handle.connectivityDot.classList.toggle('bg-accent', state.connected);
 				handle.connectivityDot.classList.toggle('animate-pulse', state.connected);
 				handle.connectivityDot.classList.toggle('bg-critical', !state.connected);

@@ -189,11 +189,32 @@ public:
     // ward mutexes, which a single condition_variable's one-mutex contract
     // can't wait across); each ward is polled on its own mutex_ instead,
     // acceptable because this runs once, at shutdown, never on a hot path.
-    // Once every snapshot ward's busy flag has cleared, the local
-    // snapshot's shared_ptrs go out of scope and managed_wards_ destroys
-    // each ManagedWard's members in reverse declaration order:
-    // reconnect_worker stops and joins first, then the executor (rejecting
-    // whatever it still queued), then mission/actions/telemetry/connection.
+    // Once every snapshot ward's busy flag has cleared, managed_wards_
+    // itself is moved out and its actual destruction (each ManagedWard's
+    // members in reverse declaration order: reconnect_worker stops and
+    // joins first, then the executor, then mission/actions/telemetry/
+    // connection) is dispatched onto a detached thread (karshipta#284) -
+    // see that issue and WardConnection::disconnect()'s own karshipta#274
+    // fix for why: reconnect_worker's join can block forever on the same
+    // vendored MAVSDK lock #273/#274 already document, if a sibling
+    // ward's own WardConnection teardown (already detached, but still
+    // holding that lock for as long as it runs) is concurrently stuck.
+    // This destructor then waits up to a bounded timeout for that
+    // detached teardown to finish before returning - not unconditional
+    // detach-and-forget, because make_executor()'s own doc comment
+    // depends on every transport_-touching teardown call finishing before
+    // this destructor returns (main.cpp destroys the real Transport
+    // object right after WardManager, so a still-running detached
+    // teardown could otherwise call back into an already-destroyed
+    // Transport - caught in review, not theoretical). The bound exists
+    // because that same wait, made unconditional, would reintroduce the
+    // exact hang #284 fixed. In the overwhelmingly common case (teardown
+    // normally finishes in well under the bound) this preserves the
+    // original synchronous guarantee exactly; only when the bound is
+    // actually hit - which by construction means the vendored lock is
+    // genuinely stuck - does this destructor return anyway, the same
+    // trade #274 already made for one connection's teardown, now applied
+    // only to the pathological case instead of unconditionally.
     // This does NOT proactively RTL wards that were never told to stop;
     // graceful shutdown of a still-flying, never-force_stop()ped fleet needs
     // main.cpp to call force_stop_all() before dropping the WardManager,
@@ -492,6 +513,30 @@ private:
     // Empty disables persistence. Set once at construction, never mutated
     // after, so it's safe to read from any thread without wards_mutex_.
     std::filesystem::path persistence_path_;
+    // The geofence push_geofence() most recently built, re-sent to each
+    // ward run_reconnect_loop brings back up. Its own mutex, independent of
+    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
+    // the shared_ptrs it needs) before calling into any ward's
+    // upload_geofence(), the same snapshot-then-release shape
+    // run_publish_loop already uses, so these two locks are never nested
+    // and need no relative ordering rule.
+    //
+    // Declared before managed_wards_ on purpose (members destroy in reverse
+    // declaration order): every ward's reconnect_worker locks this mutex
+    // from run_reconnect_loop on each (re)connect, and that thread only
+    // stops when managed_wards_ itself is destroyed. Declaring this after
+    // managed_wards_ destroyed it first, so a reconnect_worker still mid-way
+    // through the geofence push at shutdown could lock an already-destroyed
+    // mutex - confirmed live: a test that ends its scope immediately after
+    // a ward's is_connected() first turns true (the moment run_reconnect_loop
+    // is about to touch this mutex) crashed deterministically with "mutex
+    // lock failed: Invalid argument" on every run, while a test that stays
+    // alive for several seconds past connect never saw it, since the
+    // reconnect_worker had long since moved past this section by the time
+    // the destructor ran. Same reasoning publish_worker_ below already
+    // applies correctly relative to managed_wards_; this didn't get it.
+    mutable std::mutex geofence_mutex_;
+    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Structural lock: guards managed_wards_'s shape only (insert, erase,
     // lookup). Does NOT guard any individual ward's busy/executor/
     // reconnect_worker/pending_auto_start_mission_id; those live behind that
@@ -503,15 +548,6 @@ private:
     // wards' mutex_ at once.
     mutable std::mutex wards_mutex_;
     std::map<std::string, std::shared_ptr<ManagedWard>> managed_wards_;
-    // The geofence push_geofence() most recently built, re-sent to each
-    // ward run_reconnect_loop brings back up. Its own mutex, independent of
-    // wards_mutex_ - push_geofence() releases wards_mutex_ (after copying
-    // the shared_ptrs it needs) before calling into any ward's
-    // upload_geofence(), the same snapshot-then-release shape
-    // run_publish_loop already uses, so these two locks are never nested
-    // and need no relative ordering rule.
-    mutable std::mutex geofence_mutex_;
-    mavsdk::Geofence::GeofenceData cached_geofence_;
     // Set-once, see the setters' own doc comments. Never reassigned after
     // start_publishing()/the first dispatch_command(), so reading these from
     // the publish thread or a CommandExecutor worker thread needs no lock.
@@ -561,7 +597,14 @@ private:
     // when WardManager is destroyed, and this callback must stay safe to
     // invoke even then. transport_'s referent is guaranteed by the whole
     // system's construction order (main.cpp builds Transport before
-    // WardManager) to outlive it regardless.
+    // WardManager) to outlive it in the normal case - but only because
+    // ~WardManager() (karshipta#284) waits, bounded, for every
+    // transport_-touching teardown call to finish before returning. That
+    // guarantee has a documented, narrow exception: if the wait times out
+    // (the already-known #273 pathological case), a detached teardown
+    // thread could still be running, calling back into this reference,
+    // after the caller destroys the real Transport object. Accepted as
+    // the same trade #274 already made elsewhere, not fixed here.
     [[nodiscard]] std::unique_ptr<CommandExecutor> make_executor(ManagedWard& ward);
 
     // Builds the LogDownloadExecutor wired to send its results to whichever

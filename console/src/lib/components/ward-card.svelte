@@ -3,6 +3,8 @@
 	import { fleet, isConfigTerminal, type Ward } from '$lib/fleet-store.svelte';
 	import { unitsStore } from '$lib/units/units-store.svelte';
 	import { formatAltitude } from '$lib/units/format';
+	import { formatTimeAgo } from '$lib/time-format';
+	import { isStaleSample } from '$lib/ward-format';
 	import ConfirmDialog from '$lib/components/confirm-dialog.svelte';
 
 	interface StatusBadge {
@@ -21,9 +23,16 @@
 		 * per-ward status concept this library has no notion of. Absent by
 		 * default; this library never sets it itself. */
 		statusBadge?: StatusBadge;
+		/** A consumer-assigned friendly name for this ward, shown in place
+		 * of the raw wardId when set. This library has no notion of a ward
+		 * name itself (WardInfo carries no such field over the wire) - a
+		 * consumer that lets an operator rename a ward in its own storage
+		 * passes the result here. Falls back to wardId when absent, same as
+		 * today. */
+		displayName?: string;
 	}
 
-	const { wardId, ward, readonly, statusBadge }: Props = $props();
+	const { wardId, ward, readonly, statusBadge, displayName }: Props = $props();
 	const statusBadgeToneClass: Record<StatusBadge['tone'], string> = {
 		muted: 'text-fg-muted',
 		warning: 'text-accent',
@@ -48,6 +57,27 @@
 	);
 	const batteryPct = $derived(wardState?.battery?.remainingPct);
 	const connected = $derived(wardState?.connected ?? false);
+	// karshipta#268: "updated Xs ago" ticks on its own clock, independent of
+	// connected - while connected this should stay near-zero, but for a
+	// disconnected ward it is the only thing that keeps counting up, making
+	// the opacity-50 fade below feel like "this card is getting old" rather
+	// than a flat, unchanging dimmed state.
+	let now = $state(Date.now());
+	$effect(() => {
+		const interval = setInterval(() => (now = Date.now()), 10_000);
+		return () => clearInterval(interval);
+	});
+	const updatedAgoLabel = $derived(
+		wardState && wardState.ingestionMs > 0 ? formatTimeAgo(wardState.ingestionMs, now) : undefined
+	);
+	// This specific reading arrived already stale (a Herald tracker that
+	// buffered data before transmitting), independent of connected - see
+	// isStaleSample's own doc comment. Shown as its own small flag rather
+	// than folded into the connectivity dot: a stale sample over a healthy
+	// connection is a genuinely different condition from a lost link, and
+	// collapsing them would hide exactly the case karshipta#268 exists to
+	// surface.
+	const staleSample = $derived(isStaleSample(wardState));
 	// No autopilot behind this ward at all (demo math standing in for
 	// one), distinct from SITL (a real autopilot binary, just not attached
 	// to hardware): a violet accent + "SIM" label, not the same fade used
@@ -122,7 +152,7 @@
 		     the dot and remove button must never drop to a second line, or a
 		     card in a narrow rail can render with an apparently-missing
 		     remove button that's actually just wrapped out of view below. -->
-		<h2 class="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{wardId}</h2>
+		<h2 class="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{displayName ?? wardId}</h2>
 		{#if synthetic}
 			<span
 				class="shrink-0 text-[9px] font-medium tracking-widest text-synthetic"
@@ -145,6 +175,14 @@
 				{connected ? 'ARMED' : 'ARMED (STALE)'}
 			</span>
 		{/if}
+		{#if staleSample}
+			<span
+				class="shrink-0 text-[9px] font-medium tracking-widest text-accent"
+				title="This reading was already old when the gateway received it - the link itself is fine, the sample isn't fresh"
+			>
+				STALE SAMPLE
+			</span>
+		{/if}
 		{#if effectiveReadonly}
 			<span class="shrink-0 text-[9px] font-medium tracking-widest text-fg-muted">VIEW ONLY</span>
 		{/if}
@@ -154,7 +192,11 @@
 				: 'bg-critical'}"
 			role="status"
 			aria-label={connected ? 'Link live' : 'Link lost'}
-			title={connected ? 'Link live' : 'Link lost'}
+			title={connected
+				? 'Link live'
+				: updatedAgoLabel
+					? `Link lost - last update ${updatedAgoLabel}`
+					: 'Link lost'}
 		></span>
 		{#if !effectiveReadonly}
 			<button
@@ -186,6 +228,15 @@
 				: '?'} &middot; {batteryPct === undefined || batteryPct < 0
 				? '?'
 				: `${batteryPct.toFixed(0)}%`}
+			<!-- Only while disconnected: while connected this would just say
+			     "just now" on every tick, adding noise with no information -
+			     the live pulsing dot already says "fresh" for free. This is
+			     the one piece of the fade that keeps changing, so a card that
+			     has been dark for an hour reads differently from one that
+			     dropped 10 seconds ago. -->
+			{#if !connected && updatedAgoLabel}
+				&middot; {updatedAgoLabel}
+			{/if}
 		</p>
 	{:else}
 		<p class="mt-1 text-[10px] text-fg-muted">Waiting for telemetry</p>

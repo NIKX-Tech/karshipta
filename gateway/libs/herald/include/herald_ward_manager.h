@@ -5,9 +5,13 @@
 #include <karshipta/v1/telemetry.pb.h>
 #include <transport.h>
 
+#include <algorithm>
+#include <chrono>
 #include <map>
 #include <mutex>
+#include <stop_token>
 #include <string>
+#include <thread>
 
 // Forward-declared, not included: this header only ever holds a WardManager*
 // (never dereferenced here), so it does not need WardManager's full
@@ -37,11 +41,24 @@ enum class HeraldIngestResult { kOk, kWardIdCollision };
 // non-MAVLink ward," permanently, not just Herald's own native wire format.
 class HeraldWardManager {
    public:
+    // karshipta#268: a Herald source has no MAVLink-style link to watch, just
+    // messages that stop arriving, so staleness is detected by elapsed time
+    // since the last one instead. 30s is a starting default, generous enough
+    // for a slow cellular store-and-forward tracker without flagging a
+    // merely-quiet one as gone; making this configurable per source via
+    // gateway.yaml (the issue's own "configurable" wording) is follow-up
+    // work once this mechanism has real-world tuning data behind it, not
+    // part of this foundation.
+    static constexpr std::chrono::milliseconds kDefaultStaleTimeout{30'000};
+
 #ifdef KARSHIPTA_GATEWAY_ENABLE_MAVLINK
     // ward_manager is consulted (read-only, via has_ward()) to reject a
     // Herald message whose entity_id collides with an existing MAVLink
-    // ward_id; this class never mutates it.
-    HeraldWardManager(Transport& transport, WardManager& ward_manager);
+    // ward_id; this class never mutates it. stale_timeout is a constructor
+    // parameter (not just a constant) so tests can use a short one instead
+    // of waiting out a real 30s window.
+    explicit HeraldWardManager(Transport& transport, WardManager& ward_manager,
+                               std::chrono::milliseconds stale_timeout = kDefaultStaleTimeout);
 #else
     // MAVLink-disabled builds (KARSHIPTA_GATEWAY_ENABLE_MAVLINK=OFF, see root
     // CMakeLists.txt): no WardManager exists to collide-check against, since
@@ -49,7 +66,8 @@ class HeraldWardManager {
     // constructor exists here (not the WardManager&-taking one above,
     // conditionally compiled out) - a build where WardManager barely exists
     // as a type should not expose a constructor that implies it does.
-    explicit HeraldWardManager(Transport& transport);
+    explicit HeraldWardManager(Transport& transport,
+                               std::chrono::milliseconds stale_timeout = kDefaultStaleTimeout);
 #endif
 
     HeraldWardManager(const HeraldWardManager&) = delete;
@@ -86,6 +104,20 @@ class HeraldWardManager {
     // portable across both compilers this repo builds with.
     WardManager& ward_manager_;
 #endif
+    // karshipta#268: what the staleness checker needs per ward - the state
+    // last broadcast for it (so a stale flip can re-send the same reading
+    // with only connected() changed, not fabricate one) and when that
+    // arrived, in steady_clock rather than wall-clock terms specifically so
+    // a system clock jump (NTP sync, DST, manual change) can never produce
+    // a false stale flip or a false recovery. marked_stale guards against
+    // re-broadcasting the same "now stale" state on every check tick once
+    // it has already been sent once.
+    struct LastSeen {
+        karshipta::v1::WardState last_state;
+        std::chrono::steady_clock::time_point last_seen_at;
+        bool marked_stale = false;
+    };
+
     mutable std::mutex mutex_;
     // Every entity_id ingest() has ever built a WardInfo for, so a repeat
     // message from the same source doesn't re-announce it. In-memory only,
@@ -93,6 +125,41 @@ class HeraldWardManager {
     // is defined entirely by "it has posted a message," so there is nothing
     // meaningful to persist across a restart.
     std::map<std::string, karshipta::v1::WardInfo> known_wards_;
+    // karshipta#268: one entry per entity_id ever ingested, updated on every
+    // ingest() and read by the staleness checker below. Same in-memory-only
+    // reasoning as known_wards_ above.
+    std::map<std::string, LastSeen> last_seen_;
+    const std::chrono::milliseconds stale_timeout_;
+    // How often the checker wakes to look for a ward that just crossed
+    // stale_timeout_. A quarter of the timeout keeps the detection delay
+    // small relative to the timeout itself without busy-looping; the 50ms
+    // floor matters for tests using a short stale_timeout_, where
+    // timeout/4 alone would otherwise round down to an unusably tight loop.
+    [[nodiscard]] std::chrono::milliseconds stale_check_interval() const {
+        return std::max(stale_timeout_ / 4, std::chrono::milliseconds(50));
+    }
+
+    // Body of stale_checker_, started in the constructor.
+    void run_stale_checker(std::stop_token stop_token);
+
+    // karshipta#276: "accept but flag," the same philosophy
+    // isStaleSample() already applies on the console side (karshipta#268) -
+    // never reject a sample outright (rejecting risks permanently
+    // "poisoning" a ward whose very first message happened to carry a bad
+    // clock), just surface that something looks wrong via the existing
+    // Event/WARNING mechanism and let the operator judge. Mirrors
+    // WardManager::broadcast_mission_event's own shape.
+    void broadcast_herald_event(const std::string& ward_id, const std::string& code,
+                                const std::string& message) const;
+
+    // Declared last (after mutex_/known_wards_/last_seen_, which it reads,
+    // and after stale_timeout_, which it only reads too): members destroy
+    // in reverse declaration order, so this stops and joins first, before
+    // the state it touches is torn down. Same reasoning WardManager's own
+    // geofence_mutex_/managed_wards_ ordering bug (karshipta#270 writeup)
+    // surfaced the hard way - getting it right here from the start instead
+    // of after a crash.
+    std::jthread stale_checker_;
 };
 
 #endif  // KARSHIPTA_GATEWAY_HERALD_WARD_MANAGER_H

@@ -28,9 +28,13 @@
 		// Forwarded straight to each ward's own WardCard - see its Props
 		// comment. Absent by default; this library never sets it itself.
 		statusBadgeFor?: (wardId: string) => StatusBadge | undefined;
+		// Forwarded straight to each ward's own WardCard displayName - see
+		// its Props comment. Same shape as FleetMap's nameFor, so a
+		// consumer wiring both uses one lookup for both.
+		nameFor?: (wardId: string) => string | undefined;
 	}
 
-	const { fleetId, fleetLabel, wardIds, statusBadgeFor }: Props = $props();
+	const { fleetId, fleetLabel, wardIds, statusBadgeFor, nameFor }: Props = $props();
 	const memberCandidateIds = $derived(wardIds ?? fleet.wardIds);
 
 	const group = $derived(fleetGroups.fleets[fleetId]);
@@ -189,7 +193,12 @@
 					<p class="text-[10px] text-fg-muted">No wards yet.</p>
 				{:else}
 					{#each group.wardIds.filter((wardId) => wardId in fleet.wards) as wardId (wardId)}
-						<WardCard {wardId} ward={fleet.wards[wardId]} statusBadge={statusBadgeFor?.(wardId)} />
+						<WardCard
+							{wardId}
+							ward={fleet.wards[wardId]}
+							statusBadge={statusBadgeFor?.(wardId)}
+							displayName={nameFor?.(wardId)}
+						/>
 					{/each}
 				{/if}
 			{/if}

@@ -5,6 +5,74 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.4.0]
+
+### Added
+
+- Gateway: `WardState.ingestion_ms` and Herald staleness detection
+  (karshipta#268, karshipta#272). `timestamp_ms` means something different
+  per ward type and a Herald ward never went stale; `ingestion_ms` is the
+  gateway's own wall-clock receipt time, independent of the device's own
+  timestamp.
+- Console: ward freshness indicators, separate from connected/disconnected
+  (karshipta#268, karshipta#275). A link can be fully healthy while still
+  delivering a sample that was already old on arrival; the console now
+  surfaces that gap using the new `ingestionMs` field.
+- Gateway: Herald out-of-order and clock-skewed sample flagging
+  (karshipta#276). `ingest()` accepted and broadcast every sample exactly
+  as it arrived with no comparison against the last accepted sample for
+  that ward. Never rejects outright, to avoid permanently poisoning a
+  ward over one bad first message; flags instead, via the existing
+  Event/WARNING mechanism.
+- Gateway: multi-vehicle regression matrix, MV-01/02/03 (karshipta#270),
+  proposed by Yigitcan Ozturk (PAMILANGA LTD): concurrent connections
+  each to their own system ID, one ward losing its link while the
+  others stay up, and reconnect under the same identity with no
+  duplicate registration or cross-contamination.
+- Console: a consumer app can override a ward's displayed name, threaded
+  through the map, left rail, and detail panel instead of only ever
+  showing the raw `wardId`.
+- Console: `Dialog` exported as a public building block, so a consuming
+  app can build its own dialog content on the same focus-trap/Escape/
+  backdrop mechanics every dialog in this package already uses.
+- Console: geofence breach action field, tier-1 configuration panel
+  (karshipta#258). The boundary shape was already enforced
+  (karshipta#247/#252), but what happens on breach was invisible and
+  unset; adds the curated `GF_ACTION`/`FENCE_ACTION` field alongside the
+  existing battery/RC-loss/data-link-loss failsafe action fields.
+
+### Fixed
+
+- Gateway: stale-vs-fresh broadcast race in `HeraldWardManager`
+  (karshipta#272). A ward marked stale by `run_stale_checker()` could
+  still have its queued "disconnected" `WardState` go out after
+  `ingest()` had already received and broadcast a fresher "connected"
+  update for the same ward in the gap between the two, flickering a
+  just-arrived ward back to disconnected on the console.
+- Gateway: `WardManager` destructor-ordering race on `geofence_mutex_`.
+  Member declaration order meant the mutex could destruct before the
+  ward threads that lock it were actually joined, a crash-on-shutdown
+  race.
+- Gateway: `WardConnection` teardown dispatched off the caller's thread,
+  a partial fix for karshipta#273. The remaining issue is a deadlock
+  inside vendored MAVSDK's own `remove_connection()`, confirmed via a
+  live thread dump and not fixable from this codebase; the full fix is a
+  MAVSDK major-version migration, tracked separately.
+- Gateway: `WardManager`'s own ward teardown dispatched off the main
+  thread (karshipta#284). A sibling ward's connection teardown holding
+  the same vendored MAVSDK lock karshipta#273 documents could block
+  another ward's reconnect worker join forever; bounded to a 5 second
+  wait so the documented transport-outlives-everything invariant still
+  holds in the common case.
+- Console: flight log download and sensor calibration now correctly
+  hidden from readonly viewers. Both send real MAVLink commands, not
+  reads, and neither had a readonly gate at all.
+- Gateway CI: isolated the known-flaky
+  `HandleRemoveWardRejectsWhileAirborne` test (karshipta#237) into its
+  own retried step. The hang mechanism it was written to catch was
+  already fixed earlier; the remaining flakiness is cached telemetry
+  flapping under CPU scarcity on CI runners.
+
 ## [0.3.0]
 
 ### Added
