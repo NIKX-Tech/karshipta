@@ -215,6 +215,20 @@ public:
                std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        // Flagged by an independent review of this fix: hitting the bound
+        // used to return silently, meaning the exact race this mechanism
+        // exists to prevent (a detached teardown thread still running when
+        // the process starts exiting) could recur completely undetected.
+        // ADD_FAILURE() here fails the overall test binary (gtest runs
+        // global-environment TearDown() failures into RUN_ALL_TESTS()'s
+        // exit code), so hitting the bound is loud, not silent.
+        if (const auto remaining = g_pending_fake_teardowns.load(std::memory_order_relaxed);
+            remaining > 0) {
+            ADD_FAILURE() << remaining
+                          << " fake teardown(s) still pending after the " << kWaitBound.count()
+                          << "s bound - a detached teardown thread may still be running when "
+                             "this process exits.";
+        }
     }
 };
 
