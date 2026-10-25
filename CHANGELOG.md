@@ -5,6 +5,23 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.5.1]
+
+### Fixed
+
+- Herald: GT06 extended (0x7979) frame header support, and tolerance for
+  real device quirks the protocol's own reference decoder (Traccar)
+  already tolerates - a checksum mismatch on an otherwise well-framed
+  packet, and a declared length field that doesn't match the frame's
+  true size (karshipta#283). Found by replaying 185+ real device byte
+  captures from Traccar's own test suite directly through this parser:
+  44 of 185 used the extended header (not an edge case, every one was
+  previously dropping the connection), and 15 genuinely mismatch
+  checksum (also previously fatal). A max-buffer-size bound (32KB,
+  matching Traccar's own) was added alongside the fix, to keep the
+  stop-marker fallback scan this introduces bounded on a connection
+  that never completes a frame.
+
 ## [0.5.0]
 
 ### Changed
