@@ -36,7 +36,7 @@ brew install mavsdk spdlog
 
 # Ubuntu 22.04 (adjust the MAVSDK version to the latest release)
 curl -fsSL -o /tmp/mavsdk.deb \
-  https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb
+  https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/libmavsdk-dev_4.0.6_ubuntu22.04_amd64.deb
 sudo apt-get update && sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev
 ```
 

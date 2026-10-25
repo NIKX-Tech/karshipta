@@ -53,7 +53,7 @@ cd karshipta
 ## 2. MAVSDK (prebuilt release)
 
 ```
-curl -LO https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/mavsdk-windows-x64.zip
+curl -LO https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/mavsdk-windows-x64.zip
 tar -xf mavsdk-windows-x64.zip -C <repo>/gateway/third_party/mavsdk
 ```
 

@@ -6,7 +6,7 @@
 
 #include <google/protobuf/arena.h>
 #include <karshipta/v1/envelope.pb.h>
-#include <mavsdk/plugins/info/info.h>
+#include <mavsdk/plugins/info/info.hpp>
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
 

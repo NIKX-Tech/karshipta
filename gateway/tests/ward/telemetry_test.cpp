@@ -3,7 +3,7 @@
 #include <memory>
 
 #include <gtest/gtest.h>
-#include <mavsdk/mavsdk.h>
+#include <mavsdk/mavsdk.hpp>
 
 #include "ward_connection.h"
 

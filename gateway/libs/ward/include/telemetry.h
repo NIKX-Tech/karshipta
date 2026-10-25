@@ -2,7 +2,7 @@
 #ifndef KARSHIPTA_GATEWAY_TELEMETRY_H
 #define KARSHIPTA_GATEWAY_TELEMETRY_H
 
-#include <mavsdk/plugins/telemetry/telemetry.h>
+#include <mavsdk/plugins/telemetry/telemetry.hpp>
 
 #include <atomic>
 #include <chrono>

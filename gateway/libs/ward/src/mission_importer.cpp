@@ -1,6 +1,6 @@
 #include "mission_importer.h"
 
-#include <mavsdk/mavlink/ardupilotmega/ardupilotmega.h>
+#include <mavsdk/mavlink/ardupilotmega/mavlink.h>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
