@@ -43,7 +43,7 @@ jobs:
           # billing change, not a workflow fix. arm64 covers every Mac sold
           # since late 2020; revisit Intel support later if real demand
           # shows up (paid large runner or a self-hosted Intel Mac).
-          - os: macos-14
+          - os: macos-15
             triple: aarch64-apple-darwin
           - os: ubuntu-22.04
             triple: x86_64-unknown-linux-gnu
@@ -54,20 +54,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # llvm: GitHub's macos-14/macos-13 runners ship Xcode 15.4, whose
-      # bundled libc++ has no std::jthread/std::stop_token - this codebase
-      # uses both throughout (WardManager, CommandExecutor, WardMission).
-      # ci.yml never caught this because it only builds the gateway on
-      # ubuntu-22.04; this is the first workflow to ever build it on macOS
-      # CI. Verified directly (this machine has a newer Xcode where the
-      # system compiler already supports it, so this needed a real,
-      # dedicated check): Homebrew's LLVM clang + its own bundled libc++
-      # compiles, links, and *runs* correctly against Homebrew's MAVSDK/
-      # spdlog (themselves built with Apple's system libc++) - libc++'s ABI
-      # stability across the two is what makes this safe, not assumed.
+      # llvm: originally needed because GitHub's macos-14/macos-13 runners
+      # shipped Xcode 15.4, whose bundled libc++ has no std::jthread/
+      # std::stop_token - this codebase uses both throughout (WardManager,
+      # CommandExecutor, WardMission). Moved off macos-14 to macos-15 in
+      # late October 2026 since GitHub began retiring macos-14 runners
+      # (brownouts from 2026-07-06, full removal 2026-11-02) and Homebrew
+      # had already dropped bottle support for that OS version to match -
+      # `brew install mavsdk` was failing a transitive python@3.15 build
+      # from source every time, a hard toolchain error ("no support for
+      # efficient tail calling"), not a flaky/transient one. Whether
+      # macos-15's own bundled Xcode already has a new enough libc++ to
+      # drop this Homebrew LLVM step entirely has not been separately
+      # re-verified - kept as-is since it's harmless even if redundant,
+      # and confirmed working here (not assumed): Homebrew's LLVM clang +
+      # its own bundled libc++ compiles, links, and *runs* correctly
+      # against Homebrew's MAVSDK/spdlog (themselves built with Apple's
+      # system libc++) - libc++'s ABI stability across the two is what
+      # makes this safe.
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install mavsdk spdlog llvm
+        # brew update first: the runner's preinstalled Homebrew can lag
+        # behind the real homebrew-core HEAD, so a bare `brew install`
+        # silently resolved mavsdk to a stale 3.17.4 bottle manifest
+        # instead of the current 4.0.6 stable formula (confirmed via a
+        # workflow_dispatch dry run on the MAVSDK v4 migration branch).
+        run: |
+          brew update
+          brew install mavsdk spdlog llvm
 
       # libssl-dev: only needed once a build actually turns relay on
       # (KARSHIPTA_GATEWAY_ENABLE_RELAY=ON forces ixwebsocket's USE_TLS=ON,
@@ -78,7 +92,7 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          curl -fsSL -o /tmp/mavsdk.deb https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/libmavsdk-dev_3.17.1_ubuntu22.04_amd64.deb
+          curl -fsSL -o /tmp/mavsdk.deb https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/libmavsdk-dev_4.0.6_ubuntu22.04_amd64.deb
           sudo apt-get update
           sudo apt-get install -y /tmp/mavsdk.deb libspdlog-dev protobuf-compiler libprotobuf-dev patchelf libssl-dev
 
@@ -97,13 +111,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: gateway/third_party
-          key: win-third-party-mavsdk3.17.1-spdlog1.14.1-protobuf21.12-mbedtls3.6.7
+          key: win-third-party-mavsdk4.0.6-spdlog1.14.1-protobuf21.12-mbedtls3.6.7
 
       - name: Vendor MAVSDK (Windows)
         if: runner.os == 'Windows' && steps.win-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          curl -fsSL -o mavsdk.zip https://github.com/mavlink/MAVSDK/releases/download/v3.17.1/mavsdk-windows-x64.zip
+          curl -fsSL -o mavsdk.zip https://github.com/mavlink/MAVSDK/releases/download/v4.0.6/mavsdk-windows-x64.zip
           mkdir -p gateway/third_party/mavsdk
           unzip -q mavsdk.zip -d gateway/third_party/mavsdk
 

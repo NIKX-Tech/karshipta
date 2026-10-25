@@ -1,7 +1,7 @@
 #ifndef KARSHIPTA_GATEWAY_WARD_CONNECTION_H_
 #define KARSHIPTA_GATEWAY_WARD_CONNECTION_H_
 
-#include <mavsdk/mavsdk.h>
+#include <mavsdk/mavsdk.hpp>
 
 #include <chrono>
 #include <memory>

@@ -1,6 +1,7 @@
 #include "ward_manager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -13,7 +14,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <mavsdk/plugins/telemetry_server/telemetry_server.h>
+#include <mavsdk/plugins/telemetry_server/telemetry_server.hpp>
 
 #include <karshipta/v1/envelope.pb.h>
 
@@ -175,12 +176,64 @@ struct MultiVehicleFake {
 // added CPU load, consistent with a real GitHub-hosted runner (2 vCPUs)
 // being meaningfully more constrained than any machine this was developed
 // on, the same conclusion karshipta#237 reached for an unrelated test.
+// Found via 100-run stress testing against MAVSDK v4.0.6 under added CPU
+// load: a detach-and-forget thread can still be mid-teardown of a real
+// Mavsdk core when the whole test BINARY's own main() returns and the
+// process starts exiting, racing the C++ runtime's own static-destructor
+// sequence - libc++abi aborted with "mutex lock failed: Invalid argument"
+// on roughly a third of runs, always during one of the three MV tests
+// below. Never seen under v3.17.1's slower, dedicated-thread-join-based
+// teardown; v4's faster Asio-based path just closes the race window this
+// detach pattern always had. g_pending_fake_teardowns +
+// FakeTeardownWaitEnvironment below give every still-running teardown
+// thread a bounded chance to finish once, after all tests have run,
+// rather than per-test - preserves the reason this is detached at all
+// (avoiding a timeout on a loaded CI runner tearing down several cores
+// synchronously within one test), without racing process exit.
+std::atomic<int> g_pending_fake_teardowns{0};
+
 void detach_fake_teardown(std::vector<MultiVehicleFake> fakes) {
     for (auto& fake : fakes) {
-        std::thread([autopilot = std::move(fake.autopilot)]() mutable { autopilot.reset(); })
-            .detach();
+        g_pending_fake_teardowns.fetch_add(1, std::memory_order_relaxed);
+        std::thread([autopilot = std::move(fake.autopilot)]() mutable {
+            autopilot.reset();
+            g_pending_fake_teardowns.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
     }
 }
+
+// Registered via static init (AddGlobalTestEnvironment must run before
+// RUN_ALL_TESTS(), which this test binary's gtest_main-provided main()
+// calls); TearDown() runs once, after every test has finished, right
+// before main() returns.
+class FakeTeardownWaitEnvironment : public ::testing::Environment {
+public:
+    void TearDown() override {
+        constexpr auto kWaitBound = std::chrono::seconds(5);
+        const auto deadline = std::chrono::steady_clock::now() + kWaitBound;
+        while (g_pending_fake_teardowns.load(std::memory_order_relaxed) > 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        // Flagged by an independent review of this fix: hitting the bound
+        // used to return silently, meaning the exact race this mechanism
+        // exists to prevent (a detached teardown thread still running when
+        // the process starts exiting) could recur completely undetected.
+        // ADD_FAILURE() here fails the overall test binary (gtest runs
+        // global-environment TearDown() failures into RUN_ALL_TESTS()'s
+        // exit code), so hitting the bound is loud, not silent.
+        if (const auto remaining = g_pending_fake_teardowns.load(std::memory_order_relaxed);
+            remaining > 0) {
+            ADD_FAILURE() << remaining
+                          << " fake teardown(s) still pending after the " << kWaitBound.count()
+                          << "s bound - a detached teardown thread may still be running when "
+                             "this process exits.";
+        }
+    }
+};
+
+[[maybe_unused]] ::testing::Environment* const g_fake_teardown_wait_env =
+    ::testing::AddGlobalTestEnvironment(new FakeTeardownWaitEnvironment());
 
 // RAII guard around a test's fakes: dispatches detach_fake_teardown() in
 // its own destructor, so it runs on every exit path, not just one reached

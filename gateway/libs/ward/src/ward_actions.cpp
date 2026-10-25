@@ -322,7 +322,19 @@ mavsdk::MavlinkPassthrough::Result WardActions::set_home_position(
         static_cast<float>(latitude_deg),
         static_cast<float>(longitude_deg),
         altitude_msl_m};
+    // send_command_long itself carries MAVSDK's own DEPRECATED attribute
+    // (the whole plugin is deprecated in favor of MavlinkDirect), separate
+    // from the MAVSDK_ENABLE_MAVLINK_C_API gate that keeps it available at
+    // all. No MavlinkDirect replacement exists for set_home_position
+    // (karshipta#246), so this stays on purpose; silence just this call.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
     return log_result("set home position", mavlink_passthrough_->send_command_long(command));
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 }
 
 mavsdk::Geofence::Result WardActions::upload_geofence(

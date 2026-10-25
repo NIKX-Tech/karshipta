@@ -15,8 +15,8 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <mavsdk/mavsdk.h>
-#include <mavsdk/plugins/geofence/geofence.h>
+#include <mavsdk/mavsdk.hpp>
+#include <mavsdk/plugins/geofence/geofence.hpp>
 #include <karshipta/v1/envelope.pb.h>
 #include <karshipta/v1/fleet.pb.h>
 #include <ward_connection.h>
