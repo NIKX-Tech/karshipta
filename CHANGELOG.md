@@ -5,6 +5,35 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.5.0]
+
+### Changed
+
+- Gateway: migrated MAVSDK 3.17.1 to 4.0.6 (karshipta#273, karshipta#279).
+  v4's Asio rewrite removes the dedicated receive thread and blocking
+  join() that MAVSDK's own `remove_connection()` could deadlock
+  against - a genuine bug inside the vendored library itself, not
+  previously fixable from this codebase. Two earlier mitigations
+  (karshipta#274, karshipta#286) reduced exposure but never removed
+  the underlying mechanism; this migration removes it directly,
+  confirmed via a standalone repro (150 iterations against the real
+  trigger condition, 3ms worst case, zero hangs) and a 100-run stress
+  battery under load with zero failures. `MavlinkPassthrough` (used
+  for `set_home_position`, karshipta#246) stays available, now gated
+  behind `MAVSDK_ENABLE_MAVLINK_C_API` since v4 hides it by default.
+- CI: macOS release builds moved from `macos-14` to `macos-15`.
+  GitHub began retiring `macos-14` runners in July 2026 (full removal
+  November 2, 2026), and Homebrew had already dropped bottle support
+  for that OS to match.
+
+### Fixed
+
+- Console: the geofence breach action field (karshipta#258, karshipta#287)
+  was never actually published to the console-core npm package -
+  it landed under a version number the publish workflow had already
+  published for an earlier, unrelated change, so the if-version-changed
+  check silently skipped it. Republished as 0.19.5.
+
 ## [0.4.0]
 
 ### Added
