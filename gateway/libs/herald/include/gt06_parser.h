@@ -19,10 +19,14 @@
 //
 // Reference: Traccar's Gt06ProtocolDecoder.java (github.com/traccar/traccar)
 // and its Checksum.java (CRC16_X25 parameters) - ported, not
-// reverse-engineered from nothing. This class only implements the standard
-// (non-extended, 0x7878-framed) subset needed for login, basic GPS
-// location, and heartbeat - the "basic tracking" scope in issue #123, not
-// GT06's full command/alarm surface.
+// reverse-engineered from nothing. Frames with either start marker Traccar
+// recognizes (0x7878 standard, or 0x7979 extended - identical framing, just
+// a 2-byte length field instead of 1-byte, used for payloads too large for
+// a standard frame) are parsed; this class only *decodes the content of*
+// login, basic GPS location, and heartbeat packet types - the "basic
+// tracking" scope in issue #123, not GT06's full command/alarm surface.
+// Everything else still frames and checksum-checks correctly (so the
+// connection doesn't desync) but comes back as kUnsupported.
 class Gt06Parser {
    public:
     enum class PacketType { kLogin, kLocation, kHeartbeat, kUnsupported };
@@ -55,10 +59,25 @@ class Gt06Parser {
     // single "didn't parse": kIncomplete means data is a valid-so-far
     // prefix that just needs more bytes from the next recv() (keep
     // buffering, do nothing else); kInvalid means the buffer does not start
-    // with a real GT06 frame at all (bad start marker) or a complete
-    // frame's checksum failed (real corruption) - the caller should log and
-    // drop the connection rather than wait forever for bytes that will
-    // never produce a valid frame.
+    // with a real GT06 frame at all (bad start marker), the declared length
+    // makes the frame shorter than physically possible, or the trailing
+    // 0x0D 0x0A stop marker is missing - a real framing desync, not
+    // something to wait out. The caller should log and drop the connection
+    // rather than wait forever for bytes that will never produce a valid
+    // frame.
+    //
+    // Deliberately NOT included here: a checksum mismatch on an otherwise
+    // well-framed packet. Confirmed against 185 real device captures from
+    // Traccar's own test suite (github#283): 24 of them carry a checksum
+    // that does not match CRC-16/X-25 over the bytes Traccar's own
+    // reference decoder covers (independently re-verified: this parser's
+    // own crc16_x25 agrees with a from-scratch reference implementation, so
+    // the mismatch is real, not a bug in this port), and Traccar's decode()
+    // never validates the incoming checksum at all - it is only ever used
+    // to build the outgoing ack. A real device sending a frame-correct
+    // packet with a wrong checksum is normal, tolerated firmware behavior,
+    // not corruption; treating it as fatal here would disconnect real
+    // hardware this parser can otherwise decode correctly.
     enum class FrameResult { kOk, kIncomplete, kInvalid };
 
     struct ParseResult {
@@ -71,6 +90,13 @@ class Gt06Parser {
         size_t consumed_bytes = 0;
         // Only meaningful when result == kOk.
         ParsedPacket packet{};
+        // Only meaningful when result == kOk: true if the frame's checksum
+        // did not match CRC-16/X-25 over its own bytes. Still decoded and
+        // returned as kOk (see the FrameResult doc above for why) - surfaced
+        // here so the caller can still make this observable (a log line),
+        // per this codebase's "every failure is observable" rule, without
+        // the pure parser itself taking a logging dependency.
+        bool checksum_mismatch = false;
     };
 
     // Parses exactly one frame starting at the beginning of `data`. Never

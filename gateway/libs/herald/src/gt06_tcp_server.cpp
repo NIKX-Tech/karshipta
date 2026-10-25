@@ -34,6 +34,21 @@ constexpr int kPollTimeoutMs = 1000;
 // One recv() call's buffer size; frames are reassembled across calls in
 // the connection's own accumulation buffer, this just bounds one syscall.
 constexpr size_t kRecvChunkSize = 1024;
+// Caps how large the per-connection accumulation buffer below is allowed
+// to grow while still waiting on a complete frame. Matches Traccar's own
+// Gt06FrameDecoder, which passes BaseProtocol.MAX_FRAME_LENGTH_LARGE (also
+// 32KB, the larger of its two frame-size budgets - GT06 extended frames
+// can carry real payloads much bigger than a standard frame's 255-byte
+// one) to BaseFrameDecoder, which throws once an incomplete buffer exceeds
+// it. github#283's own fix to parse_frame (the stop-marker fallback scan
+// for a declared length field that turns out to be wrong) pays an
+// O(buffer size) cost on every incomplete call once the fast path fails,
+// the same cost Traccar's own reference decoder pays - this bound is what
+// actually keeps that cost finite, exactly like upstream, rather than
+// trying to dodge the scan itself and risk losing a real frame whose
+// declared length understates its own true size (see parse_frame's own
+// comment on why that was tried and reverted).
+constexpr size_t kMaxFrameBufferSize = 32 * 1024;
 
 // Deliberately exact-match only, same as websocket_transport.cpp's and
 // herald_http_server.cpp's own is_loopback_host; duplicated rather than
@@ -192,11 +207,28 @@ void Gt06TcpServer::handleConnection(std::unique_ptr<ix::Socket> socket,
         bool desync = false;
         while (true) {
             const auto result = Gt06Parser::parse_frame(buffer);
-            if (result.result == Gt06Parser::FrameResult::kIncomplete) break;
+            if (result.result == Gt06Parser::FrameResult::kIncomplete) {
+                if (buffer.size() > kMaxFrameBufferSize) {
+                    spdlog::warn(
+                        "GT06 device {} never completed a frame within {} bytes, disconnecting "
+                        "(matches Traccar's own BaseFrameDecoder.MAX_FRAME_LENGTH_LARGE bound)",
+                        remote_ip, kMaxFrameBufferSize);
+                    desync = true;
+                }
+                break;
+            }
             if (result.result == Gt06Parser::FrameResult::kInvalid) {
                 spdlog::warn("GT06 device {} sent an unparseable frame, disconnecting", remote_ip);
                 desync = true;
                 break;
+            }
+
+            if (result.checksum_mismatch) {
+                spdlog::warn(
+                    "GT06 device {} sent a frame with a checksum that doesn't match its own "
+                    "bytes - processing it anyway (github#283: real devices do this, and the "
+                    "reference decoder this was ported from never validates it either)",
+                    remote_ip);
             }
 
             const auto& packet = result.packet;

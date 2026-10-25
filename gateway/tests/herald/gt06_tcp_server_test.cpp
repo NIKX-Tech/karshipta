@@ -184,6 +184,45 @@ TEST_F(Gt06TcpServerTest, LoginThenLocationIngestsHeraldWithImeiAsEntityId) {
     EXPECT_TRUE(state.health_ok());
 }
 
+// github#283's own fix to Gt06Parser::parse_frame added a stop-marker
+// fallback scan for when a device's declared length field turns out to be
+// wrong - an independent review of that fix flagged that, without a bound,
+// a connection that never completes a frame (malicious, or just broken
+// firmware) could grow its accumulation buffer and the resulting O(buffer
+// size) scan cost without limit. Traccar's own reference decoder bounds
+// this with a 32KB cap (BaseProtocol.MAX_FRAME_LENGTH_LARGE); this test
+// exercises the matching bound added to Gt06TcpServer.
+TEST_F(Gt06TcpServerTest, NeverCompletingFrameBeyondMaxBufferSizeDisconnects) {
+    ix::Socket socket;
+    std::string error;
+    const ix::CancellationRequest never_cancel = [] { return false; };
+    ASSERT_TRUE(socket.connect(kHost, port_, error, never_cancel)) << error;
+
+    // A real start marker followed by far more than 32KB of bytes that
+    // never contain a single 0x0D 0x0A anywhere - never a complete frame,
+    // by declared length or by the fallback scan either.
+    std::vector<uint8_t> garbage = {0x78, 0x78};
+    garbage.resize(40 * 1024, 0xFF);
+    socket.send(reinterpret_cast<char*>(garbage.data()), garbage.size());
+
+    // The server closing its end is the observable signal here, not a
+    // reply (this connection never sends a frame worth acking) - the
+    // client side sees that as recv() returning 0 (orderly close) once the
+    // server's own read loop breaks out and tears the connection down.
+    bool closed_by_server = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::array<uint8_t, 256> chunk{};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (socket.isReadyToRead(200) != ix::PollResultType::ReadyForRead) continue;
+        if (socket.recv(chunk.data(), chunk.size()) <= 0) {
+            closed_by_server = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(closed_by_server);
+    socket.close();
+}
+
 TEST_F(Gt06TcpServerTest, LocationBeforeLoginIsDroppedNotIngested) {
     (void)send_frames_and_collect_replies(port_, {kLocationFrame});
 
