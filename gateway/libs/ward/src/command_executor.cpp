@@ -2,8 +2,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -15,6 +17,45 @@ namespace {
 // Command speed 0 means "autopilot default" (schema comment); only forward a
 // real request.
 constexpr float kNoSpeedRequested = 0.0f;
+
+// gateway#182: relayly's E2E session proves a command came from the paired
+// console, unaltered, over a live cryptographic channel - established once
+// at pairing, refreshed on rekey. It does not prove the sender is still
+// authorized to issue THIS command the instant the autopilot actually acts
+// on it: a command already in flight, or sitting behind others in this
+// executor's own single-worker queue, previously executed with no re-check
+// at all, even disarm/kill/land/rtl. 5 seconds: generous enough for a real
+// relayly round trip plus queueing behind a slow in-flight command, tight
+// enough to actually close the gap this issue is about - matches this
+// codebase's other "a few seconds" bounds (e.g. WardManager's own teardown
+// wait) rather than inventing a new order of magnitude.
+constexpr uint64_t kCommandAuthorityWindowMs = 5000;
+
+// Duplicated rather than shared, matching this codebase's own precedent for
+// this exact one-liner (ward_manager.cpp, fleet_manager.cpp,
+// herald_ward_manager.cpp each have their own copy already).
+uint64_t unix_epoch_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
+}
+
+// The destructive actions the issue's own deliverable scopes this to first:
+// arm, disarm/kill, takeoff, land, rtl. goto/mission intentionally excluded
+// here - the issue calls them "a reasonable place to extend it to once the
+// window value is proven out," not part of this pass.
+bool is_authority_gated(const karshipta::v1::Command::ActionCase action_case) {
+    switch (action_case) {
+        case karshipta::v1::Command::kArm:
+        case karshipta::v1::Command::kDisarm:
+        case karshipta::v1::Command::kTakeoff:
+        case karshipta::v1::Command::kLand:
+        case karshipta::v1::Command::kRtl:
+            return true;
+        default:
+            return false;
+    }
+}
 
 // Normalizes a MAVSDK Result into {success, message}: blank message on
 // success unless the caller supplies one (only PauseMissionCommand's
@@ -167,6 +208,28 @@ std::pair<bool, std::string> CommandExecutor::dispatch(const karshipta::v1::Comm
     using Result = mavsdk::Action::Result;
 
     const auto describe = [](const Result result) { return WardActions::result_name(result); };
+
+    // gateway#182: checked here, at actual execution time, not in enqueue()
+    // - the issue's own concern is a command that sat behind others in this
+    // executor's single-worker queue (or just in flight a while) by the
+    // time its turn comes up, not just a slow sender. The bound is symmetric
+    // (|now - timestamp_ms| > window, not just now - timestamp_ms > window):
+    // this is a self-hosted product with no guaranteed clock sync between
+    // the console's host and the gateway's host, so timestamp_ms can
+    // legitimately be a little ahead of unix_epoch_ms() here, but a
+    // one-sided check would let a command timestamped arbitrarily far in
+    // the future bypass this gate entirely. drift_ms always subtracts the
+    // smaller value from the larger one, so it never wraps (unsigned) and
+    // never overflows (no signed arithmetic at all) regardless of how
+    // bogus timestamp_ms is.
+    if (is_authority_gated(command.action_case())) {
+        const uint64_t now_ms = unix_epoch_ms();
+        const uint64_t ts_ms = command.timestamp_ms();
+        const uint64_t drift_ms = now_ms > ts_ms ? now_ms - ts_ms : ts_ms - now_ms;
+        if (drift_ms > kCommandAuthorityWindowMs) {
+            return {false, "command timestamp outside authority window"};
+        }
+    }
 
     switch (command.action_case()) {
         case karshipta::v1::Command::kArm:
