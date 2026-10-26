@@ -1,6 +1,7 @@
 #include "ward_manager.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -1222,6 +1223,81 @@ TEST_F(WardManagerTest, DisconnectedWardReconnectsUnderSameIdentity) {
     // this happened.
     EXPECT_TRUE(manager.is_connected("mv03-0"));
     EXPECT_TRUE(manager.is_connected("mv03-2"));
+}
+
+// karshipta#270, MV-04: repeated link flapping on ward B must not
+// contaminate the two unaffected wards or create duplicate registrations.
+// This extends MV-03 with three bounded drop/reconnect cycles. It checks
+// externally observable behavior, not the internal reconnect attempt count.
+TEST_F(WardManagerTest, RepeatedLinkFlappingReconnectsWithoutCrossWardInterference) {
+    std::vector<MultiVehicleFake> fakes;
+    for (const auto& [port, system_id] :
+         std::vector<std::pair<uint16_t, uint8_t>>{{25340, 51}, {25341, 52}, {25342, 53}}) {
+        fakes.push_back(
+            MultiVehicleFake{port, system_id, std::make_unique<FakeInAirAutopilot>(system_id, port)});
+    }
+    DetachFakesOnExit detach_guard(fakes);
+
+    auto manager = make_manager();
+    for (size_t i = 0; i < fakes.size(); ++i) {
+        const auto ward_id = "mv04-" + std::to_string(i);
+        const auto ack = manager.handle_add_ward(make_add_request(
+            "req-" + ward_id, ward_id, "udpin://127.0.0.1:" + std::to_string(fakes[i].port),
+            fakes[i].system_id));
+        ASSERT_EQ(ack.status(), karshipta::v1::WARD_CONFIG_STATUS_ACCEPTED) << ward_id;
+    }
+
+    auto all_connected = [&manager] {
+        for (size_t i = 0; i < 3; ++i) {
+            if (!manager.is_connected("mv04-" + std::to_string(i))) return false;
+        }
+        return true;
+    };
+    for (int attempt = 0; attempt < 100 && !all_connected(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_TRUE(all_connected()) << "not all three wards connected before link flapping";
+
+    constexpr int kFlapCycles = 3;
+    const uint16_t dropped_port = fakes[1].port;
+    const uint8_t dropped_system_id = fakes[1].system_id;
+    for (int cycle = 0; cycle < kFlapCycles; ++cycle) {
+        // Never destruct a raw MAVSDK core inline: see MV-02/MV-03 teardown notes.
+        std::thread([fake = std::move(fakes[1].autopilot)]() mutable { fake.reset(); }).detach();
+
+        bool disconnected = false;
+        for (int attempt = 0; attempt < 200 && !disconnected; ++attempt) {
+            disconnected = !manager.is_connected("mv04-1");
+            if (!disconnected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        ASSERT_TRUE(disconnected) << "mv04-1 did not disconnect in cycle " << cycle;
+        EXPECT_TRUE(manager.is_connected("mv04-0")) << "cycle " << cycle;
+        EXPECT_TRUE(manager.is_connected("mv04-2")) << "cycle " << cycle;
+
+        fakes[1].autopilot =
+            std::make_unique<FakeInAirAutopilot>(dropped_system_id, dropped_port);
+
+        bool reconnected = false;
+        for (int attempt = 0; attempt < 100 && !reconnected; ++attempt) {
+            reconnected = manager.is_connected("mv04-1");
+            if (!reconnected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        ASSERT_TRUE(reconnected) << "mv04-1 did not reconnect in cycle " << cycle;
+        EXPECT_TRUE(manager.is_connected("mv04-0")) << "cycle " << cycle;
+        EXPECT_TRUE(manager.is_connected("mv04-2")) << "cycle " << cycle;
+
+        const auto ids = manager.list_ward_ids();
+        ASSERT_EQ(ids.size(), 3u) << "duplicate/missing ward after cycle " << cycle;
+        for (const auto& ward_id : {"mv04-0", "mv04-1", "mv04-2"}) {
+            EXPECT_EQ(std::count(ids.begin(), ids.end(), ward_id), 1)
+                << ward_id << " after cycle " << cycle;
+        }
+        const auto statuses = manager.list_status();
+        ASSERT_EQ(statuses.size(), 3u);
+        for (const auto& status : statuses) {
+            EXPECT_TRUE(status.connected) << status.ward_id << " after cycle " << cycle;
+        }
+    }
 }
 
 TEST_F(WardManagerTest, RejectViewerEnvelopeRejectsCommandWithAckAndEvent) {

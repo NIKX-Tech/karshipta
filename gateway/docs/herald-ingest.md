@@ -23,21 +23,33 @@ after that, broadcast over the same `Transport` every other ward uses.
   payload, translated via a declarative field-mapping config
   (`HeraldFieldMapper`) instead of a bespoke per-vendor integration. See
   "The Mapped path" below.
-- **GT06** (github issue #123): a raw binary TCP protocol (0x78 0x78 frame
-  header, conventionally port 5023) hundreds of low-cost GPS tracker models
-  speak natively (Concox/Jimi/iTrack family and countless OEM rebrands -
-  "under $30 wholesale, shipped from Shenzhen" is a good heuristic for
-  whether a tracker speaks it). `Gt06Parser` is pure framing/checksum/decode
-  logic with no networking (unit-testable with plain byte buffers);
-  `Gt06TcpServer` wraps it around a real connection and calls `ingest()`,
-  the GT06 counterpart to `HeraldHttpServer`. Ported from Traccar's
-  `Gt06ProtocolDecoder.java`/`Checksum.java` (github.com/traccar/traccar) and
-  the public GT06 protocol spec, not reverse-engineered from nothing. Scope
-  is deliberately narrow ("basic tracking" per issue #123): login (IMEI),
-  standard GPS location, and heartbeat packet types only - alarm/command
-  packet types still frame and checksum-validate correctly (so the
-  connection doesn't desync) but come back as `kUnsupported`, silently
-  acknowledged where GT06 expects an ack and otherwise ignored.
+- **GT06** (github issue #123): a raw binary TCP protocol (0x78 0x78
+  standard frame header, or 0x79 0x79 extended - identical otherwise, just
+  a wider length field for payloads too large for a standard frame;
+  github#283 found 24% of real-world captures use the extended header, not
+  an edge case) hundreds of low-cost GPS tracker models speak natively
+  (Concox/Jimi/iTrack family and countless OEM rebrands - "under $30
+  wholesale, shipped from Shenzhen" is a good heuristic for whether a
+  tracker speaks it). `Gt06Parser` is pure framing/checksum/decode logic
+  with no networking (unit-testable with plain byte buffers); `Gt06TcpServer`
+  wraps it around a real connection and calls `ingest()`, the GT06
+  counterpart to `HeraldHttpServer`. Ported from Traccar's
+  `Gt06ProtocolDecoder.java`/`Gt06FrameDecoder.java`/`Checksum.java`
+  (github.com/traccar/traccar) and the public GT06 protocol spec, not
+  reverse-engineered from nothing. Scope is deliberately narrow ("basic
+  tracking" per issue #123): login (IMEI), standard GPS location, and
+  heartbeat packet types only - alarm/command packet types still frame
+  correctly (so the connection doesn't desync) but come back as
+  `kUnsupported`, silently acknowledged where GT06 expects an ack and
+  otherwise ignored.
+  A checksum mismatch, or a declared length field that turns out not to
+  match the frame's real size, is tolerated rather than treated as
+  corruption (github#283, re-verified against 185 real device captures from
+  Traccar's own test suite): real device firmware does both, Traccar's own
+  reference decoder never validates the incoming checksum at all and falls
+  back to scanning for the next literal stop marker when the length field
+  doesn't check out, and this parser now matches that behavior instead of
+  disconnecting hardware the reference implementation handles fine.
 
 `HeraldWardManager` owns the mapping and broadcast for all three paths
 equally - none of the three listeners talk to `Transport` directly.

@@ -6,6 +6,15 @@ namespace {
 
 constexpr uint8_t kStartByte1 = 0x78;
 constexpr uint8_t kStartByte2 = 0x78;
+// Extended frame: identical framing otherwise, just a 2-byte length field
+// instead of 1-byte (Traccar's own decode(): "extended = buf.readShort() !=
+// 0x7878", "length = extended ? readUnsignedShort() : readUnsignedByte()")
+// - used for payloads too large for a standard frame's 255-byte length
+// field (WiFi/BLE positioning, ICCID, OBD, photo/file metadata). github#283
+// found this is common in real traffic, not an edge case: 44 of 185 real
+// device captures used this header.
+constexpr uint8_t kExtendedStartByte1 = 0x79;
+constexpr uint8_t kExtendedStartByte2 = 0x79;
 constexpr uint8_t kStopByte1 = 0x0D;
 constexpr uint8_t kStopByte2 = 0x0A;
 
@@ -17,10 +26,6 @@ constexpr uint8_t kStopByte2 = 0x0A;
 constexpr uint8_t kTypeLogin = 0x01;
 constexpr uint8_t kTypeGpsLocation = 0x10;
 constexpr uint8_t kTypeHeartbeat = 0x23;
-
-// Minimum possible frame: start(2) + length(1) + type(1) + serial(2) +
-// checksum(2) + stop(2), zero-length content.
-constexpr size_t kMinFrameLength = 10;
 
 // Standard (non-extended, swapFlags=false, longSpeed=false) GPS location
 // content: date/time(6) + length-validity byte(1) + satellites(1) +
@@ -96,51 +101,151 @@ uint16_t Gt06Parser::crc16_x25(const std::span<const uint8_t> data) {
 }
 
 Gt06Parser::ParseResult Gt06Parser::parse_frame(const std::span<const uint8_t> data) {
-    if (data.size() < kMinFrameLength) {
+    // Need both start bytes before extended-ness (and therefore the real
+    // minimum frame length) can even be determined.
+    if (data.size() < 2) {
         return {FrameResult::kIncomplete};
     }
-    if (data[0] != kStartByte1 || data[1] != kStartByte2) {
+    bool extended;
+    if (data[0] == kStartByte1 && data[1] == kStartByte2) {
+        extended = false;
+    } else if (data[0] == kExtendedStartByte1 && data[1] == kExtendedStartByte2) {
+        extended = true;
+    } else {
         return {FrameResult::kInvalid};
     }
 
-    const uint8_t length_byte = data[2];
-    // length_byte covers type(1) + content(N) + serial(2) + checksum(2), so
-    // it can never be below 5 (N == 0) in a real frame.
-    if (length_byte < 5) {
-        return {FrameResult::kInvalid};
-    }
-    const size_t content_length = static_cast<size_t>(length_byte) - 5;
-    const size_t total_frame_length = static_cast<size_t>(length_byte) + 5;
-    if (data.size() < total_frame_length) {
+    // Standard: 1-byte length field. Extended: 2-byte length field (same
+    // value range it describes - type(1)+content(N)+serial(2)+checksum(2) -
+    // just wide enough for payloads a standard frame's 255-byte field
+    // can't address). Only need enough bytes to *read* the length field
+    // here - not a "normal" full-size frame's worth. An independent review
+    // of this fix (github#283) caught a real bug in an earlier version of
+    // this check: gating on a fixed 10/11-byte minimum rejected a genuine,
+    // complete, correctly-terminated 6-byte real-device capture
+    // (0x7878 0x01 0x08 0x0D 0x0A - length_value 1, degenerate but real) as
+    // permanently kIncomplete, since it never reached the degenerate-length
+    // handling below at all. Silently losing a real frame if the
+    // connection ends before more bytes ever arrive violates this repo's
+    // own "every failure is observable" rule.
+    const size_t length_field_width = extended ? 2 : 1;
+    if (data.size() < 2 + length_field_width) {
         return {FrameResult::kIncomplete};
     }
-    if (data[total_frame_length - 2] != kStopByte1 || data[total_frame_length - 1] != kStopByte2) {
-        return {FrameResult::kInvalid};
+    const size_t length_value =
+        extended ? (static_cast<size_t>(data[2]) << 8) | data[3] : data[2];
+
+    // Find the frame's real end before trusting length_value for anything
+    // else: github#283 found real device captures where the declared
+    // length is simply wrong - one off by a single byte short, one three
+    // bytes short of a real 15-byte frame (so "not enough bytes yet for the
+    // declared length" does NOT mean the frame is actually incomplete; it
+    // can already be a complete, shorter real frame), one a flat-out
+    // nonsensical 0. Traccar's own Gt06FrameDecoder.java doesn't special-
+    // case any of these differently - whenever the fast-path position
+    // doesn't land exactly on a 0x0D 0x0A stop marker, for *any* reason, it
+    // unconditionally falls back to scanning forward for the next literal
+    // one. Matched exactly here, including paying the same O(buffer size)
+    // scan cost Traccar's own reference decoder pays in this situation -
+    // an earlier version of this fix tried to skip the scan specifically
+    // when the buffer was merely shorter than the declared length, as a
+    // performance optimization, but that silently broke the three-bytes-
+    // short real capture above (it already contains a complete frame
+    // shorter than its own declared length, findable only by scanning).
+    // Buffer growth itself is bounded by the caller (Gt06TcpServer), the
+    // same layer Traccar's own BaseFrameDecoder enforces its 32KB cap at,
+    // not here - this stays pure parsing logic over whatever it's given.
+    size_t total_frame_length = 2 + length_field_width + length_value + 2;
+    const bool declared_length_checks_out = length_value >= 5 && data.size() >= total_frame_length &&
+                                             data[total_frame_length - 2] == kStopByte1 &&
+                                             data[total_frame_length - 1] == kStopByte2;
+    if (!declared_length_checks_out) {
+        std::optional<size_t> stop_marker_end;
+        for (size_t i = 0; i + 1 < data.size(); ++i) {
+            if (data[i] == kStopByte1 && data[i + 1] == kStopByte2) {
+                stop_marker_end = i + 2;
+                break;
+            }
+        }
+        if (!stop_marker_end.has_value()) {
+            // Could still be a genuine prefix (more bytes on the way) or
+            // could be truly malformed - same ambiguity Traccar's own frame
+            // decoder has here (it returns null either way, waiting for
+            // more). Keep waiting rather than guess.
+            return {FrameResult::kIncomplete};
+        }
+        total_frame_length = *stop_marker_end;
     }
 
-    const uint8_t type_byte = data[3];
-    const std::span<const uint8_t> content = data.subspan(4, content_length);
-    const size_t serial_offset = 4 + content_length;
-    const auto serial_number = static_cast<uint16_t>((data[serial_offset] << 8) | data[serial_offset + 1]);
+    // The frame's real boundary is solid either way at this point. What
+    // follows - type/content/serial/checksum extraction, and parse_content's
+    // own per-type layout checks - all still depends on length_value, which
+    // github#283 found real devices get wrong in more than one way (a flat
+    // 0, three bytes short of what a real 15-byte frame needed, a location
+    // packet declared shorter than this parser's fixed 19-byte layout).
+    // Traccar's own decode() hits the same wall in each case - its
+    // dataLength-based reads either go negative (a ByteBuf exception its
+    // pipeline catches higher up) or under-read a fixed-layout field
+    // (decodeGps's own length-validity-byte check) - and its test suite
+    // still expects these captures to decode without throwing, just not
+    // necessarily into a meaningful Position. One consistent rule here
+    // mirrors that: anything past this point that can't be made sense of
+    // falls back to kUnsupported, never kInvalid - the stream is already
+    // known to be in sync (a real stop marker was just found), so there is
+    // nothing left to protect by dropping the connection over it.
+    const size_t content_length = length_value < 5 ? 0 : length_value - 5;
+    const size_t type_offset = 2 + length_field_width;
+    const size_t content_offset = type_offset + 1;
+    const size_t serial_offset = content_offset + content_length;
     const size_t checksum_offset = serial_offset + 2;
+    const bool offsets_fit_in_frame = length_value >= 5 && checksum_offset + 2 <= data.size();
+
+    if (!offsets_fit_in_frame) {
+        ParsedPacket packet;
+        packet.type = PacketType::kUnsupported;
+        // Can't reliably read a serial number either - the bytes it would
+        // come from may not even exist within this frame when the declared
+        // length is this degenerate. 0 is a plain, honest "unknown", not a
+        // claim this is really serial 0.
+        packet.serial_number = 0;
+        return {FrameResult::kOk, total_frame_length, packet};
+    }
+
+    const uint8_t type_byte = data[type_offset];
+    const std::span<const uint8_t> content = data.subspan(content_offset, content_length);
+    const auto serial_number = static_cast<uint16_t>((data[serial_offset] << 8) | data[serial_offset + 1]);
     const auto received_checksum =
         static_cast<uint16_t>((data[checksum_offset] << 8) | data[checksum_offset + 1]);
 
-    // CRC covers the length byte through the end of the serial number -
+    // CRC covers the length field through the end of the serial number -
     // everything written so far except the two start bytes and the
     // checksum/stop bytes that follow it (matches Traccar's own
     // nioBuffer(2, writerIndex - 2) at the point the checksum is computed,
-    // before checksum/stop are appended).
+    // before checksum/stop are appended) - same range rule for either
+    // framing, it just starts one byte later when extended.
     const uint16_t computed_checksum = crc16_x25(data.subspan(2, checksum_offset - 2));
-    if (computed_checksum != received_checksum) {
-        return {FrameResult::kInvalid};
-    }
+    // A mismatch here is deliberately not kInvalid - see FrameResult's own
+    // doc comment (github#283): real devices do this, and Traccar's
+    // reference decoder never checks it either. Still decoded as normal,
+    // just flagged for the caller to log if it wants to.
+    const bool checksum_mismatch = computed_checksum != received_checksum;
 
     auto packet = parse_content(type_byte, content, serial_number);
     if (!packet.has_value()) {
-        return {FrameResult::kInvalid};
+        // parse_content only returns nullopt for a type it does recognize
+        // but whose declared content is too short for that type's fixed
+        // layout (or, for location, an explicit length_validity == 0) -
+        // "recognized type, content this parser can't fully use," the same
+        // category as everything else handled above. kUnsupported, not
+        // kInvalid, for the same reason.
+        ParsedPacket unsupported;
+        unsupported.type = PacketType::kUnsupported;
+        unsupported.serial_number = serial_number;
+        return {FrameResult::kOk, total_frame_length, unsupported};
     }
-    return {FrameResult::kOk, total_frame_length, *packet};
+    ParseResult result{FrameResult::kOk, total_frame_length, *packet};
+    result.checksum_mismatch = checksum_mismatch;
+    return result;
 }
 
 std::optional<Gt06Parser::ParsedPacket> Gt06Parser::parse_content(const uint8_t type_byte,
