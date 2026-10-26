@@ -5,6 +5,22 @@ Notable changes to Karshipta, most recent first. Format loosely follows
 follows [Semantic Versioning](https://semver.org/) from the first tagged
 release onward.
 
+## [0.5.2]
+
+### Fixed
+
+- Gateway: commands can now sit behind others in the executor's single
+  worker queue, or just take a while to be delivered, before they
+  actually run - arm, disarm, takeoff, land, and rtl now reject outright
+  if the command's timestamp has drifted more than 5 seconds from the
+  gateway's own clock by the time execution actually starts, rather than
+  running unconditionally regardless of how stale it's become
+  (karshipta#182). The check is symmetric (drift in either direction),
+  so ordinary forward clock skew between a console and a gateway with no
+  shared NTP source is still tolerated, while a command timestamped far
+  in the future can't bypass the check entirely. goto, set_home, and
+  mission commands are not gated yet.
+
 ## [0.5.1]
 
 ### Fixed

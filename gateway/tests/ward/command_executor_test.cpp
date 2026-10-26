@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -70,11 +71,21 @@ protected:
               collector_.add(ack);
           }) {}
 
+    // gateway#182: timestamp_ms(0) used to be harmless here since nothing
+    // read it; now it would make every command in this file fail the
+    // authority-freshness check instead of exercising what each test
+    // actually means to (dispatch failure against a never-connected ward).
+    // Fresh "now" by default; the dedicated freshness tests below build
+    // their own Command with an explicitly stale one instead of using
+    // this helper.
     karshipta::v1::Command make_command(const std::string& id) {
         karshipta::v1::Command command;
         command.set_command_id(id);
         command.set_ward_id("sitl-1");
-        command.set_timestamp_ms(0);
+        command.set_timestamp_ms(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count()));
         return command;
     }
 
@@ -86,6 +97,14 @@ protected:
         EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
         EXPECT_FALSE(acks.back().message().empty())
             << "rejection must carry a human-readable reason";
+        // gateway#182: this fixture's commands are meant to fail against the
+        // never-connected ward, not the authority-freshness check - if this
+        // ever fires, make_command()'s timestamp went stale again (or this
+        // test started reusing an old Command instead of a fresh one), and
+        // every assertion above would still pass for the wrong reason.
+        EXPECT_EQ(acks.back().message().find("authority window"), std::string::npos)
+            << "rejected by the freshness check, not the (intended) no-connection failure: "
+            << acks.back().message();
     }
 
     std::shared_ptr<mavsdk::Mavsdk> core_;
@@ -143,6 +162,135 @@ TEST_F(CommandExecutorTest, EveryActionKindAnswersAcceptedThenTerminal) {
     home_target->set_longitude_deg(8.545594);
     executor_.enqueue(set_home);
     expect_accepted_then_rejected("cmd-set-home");
+}
+
+// gateway#182's own deliverable: a stale Command is rejected before
+// reaching WardActions at all, not just eventually. Confirmed two ways
+// here: the exact rejection message (a real WardActions/MAVSDK failure
+// against this never-connected ward would carry a completely different,
+// Result-derived string, never this literal text), and speed - a real
+// dispatch attempt against a dead connection can take real MAVSDK
+// discovery-timeout time, while the freshness check is a cheap comparison
+// that must come back fast.
+TEST_F(CommandExecutorTest, StaleTimestampRejectsArmBeforeReachingWardActions) {
+    auto arm = make_command("cmd-stale-arm");
+    const uint64_t now_ms = arm.timestamp_ms();
+    arm.set_timestamp_ms(now_ms - 10'000);  // 10s old, well past the 5s window
+    arm.mutable_arm();
+    executor_.enqueue(arm);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-arm", std::chrono::seconds(1)))
+        << "a stale command should be rejected immediately, not after a real dispatch attempt";
+    const auto acks = collector_.for_command("cmd-stale-arm");
+    ASSERT_GE(acks.size(), 2u);
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_EQ(acks.back().message(), "command timestamp outside authority window");
+}
+
+// Console and gateway clocks aren't guaranteed to be NTP-synced on a
+// self-hosted deployment; a command timestamped slightly ahead of the
+// gateway's own clock must still be treated as fresh, not rejected.
+TEST_F(CommandExecutorTest, TimestampSlightlyAheadOfGatewayClockIsStillFresh) {
+    auto arm = make_command("cmd-ahead-arm");
+    arm.set_timestamp_ms(arm.timestamp_ms() + 1'000);  // console clock 1s ahead
+    arm.mutable_arm();
+    executor_.enqueue(arm);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-ahead-arm"));
+    const auto acks = collector_.for_command("cmd-ahead-arm");
+    EXPECT_NE(acks.back().message(), "command timestamp outside authority window");
+}
+
+// The bound must be symmetric: a timestamp arbitrarily far in the future
+// (clock skew well beyond any real NTP drift, or a forged value trying to
+// bypass the staleness gate entirely) is rejected the same way a stale one
+// is, not waved through just because it isn't in the past.
+TEST_F(CommandExecutorTest, TimestampFarInTheFutureIsRejectedNotWavedThrough) {
+    auto arm = make_command("cmd-future-arm");
+    arm.set_timestamp_ms(arm.timestamp_ms() + 3'600'000);  // 1 hour ahead
+    arm.mutable_arm();
+    executor_.enqueue(arm);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-future-arm", std::chrono::seconds(1)))
+        << "a bogus future-dated command should be rejected immediately, not after a real dispatch attempt";
+    const auto acks = collector_.for_command("cmd-future-arm");
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_EQ(acks.back().message(), "command timestamp outside authority window");
+}
+
+// Every destructive action the issue's deliverable scopes this to, not
+// just arm - disarm, the force/kill variant, takeoff, land, rtl all go
+// through the same is_authority_gated() check in dispatch().
+TEST_F(CommandExecutorTest, StaleTimestampRejectsEveryGatedDestructiveAction) {
+    const uint64_t stale_ms = make_command("probe").timestamp_ms() - 10'000;
+
+    auto disarm = make_command("cmd-stale-disarm");
+    disarm.set_timestamp_ms(stale_ms);
+    disarm.mutable_disarm()->set_force(false);
+    executor_.enqueue(disarm);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-disarm", std::chrono::seconds(1)));
+    EXPECT_EQ(collector_.for_command("cmd-stale-disarm").back().message(),
+              "command timestamp outside authority window");
+
+    auto kill = make_command("cmd-stale-kill");
+    kill.set_timestamp_ms(stale_ms);
+    kill.mutable_disarm()->set_force(true);
+    executor_.enqueue(kill);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-kill", std::chrono::seconds(1)));
+    EXPECT_EQ(collector_.for_command("cmd-stale-kill").back().message(),
+              "command timestamp outside authority window");
+
+    auto takeoff = make_command("cmd-stale-takeoff");
+    takeoff.set_timestamp_ms(stale_ms);
+    takeoff.mutable_takeoff();
+    executor_.enqueue(takeoff);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-takeoff", std::chrono::seconds(1)));
+    EXPECT_EQ(collector_.for_command("cmd-stale-takeoff").back().message(),
+              "command timestamp outside authority window");
+
+    auto land = make_command("cmd-stale-land");
+    land.set_timestamp_ms(stale_ms);
+    land.mutable_land();
+    executor_.enqueue(land);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-land", std::chrono::seconds(1)));
+    EXPECT_EQ(collector_.for_command("cmd-stale-land").back().message(),
+              "command timestamp outside authority window");
+
+    auto rtl = make_command("cmd-stale-rtl");
+    rtl.set_timestamp_ms(stale_ms);
+    rtl.mutable_rtl();
+    executor_.enqueue(rtl);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-rtl", std::chrono::seconds(1)));
+    EXPECT_EQ(collector_.for_command("cmd-stale-rtl").back().message(),
+              "command timestamp outside authority window");
+}
+
+// goto and set_home are deliberately NOT gated yet (issue#182's own
+// deliverable calls them "a reasonable place to extend to... once the
+// window value is proven out", not part of this pass) - a stale timestamp
+// on either must reach the real dispatch path and fail for the ordinary
+// no-connection reason, not the authority-window one.
+TEST_F(CommandExecutorTest, StaleTimestampDoesNotGateGoto) {
+    auto go = make_command("cmd-stale-goto");
+    go.set_timestamp_ms(go.timestamp_ms() - 10'000);
+    auto* target = go.mutable_goto_()->mutable_target();
+    target->set_latitude_deg(47.397742);
+    target->set_longitude_deg(8.545594);
+    executor_.enqueue(go);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-goto"));
+    const auto acks = collector_.for_command("cmd-stale-goto");
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_NE(acks.back().message(), "command timestamp outside authority window");
+}
+
+TEST_F(CommandExecutorTest, StaleTimestampDoesNotGateSetHome) {
+    auto set_home = make_command("cmd-stale-set-home");
+    set_home.set_timestamp_ms(set_home.timestamp_ms() - 10'000);
+    auto* home_target = set_home.mutable_set_home()->mutable_target();
+    home_target->set_latitude_deg(47.397742);
+    home_target->set_longitude_deg(8.545594);
+    executor_.enqueue(set_home);
+    ASSERT_TRUE(collector_.wait_terminal("cmd-stale-set-home"));
+    const auto acks = collector_.for_command("cmd-stale-set-home");
+    EXPECT_EQ(acks.back().status(), karshipta::v1::COMMAND_STATUS_REJECTED);
+    EXPECT_NE(acks.back().message(), "command timestamp outside authority window");
 }
 
 TEST_F(CommandExecutorTest, SetHomeWithoutTargetIsRejected) {
