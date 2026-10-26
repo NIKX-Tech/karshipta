@@ -49,7 +49,11 @@ class CommandExecutor {
     void execute(const karshipta::v1::Command& command, const std::stop_token& stop_token);
     void send_ack(const karshipta::v1::Command& command, karshipta::v1::CommandStatus status,
                   const std::string& message);
-    // Maps one action to its WardActions/WardMission call; returns
+    // For arm/disarm/takeoff/land/rtl, first rejects the command outright if
+    // its timestamp_ms is outside kCommandAuthorityWindowMs of now (gateway
+    // issue #182: a command can sit queued, or just in flight, long enough
+    // after enqueue() to no longer reflect the console's current authority).
+    // Otherwise maps the action to its WardActions/WardMission call; returns
     // whether it succeeded plus the ack message (blank on success for every
     // command except pause, which reports which of hold/mission-pause
     // actually ran; the real MAVSDK failure reason on rejection). Needs

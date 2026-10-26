@@ -83,6 +83,38 @@ reason: it can no longer assume a single MAVSDK `Result` enum, since
   hold, unrelated to any mission, still its blocking call) for every other
   flight mode, including never-connected (`Unknown`).
 
+## Command authority freshness (gateway issue #182)
+
+`enqueue()` acks ACCEPTED immediately, but the command itself can sit behind
+others in the worker's queue, or just take a while to reach the front, before
+`dispatch()` actually runs it. For `arm`, `disarm` (both force values),
+`takeoff`, `land`, and `rtl` only, `dispatch()` rejects the command outright,
+before doing anything else, if its `timestamp_ms` is more than
+`kCommandAuthorityWindowMs` (5000ms, matching `ward_manager.cpp`'s
+`kTeardownWaitBound`) away from the gateway's own clock at the moment it
+actually runs - rejection message `"command timestamp outside authority
+window"`. `goto`, `set_home`, `start_mission`, and `pause_mission` are
+deliberately not gated yet; extending to them is a reasonable next step once
+this window value is proven out, not part of this pass.
+
+The check is on absolute drift, `|now_ms - timestamp_ms| > window`, not a
+one-sided age: this is a self-hosted product with no guaranteed clock sync
+between the console's host and the gateway's host, so `timestamp_ms` can
+legitimately be a little ahead of the gateway's own clock, and that must
+still read as fresh. A one-sided check (reject only when `timestamp_ms` is
+too far in the *past*) would let a command timestamped arbitrarily far in
+the *future* bypass this gate entirely, defeating the point of it. `drift_ms`
+is computed by subtracting the smaller of `now_ms`/`timestamp_ms` from the
+larger, in `uint64_t`, so it never wraps and the computation never needs
+signed arithmetic (or risks signed-overflow UB) regardless of how bogus
+`timestamp_ms` is, including `0` or a value near `UINT64_MAX`.
+
+Internally-generated commands (the auto-RTL `WardManager` enqueues on
+mission completion, the auto-land/pause-mission `FleetManager` enqueues on
+geofence breach) stamp a fresh gateway-local timestamp right before
+`enqueue()`, so they pass this check the same way a console command does;
+they are not exempted from it.
+
 ## Threading
 
 `enqueue()` runs on whatever thread the transport delivers frames from and
@@ -126,6 +158,18 @@ ward (no autopilot, no Docker):
   exercises the `hold()` branch, not `pause_async()`.
 - `CommandWithoutActionIsRejectedWithoutQueueing`: exactly one ack.
 - `AckEchoesCommandAndWardIds`.
+- `StaleTimestampRejectsArmBeforeReachingWardActions`,
+  `StaleTimestampRejectsEveryGatedDestructiveAction`: a 10s-old `timestamp_ms`
+  on each gated action gets the exact `"command timestamp outside authority
+  window"` rejection, fast, never a real MAVSDK-derived failure string.
+- `StaleTimestampDoesNotGateGoto`, `StaleTimestampDoesNotGateSetHome`: the
+  same stale timestamp on an ungated action still reaches the real dispatch
+  path and fails for the ordinary no-connection reason, not this one.
+- `TimestampSlightlyAheadOfGatewayClockIsStillFresh`: a `timestamp_ms` 1s
+  ahead of the gateway's own clock (ordinary clock skew) is not rejected.
+- `TimestampFarInTheFutureIsRejectedNotWavedThrough`: a `timestamp_ms` 1
+  hour ahead is rejected the same way a stale one is, proving the bound is
+  symmetric, not just a one-sided staleness check.
 
 ## Manual verification
 
