@@ -288,6 +288,16 @@ export { default as ConfirmDialog } from './components/confirm-dialog.svelte';
 // its own dialog content without duplicating that mechanics, which this
 // package's own README already asks consumers not to do by forking source.
 export { default as Dialog } from './components/ui/dialog.svelte';
+// Same category as Dialog above, for the left/right rail's mobile
+// replacement: a left-anchored full-modal drawer, or a bottom sheet that
+// (unlike Dialog) never dims the map and can suppress its own
+// outside-tap-to-collapse so a map-click-driven tab (Control/Mission/
+// Zones) keeps every tap reaching the map. Pure mechanics, no app-shell
+// opinion - which tabs/labels/content it wraps, and the "only one mobile
+// surface open at once" coordination, stay per-app (see this console's
+// own left-rail-ui.svelte.ts/right-panel-ui.svelte.ts for that pattern,
+// deliberately not exported here either).
+export { default as EdgeSheet } from './components/ui/edge-sheet.svelte';
 // ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
 // self-contained, store-driven content panels, the same category as
 // WardTelemetryTab/WardControlTab/CommandPanel above - not app-shell

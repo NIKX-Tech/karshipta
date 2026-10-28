@@ -3159,7 +3159,13 @@
 	     or erroring without the other). The message itself says which,
 	     rather than always showing a generic "Loading map data" that would
 	     lose that distinction. -->
-	<div class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2">
+	<!-- max-sm: moved off top-center into the empty top-right corner - the
+	     weather widget already owns top-left, and this box's own max-width
+	     otherwise reaches into the screen's horizontal center on a phone,
+	     overlapping it (confirmed live). Desktop (top-center) is unchanged. -->
+	<div
+		class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2 max-sm:right-3 max-sm:left-auto max-sm:max-w-[45vw] max-sm:translate-x-0"
+	>
 		{#if (geozoneStore.active && geozoneStore.loadError) || (showObstacles && obstacleStore.loadError) || (showAirports && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
 			{@const airspaceLoading =
 				(geozoneStore.active && geozoneStore.loadError) ||
@@ -3209,9 +3215,13 @@
 		     treatment as the legend panel - a passive readout, not something
 		     that needs to compete with the map at full strength until the
 		     operator actually looks at it. -->
+		<!-- max-sm: narrower so this can't reach the screen's horizontal
+		     center, which is exactly where the loading toast above now sits
+		     on mobile (it moved from top-center to top-right for the same
+		     reason). Desktop width unchanged. -->
 		<div
 			role="group"
-			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
+			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-sm:w-36"
 			aria-label="Current weather at map center"
 		>
 			{#if weatherLocationLabel}
@@ -3518,9 +3528,16 @@
 	<!-- One panel, always rendered (the scale bar - its last child, see
 	     scaleBarSlot - is meaningful on its own even with no layer rows).
 	     Dimmed until hovered as one unit: a static reference key doesn't
-	     need to compete with the map until the operator actually looks. -->
+	     need to compete with the map until the operator actually looks.
+	     max-sm: with up to 3 rows + the scale bar, this can grow tall
+	     enough on a short/narrow viewport to run off-screen or reach
+	     content above it - capped with internal scroll; bottom offset
+	     reads --mobile-chrome-bottom so a consuming app's own mobile nav
+	     chrome (if any) and this panel can't drift out of sync with two
+	     independently hardcoded numbers (defaults to the desktop 10px
+	     when a consumer never sets that variable). -->
 	<div
-		class="absolute bottom-[10px] left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5 opacity-50 transition-opacity duration-300 ease-out hover:opacity-100"
+		class="absolute bottom-[10px] left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5 opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-sm:bottom-[var(--mobile-chrome-bottom,10px)] max-sm:max-h-[40vh] max-sm:max-w-[70vw] max-sm:overflow-y-auto"
 	>
 		{#if showZoneRow}
 			<ul class="flex gap-3" aria-label="Zone legend">
