@@ -1521,3 +1521,92 @@ TEST(WardManagerFlightModeMapping, MapsEveryKnownFlightModeToExpectedProtoValue)
             << "mavsdk::Telemetry::FlightMode index " << static_cast<int>(mavsdk_mode);
     }
 }
+
+// karshipta#288 — MV-05: restore persisted ward identities and reconnect
+// after a WardManager restart, without duplicating or crossing identities.
+TEST_F(WardManagerPersistenceTest, MV05RestoresAndReconnectsTwoWardsAfterRestart) {
+    std::vector<MultiVehicleFake> fakes;
+    for (const auto& [port, system_id] :
+         std::vector<std::pair<uint16_t, uint8_t>>{{25350, 61}, {25351, 62}}) {
+        fakes.push_back(MultiVehicleFake{
+            port, system_id,
+            std::make_unique<FakeInAirAutopilot>(system_id, port)});
+    }
+    DetachFakesOnExit detach_guard(fakes);
+
+    const std::array<std::string, 2> ward_ids{"mv05-a", "mv05-b"};
+
+    auto all_connected = [&](WardManager& manager) {
+        return manager.is_connected(ward_ids[0]) &&
+               manager.is_connected(ward_ids[1]);
+    };
+
+    {
+        auto manager = make_manager(path_);
+
+        for (size_t i = 0; i < fakes.size(); ++i) {
+            ASSERT_TRUE(manager.add_ward(make_config(
+                ward_ids[i],
+                "udpin://127.0.0.1:" + std::to_string(fakes[i].port),
+                fakes[i].system_id)));
+        }
+
+        manager.start_all();
+
+        for (int attempt = 0; attempt < 100 && !all_connected(manager);
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        ASSERT_TRUE(all_connected(manager))
+            << "MV-05: initial ward connections timed out";
+    }
+
+    ASSERT_TRUE(std::filesystem::exists(path_));
+    const auto persisted_before = read_file(path_);
+
+    for (const auto& ward_id : ward_ids) {
+        ASSERT_NE(persisted_before.find(ward_id), std::string::npos)
+            << "MV-05: missing persisted ward " << ward_id;
+    }
+
+    {
+        auto restarted = make_manager(path_);
+
+        ASSERT_EQ(restarted.restore_and_start(), 2u)
+            << "MV-05: expected two restored wards";
+
+        const auto ids = restarted.list_ward_ids();
+        ASSERT_EQ(ids.size(), 2u);
+
+        for (const auto& ward_id : ward_ids) {
+            EXPECT_EQ(std::count(ids.begin(), ids.end(), ward_id), 1)
+                << "MV-05: missing or duplicated ward " << ward_id;
+            EXPECT_TRUE(restarted.is_started(ward_id))
+                << "MV-05: reconnect worker not started for " << ward_id;
+        }
+
+        EXPECT_EQ(read_file(path_), persisted_before)
+            << "MV-05: restoring wards unexpectedly rewrote persistence";
+
+        for (int attempt = 0; attempt < 100 && !all_connected(restarted);
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        ASSERT_TRUE(all_connected(restarted))
+            << "MV-05: wards did not reconnect after restart";
+
+        const auto statuses = restarted.list_status();
+        ASSERT_EQ(statuses.size(), 2u);
+
+        for (const auto& status : statuses) {
+            EXPECT_TRUE(status.connected)
+                << "MV-05: disconnected ward " << status.ward_id;
+        }
+
+        EXPECT_FALSE(restarted.add_ward(make_config(
+            "mv05-duplicate", "udpin://127.0.0.1:25352", 61)))
+            << "MV-05: restored system-ID uniqueness was lost";
+    }
+}
