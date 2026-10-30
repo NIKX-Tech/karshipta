@@ -51,6 +51,13 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 class ObstacleStore {
 	obstacles = $state<Obstacle[]>([]);
 	loadError = $state<string | undefined>(undefined);
+	/** True only while a real network request is in flight (the gated
+	 * fetchViewport call below), not while merely waiting out
+	 * FETCH_DEBOUNCE_MS or a post-failure cooldown - fleet-map.svelte's
+	 * own loading toast reads this to show a spinner only for genuine,
+	 * already-in-progress work, same shape as aircraft-store.svelte.ts's
+	 * identical field. */
+	loading = $state(false);
 
 	private source = new ProxiedObstacleSource();
 	private visible = false;
@@ -116,6 +123,7 @@ class ObstacleStore {
 		const tiles = tileOpenAipBounds(bounds);
 		const tileResults: Obstacle[][] = [];
 		let tileError: unknown;
+		this.loading = true;
 		await Promise.all(
 			tiles.map((tile, index) =>
 				openAipRequestGate.enqueue(async () => {
@@ -128,6 +136,7 @@ class ObstacleStore {
 			)
 		);
 		if (requestId !== this.lastRequestId) return;
+		this.loading = false;
 		if (tileError !== undefined) {
 			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
 			openAipRequestGate.noteFailure();

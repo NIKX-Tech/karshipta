@@ -16,9 +16,12 @@
 	const { lat, lon, locating, oncancel, confirm }: Props = $props();
 </script>
 
+<!-- bottom-[calc(1rem+env(...))]: fixed-to-bottom-4, so without this it
+     sits inside the home-indicator curve's own territory on a phone -
+     same class of bug as fleet-map.svelte's legend panel. -->
 <div
 	role="status"
-	class="fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded border border-edge bg-panel px-4 py-2.5 shadow-lg"
+	class="fixed bottom-[calc(1rem+env(safe-area-inset-bottom,0px))] left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded border border-edge bg-panel px-4 py-2.5 shadow-lg"
 >
 	<div class="text-xs">
 		<p class="font-medium text-fg">

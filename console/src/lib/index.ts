@@ -298,6 +298,12 @@ export { default as Dialog } from './components/ui/dialog.svelte';
 // own left-rail-ui.svelte.ts/right-panel-ui.svelte.ts for that pattern,
 // deliberately not exported here either).
 export { default as EdgeSheet } from './components/ui/edge-sheet.svelte';
+// The title/close-button row every EdgeSheet consumer in this app uses -
+// not baked into EdgeSheet itself (not every consumer wants one, e.g. a
+// sheet whose own peek snippet already serves as the header), but every
+// sheet that does should render pixel-identically rather than each
+// consumer hand-rolling its own slightly-different padding/button size.
+export { default as SheetHeader } from './components/ui/sheet-header.svelte';
 // ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
 // self-contained, store-driven content panels, the same category as
 // WardTelemetryTab/WardControlTab/CommandPanel above - not app-shell

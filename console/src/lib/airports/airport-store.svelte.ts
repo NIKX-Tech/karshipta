@@ -31,6 +31,10 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 class AirportStore {
 	airports = $state<Airport[]>([]);
 	loadError = $state<string | undefined>(undefined);
+	/** True only while a real network request is in flight, mirroring
+	 * obstacle-store.svelte.ts's/aircraft-store.svelte.ts's identical field -
+	 * fleet-map.svelte's loading toast reads this. */
+	loading = $state(false);
 
 	private source = new ProxiedAirportSource();
 	private visible = false;
@@ -94,6 +98,7 @@ class AirportStore {
 		const tiles = tileOpenAipBounds(bounds);
 		const tileResults: Airport[][] = [];
 		let tileError: unknown;
+		this.loading = true;
 		await Promise.all(
 			tiles.map((tile, index) =>
 				openAipRequestGate.enqueue(async () => {
@@ -106,6 +111,7 @@ class AirportStore {
 			)
 		);
 		if (requestId !== this.lastRequestId) return;
+		this.loading = false;
 		if (tileError !== undefined) {
 			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
 			openAipRequestGate.noteFailure();

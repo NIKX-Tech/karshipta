@@ -96,6 +96,7 @@
 	import { weatherStore } from '$lib/weather/weather-store.svelte';
 	import { weatherIconShape, weatherConditionLabel } from '$lib/weather/condition';
 	import WeatherIcon from '$lib/components/weather-icon.svelte';
+	import SheetHeader from '$lib/components/ui/sheet-header.svelte';
 	import { zoneStore } from '$lib/zones/zone-store.svelte';
 	import { themeStore } from '$lib/theme.svelte';
 	import {
@@ -183,6 +184,40 @@
 		 * given ward (no name set for it).
 		 */
 		nameFor?: (wardId: string) => string | undefined;
+		/**
+		 * Hides the airspace/aircraft loading toast - a plain prop for the
+		 * same reason crosshair/placementPoint are: a consuming app's own
+		 * mobile shell state (e.g. "a full-screen drawer is covering the
+		 * map right now") isn't a concept this library has any notion of,
+		 * and mobile-surface-ui.svelte.ts is deliberately never shared via
+		 * the package barrel (every consumer keeps its own). Without this,
+		 * the toast stayed visible, dimmed by the drawer's own backdrop -
+		 * confirmed live as a real bug: it's a map-only indicator with no
+		 * reason to show through chrome that's actively covering the map
+		 * it describes.
+		 */
+		hideLoadingToast?: boolean;
+		/**
+		 * True while a consuming app's own mobile bottom sheet (ward
+		 * detail, the fleet/gateway drawer) is open - closes this file's
+		 * own layers/attribution sheets when it turns true. Without this,
+		 * a consuming app's sheet and this file's own could both be open
+		 * at once (two independent toggle states, nothing coordinating
+		 * between them), stacking two `fixed inset-x-0 bottom-0` sheets on
+		 * top of each other and leaving the map-shrink math - which only
+		 * ever accounts for one local + one external reserve, not two
+		 * locals at once - visibly wrong. Same reasoning as
+		 * hideLoadingToast's own comment: a consuming app's mobile shell
+		 * state isn't a concept this library has any notion of on its own.
+		 */
+		externalSheetOpen?: boolean;
+		/**
+		 * Fires the moment this file's own layers or attribution sheet
+		 * opens, so a consuming app can close its own ward-detail/fleet
+		 * sheet in response - the other half of externalSheetOpen's own
+		 * coordination, going the opposite direction.
+		 */
+		onLocalSheetOpen?: () => void;
 	}
 
 	const {
@@ -194,7 +229,10 @@
 		placementPoint,
 		ownerFor,
 		onMapMove,
-		nameFor
+		nameFor,
+		hideLoadingToast = false,
+		externalSheetOpen = false,
+		onLocalSheetOpen
 	}: Props = $props();
 
 	// City-scale, not street-block: the first thing a viewer needs is "where
@@ -207,6 +245,31 @@
 	// button's whole point is "show exactly where I am", not just which
 	// city, so it earns a tighter zoom than the initial landing view does.
 	const LOCATE_ZOOM = 14;
+
+	// Selecting a ward or an aircraft (not just "locate me") earns the
+	// tightest zoom of the three - this is "look at this one thing", not
+	// "where am I". Math.max'd against the camera's current zoom at the
+	// call site, never forced down to this value: switching between two
+	// selections while already zoomed in past this shouldn't zoom back out.
+	const SELECTED_ENTITY_ZOOM = 16;
+
+	// Tilting the camera on selection is what actually makes the existing
+	// altitude-lift rendering (the marker's "stem" below, in the marker
+	// position effect) visible - at pitch 0 sin(pitch) is 0, so the stem
+	// never had any height to show even though the formula already existed.
+	// Shared by wards and aircraft (both use the same ground+stem+body
+	// marker shape - see aircraftMarkerElement's own comment on why). 45:
+	// steep enough that a real stem reads as a stem, shallow enough to stay
+	// legible and not disorient; MapLibre's own default maxPitch is 60.
+	const SELECTED_ENTITY_PITCH_DEG = 45;
+
+	// eventData tag for the selected-ward/selected-aircraft follow
+	// effects' own recurring recenter (see either effect's own comment on
+	// why) - a plain object identity check (the moveend handlers below
+	// compare the received eventData's own isFollowTick field, not this
+	// reference) since MapLibre clones/merges eventData into each fired
+	// event rather than passing this exact object through.
+	const SELECTION_FOLLOW_TICK_EVENT_DATA = { isFollowTick: true };
 
 	// Below this, don't fetch airspace data at all - airspace boundaries
 	// (FIRs, TMAs, prohibited zones) are country/region-scale shapes, not
@@ -280,16 +343,39 @@
 	];
 	// One combined attribution covering every basemap this control can
 	// switch to, set once at source creation on the raster 'basemap' source
-	// only - MapLibre's attribution control aggregates every source's
-	// attribution regardless of that source's current layer visibility, so
-	// this stays correct even while a vector style (which has no
-	// attribution field of its own; deliberately not set on the
-	// openmaptiles source, or OpenFreeMap's credit would show twice) is the
-	// one actually visible. Showing all credits regardless of which is
-	// currently active is a common, acceptable tradeoff other map apps
-	// make too - not worth rewriting on every switch.
-	const BASEMAP_ATTRIBUTION =
-		'&copy; OpenStreetMap contributors OpenFreeMap &copy; OpenMapTiles &copy; Esri, Maxar, Earthstar Geographics &copy; OpenTopoMap (CC-BY-SA) GEBCO Compilation Group';
+	// and read directly by the custom attribution button/popup below (see
+	// attributionControl: false's own comment - this stopped being
+	// MapLibre's own native control's job). Showing all credits regardless
+	// of which basemap is currently active is a common, acceptable
+	// tradeoff other map apps make too - not worth rewriting on every
+	// switch. Plain "©" characters, not "&copy;" entities: this used
+	// to feed MapLibre's own control, which renders via innerHTML and
+	// needed them; now it's plain Svelte template text (not {@html}, which
+	// eslint's svelte/no-at-html-tags flags even for a string this file
+	// itself fully controls), so a literal character displays correctly
+	// without needing HTML entity decoding at all.
+	// One entry per credit, not one run-on string - confirmed live as a
+	// real bug otherwise: six separate credits joined with nothing but
+	// plain spaces read as one ambiguous sentence (is "OpenFreeMap" its
+	// own credit or attached to "OpenStreetMap contributors"? the string
+	// alone can't say), and rendering that single long string inside the
+	// desktop popup's own max-w-xs box wrapped unpredictably mid-phrase,
+	// giving the popup a dynamic height that changed with wherever the
+	// text happened to break. Rendered one per line below (both the
+	// desktop popup and the mobile sheet), each kept to a single line via
+	// whitespace-nowrap - a fixed, predictable height (one line per
+	// credit) instead of wrapped prose, and each credit now reads
+	// unambiguously on its own. BASEMAP_ATTRIBUTION (the joined string)
+	// still exists for MapLibre's own source `attribution` field, which
+	// expects one string, not an array - joined from the same array so
+	// there's one source of truth, not two copies that could drift apart.
+	const BASEMAP_ATTRIBUTION_LINES = [
+		'© OpenStreetMap contributors · OpenFreeMap',
+		'© OpenMapTiles',
+		'© Esri, Maxar, Earthstar Geographics',
+		'© OpenTopoMap (CC-BY-SA) · GEBCO Compilation Group'
+	];
+	const BASEMAP_ATTRIBUTION = BASEMAP_ATTRIBUTION_LINES.join(' ');
 
 	// 'default' follows the app theme (DARK_TILES/LIGHT_TILES, unchanged
 	// behavior); 'roadmap' is light-only (see ROADMAP_TILES's own comment) -
@@ -432,6 +518,101 @@
 	let showZones = $state(true);
 	let layersMenuOpen = $state(false);
 	let layersMenuEl: HTMLDivElement | undefined;
+	let attributionMenuOpen = $state(false);
+	let attributionMenuEl: HTMLDivElement | undefined;
+	// Tap-to-select for aircraft (mobile's own equivalent of desktop's
+	// hover popup, which touch has no equivalent gesture for at all) -
+	// requested directly, following the exact same local-sheet shape
+	// layers/attribution already use below, not a new pattern. Local
+	// state, not a fleet-store-style singleton: nothing outside this file
+	// needs to know which aircraft is selected, unlike fleet.selectedWardId
+	// (right-panel.svelte's whole tab system depends on that one).
+	let selectedAircraftIcao24 = $state<string | undefined>(undefined);
+
+	// Mobile bottom sheet heights, real measured values (content varies -
+	// the layers menu is much taller than the attribution credits line),
+	// fed into the map container's own height below so an open sheet
+	// pushes the visible map up instead of just covering the bottom of
+	// it - confirmed as the wanted behavior directly, not a guess.
+	// Mutually exclusive by construction (toggleLayersMenu/
+	// toggleAttributionMenu/selectAircraft below close one another first,
+	// and also call onLocalSheetOpen to close a consuming app's own sheet
+	// too - see externalSheetOpen's own comment): any two of these five
+	// mobile sheets open at once would all be `fixed inset-x-0 bottom-0`,
+	// stacking on top of each other at the same spot, and this reserve
+	// math only has room to account for one at a time regardless.
+	let layersMenuMobileHeight = $state(0);
+	let attributionMenuMobileHeight = $state(0);
+	let aircraftSheetMobileHeight = $state(0);
+	const mobileLocalSheetReserve = $derived(
+		layersMenuOpen
+			? layersMenuMobileHeight
+			: attributionMenuOpen
+				? attributionMenuMobileHeight
+				: selectedAircraftIcao24 !== undefined
+					? aircraftSheetMobileHeight
+					: 0
+	);
+
+	// externalSheetOpen flipping true (a consuming app's own ward-detail/
+	// fleet sheet just opened) closes these the same direction -
+	// confirmed live as a real bug otherwise: opening the ward sheet,
+	// then tapping the layers button, left both open and stacked, the
+	// map-shrink math only ever subtracting one reserve while two sheets
+	// physically covered the screen.
+	$effect(() => {
+		if (externalSheetOpen) {
+			layersMenuOpen = false;
+			attributionMenuOpen = false;
+			selectedAircraftIcao24 = undefined;
+		}
+	});
+
+	function toggleLayersMenu() {
+		if (!layersMenuOpen) {
+			attributionMenuOpen = false;
+			selectedAircraftIcao24 = undefined;
+			onLocalSheetOpen?.();
+		}
+		layersMenuOpen = !layersMenuOpen;
+	}
+	function toggleAttributionMenu() {
+		if (!attributionMenuOpen) {
+			layersMenuOpen = false;
+			selectedAircraftIcao24 = undefined;
+			onLocalSheetOpen?.();
+		}
+		attributionMenuOpen = !attributionMenuOpen;
+	}
+	// Toggles like the other two local sheets (tapping the same aircraft
+	// again deselects), but also clears any selected ward - only one
+	// "selected map entity" at a time, the same way opening this closes
+	// layers/attribution and vice versa, so there's never two competing
+	// info panels up at once.
+	function selectAircraft(icao24: string) {
+		if (selectedAircraftIcao24 === icao24) {
+			selectedAircraftIcao24 = undefined;
+			return;
+		}
+		layersMenuOpen = false;
+		attributionMenuOpen = false;
+		fleet.select(undefined);
+		onLocalSheetOpen?.();
+		selectedAircraftIcao24 = icao24;
+	}
+
+	// Mobile only, in spirit - gated by CSS breakpoint (max-md:), not a
+	// JS isMobile check: this component has no such singleton available
+	// (it's the shared library component; a consuming app's own
+	// is-mobile.svelte.ts is deliberately per-app, never exported from
+	// the barrel - see that file's own comment). Both booleans default
+	// false and only ever flip true via their own button below, so
+	// desktop - where that button never renders at all (hidden
+	// max-md:flex) - never has a way to set them.
+	let weatherExpandedMobile = $state(false);
+	let legendExpandedMobile = $state(false);
+	let weatherMobileEl = $state<HTMLDivElement | undefined>(undefined);
+	let legendMobileEl = $state<HTMLDivElement | undefined>(undefined);
 
 	interface MarkerHandle {
 		marker: maplibregl.Marker;
@@ -533,6 +714,27 @@
 	const showAircraftRow = $derived(showAircraft);
 	const showEarthquakeRow = $derived(showEarthquakes);
 	const showWildfireRow = $derived(wildfireStore.active && showWildfires);
+	// Every data store a toggleable layer reads now carries its own
+	// genuine in-flight-fetch signal (see each store's own `loading`
+	// field doc comment) - this picks the noun for whichever one(s) are
+	// actually loading right now, gated the same way each layer's own
+	// visibility already is (the *Row flags above), so the toast never
+	// claims a hidden layer is loading. Order here is just the order
+	// the labels would read in if more than one were ever true at once.
+	const loadingServices = $derived(
+		(
+			[
+				[showAircraftRow && aircraftStore.loading, 'aircraft'],
+				[showObstacleRow && obstacleStore.loading, 'obstacle'],
+				[showAirportRow && airportStore.loading, 'airport'],
+				[showGeozoneRow && geozoneStore.loading, 'airspace'],
+				[showWildfireRow && wildfireStore.loading, 'wildfire'],
+				[showEarthquakeRow && earthquakeStore.loading, 'earthquake']
+			] as const
+		)
+			.filter(([active]) => active)
+			.map(([, label]) => label)
+	);
 	const ROUTE_SOURCE = 'mission-route';
 	const SATELLITE_LABELS_SOURCE = 'satellite-labels';
 	const GEOZONE_SOURCE = 'geozones';
@@ -1333,7 +1535,7 @@
 				<svg width="30" height="30" viewBox="0 0 34 34" class="-translate-x-1/2 -translate-y-1/2">
 					<path d="M17 3 L27 29 L17 22 L7 29 Z" fill="#f5a623" stroke="#0a0e12" stroke-width="1.5" stroke-linejoin="round" />
 				</svg>
-				<div class="border-edge bg-panel/90 text-fg absolute top-3 left-0 hidden -translate-x-1/2 flex-col gap-0.5 rounded-sm border px-2 py-1 font-mono text-[10px] whitespace-nowrap" data-part="badge">
+				<div class="border-edge bg-panel/90 text-fg absolute bottom-14 left-0 hidden -translate-x-1/2 flex-col gap-0.5 rounded-sm border px-2 py-1 font-mono text-[10px] whitespace-nowrap" data-part="badge">
 					<div class="flex items-center gap-1.5" data-part="name-row">
 						<span class="h-1.5 w-1.5 shrink-0 rounded-full" data-part="connectivity"></span>
 						<span data-part="name"></span>
@@ -1374,6 +1576,10 @@
 		const toggleSelect = (event: Event) => {
 			// keep marker clicks from also registering as map clicks (goto targeting)
 			event.stopPropagation();
+			// Only one "selected map entity" at a time - selecting a ward
+			// closes any aircraft info sheet, mirroring selectAircraft's own
+			// fleet.select(undefined) in the other direction.
+			selectedAircraftIcao24 = undefined;
 			fleet.select(fleet.selectedWardId === wardId ? undefined : wardId);
 		};
 		element.addEventListener('click', toggleSelect);
@@ -1474,6 +1680,20 @@
 			targetMap.getCanvas().style.cursor = '';
 			schedulePopupClose();
 			scheduleAircraftTrailClear();
+		});
+		// Tap-to-select: mobile's own equivalent of the hover popup above,
+		// which touch has no gesture for at all - requested directly. Wired
+		// unconditionally (not CSS/isMobile-gated): on desktop this just
+		// also selects the aircraft in the background (selectedAircraftIcao24
+		// changes), but the info sheet that state drives is max-md:-only
+		// (see its own markup below), so a desktop click has no visible
+		// effect beyond what hovering already showed - no regression there,
+		// and no isMobile check needed since this component has none
+		// available anyway (see every other mobile-only toggle's own
+		// comment on that).
+		body.addEventListener('click', (event) => {
+			event.stopPropagation();
+			selectAircraft(icao24);
 		});
 		return { element, body, stem, icon };
 	}
@@ -1610,7 +1830,13 @@
 				container,
 				center: [lon, lat],
 				zoom,
-				attributionControl: { compact: true },
+				// Replaced by a custom button + popup below (same pattern as
+				// the layers menu) instead of MapLibre's own native compact
+				// control - its own expand-in-place behavior had no
+				// viewport-aware repositioning and clipped on a narrow phone,
+				// confirmed live. BASEMAP_ATTRIBUTION (below) still carries
+				// the actual credit text either way.
+				attributionControl: false,
 				style: {
 					version: 8,
 					sources: {
@@ -1682,10 +1908,47 @@
 			if (fleetGroups.missionAssignmentDraft) {
 				fleetGroups.addAssignmentWaypoint(event.lngLat.lat, event.lngLat.lng);
 			} else {
+				// Read before requestGoto/requestSetHome run, since each
+				// clears its own arming flag the instant it consumes this
+				// click - this is the only way to tell afterward whether
+				// that's what just happened. A ward is typically selected
+				// specifically to arm one of these from its own Control tab,
+				// so the tap that sends it there must not also deselect it.
+				const wasTargeting = fleet.gotoArming || fleet.setHomeArming;
 				fleet.requestGoto(event.lngLat.lat, event.lngLat.lng);
 				fleet.requestSetHome(event.lngLat.lat, event.lngLat.lng);
+				// Tapping empty map area deselects the current ward -
+				// requested directly as the standard, more discoverable
+				// complement to tapping the same marker again (which still
+				// works independently, via each marker's own
+				// stopPropagation'd click handler never reaching here at
+				// all). Deliberately NOT done on a pan/zoom (see
+				// followSuspended's own comment above) - those stay
+				// non-destructive, only an actual tap elsewhere dismisses.
+				if (!wasTargeting) {
+					if (fleet.selectedWardId !== undefined) fleet.select(undefined);
+					// Same deselect-on-empty-tap treatment as the ward above -
+					// each aircraft marker's own click handler (selectAircraft's
+					// caller) stopPropagation's too, so this only ever fires for
+					// a genuine empty-map tap.
+					if (selectedAircraftIcao24 !== undefined) selectedAircraftIcao24 = undefined;
+				}
 			}
 			onMapClick?.(event.lngLat.lat, event.lngLat.lng);
+		});
+		// Pausing the selected-ward follow effect (below) the moment the
+		// operator drags or pinch-zooms themselves - originalEvent is only
+		// set for a real user gesture, never for one of this file's own
+		// programmatic easeTo calls (confirmed: none of them pass eventData
+		// with an originalEvent), so this can't misfire from the follow
+		// effect's own moves, including its SELECTION_FOLLOW_TICK_EVENT_DATA-
+		// tagged ones. See followSuspended's own comment for the bug this
+		// fixes.
+		created.on('dragstart', (event) => {
+			if (event.originalEvent) followSuspended = true;
+		});
+		created.on('zoomstart', (event) => {
+			if (event.originalEvent) followSuspended = true;
 		});
 		created.on('move', () => {
 			bearingDeg = created.getBearing();
@@ -1759,7 +2022,20 @@
 			obstacleStore.requestViewport(viewport, zoom);
 			airportStore.requestViewport(viewport);
 		};
-		created.on('moveend', requestThirdPartyLayers);
+		// isFollowTick: skips this whole refresh for the selected-ward
+		// follow effect's own recurring recenter (see SELECTION_FOLLOW_TICK_EVENT_DATA's
+		// own comment) - every one of the fetches above is debounced or
+		// rate-gated, and a flying ward's own ~200ms-apart recenters fired
+		// moveend far more often than any of them could ever get a quiet
+		// gap to actually complete in, confirmed live as a real bug
+		// (weather specifically: zero successful fetches for the entire
+		// time a ward stayed selected). A genuine "jump to a new area"
+		// move (selecting a ward for the first time, locate-me, a cluster
+		// expansion) carries no such tag and still refreshes normally.
+		created.on('moveend', (event: maplibregl.MapLibreEvent & { isFollowTick?: boolean }) => {
+			if (event.isFollowTick) return;
+			requestThirdPartyLayers();
+		});
 		created.on('load', () => {
 			// OpenFreeMap's vector basemap (see loadBasemapLayers's own
 			// comment on why this is additive rather than map.setStyle()).
@@ -2089,35 +2365,6 @@
 				source: MEASURE_SOURCE,
 				paint: { 'line-color': '#e8edf2', 'line-width': 2, 'line-dasharray': [3, 2] }
 			});
-			// MapLibre's own compact-attribution logic (verified directly in
-			// its bundled source, not guessed) ends up expanded by default. A
-			// one-time removal of maplibregl-compact-show here (matching what
-			// _toggleAttribution's own "close" branch does) is not enough on
-			// its own - confirmed live: the control starts as
-			// maplibregl-attrib-empty (no attribution text loaded yet), so
-			// _updateCompact()'s own guard skips adding compact-show at this
-			// point; once real attribution content arrives a moment later,
-			// AttributionControl's own _updateData handler (bound to
-			// 'styledata'/'sourcedata'/'terrain') clears attrib-empty via
-			// _updateAttributions() and _updateCompact() adds compact-show
-			// fresh, after this code already ran.
-			//
-			// Re-removing it on those exact same three events, registered
-			// after the control's own listeners (addControl ran at map
-			// construction, before this 'load' handler), fires after them in
-			// the same event and wins - a plain classList.remove() per event
-			// rather than a MutationObserver watching this node's class
-			// attribute continuously, which measured live as expensive
-			// enough on a busy telemetry map to stall the render thread
-			// (sourcedata alone can fire many times a second).
-			const collapseAttribution = () =>
-				container
-					.querySelector('.maplibregl-ctrl-attrib')
-					?.classList.remove('maplibregl-compact-show');
-			collapseAttribution();
-			created.on('styledata', collapseAttribution);
-			created.on('sourcedata', collapseAttribution);
-			created.on('terrain', collapseAttribution);
 			mapLoaded = true;
 			requestThirdPartyLayers();
 		});
@@ -2150,29 +2397,204 @@
 		};
 	});
 
-	// Pan to a ward once when it's selected (sidebar click, marker click,
-	// or a /pilots/[username] deep link), not continuously - lastFocusedId
-	// guards against re-panning on every subsequent telemetry tick for the
-	// same selection, which would fight the operator's own camera control.
-	// Reading state.position here (not untracked) is deliberate: a deep
-	// link can select a ward before its telemetry has arrived, and this
-	// needs to re-fire once position actually shows up for it.
+	// MapLibre only redraws its canvas at a new size when told to - a
+	// container that shrinks (a bottom sheet opening, see
+	// mobileLocalSheetReserve's own comment above) doesn't trigger that on
+	// its own, confirmed live: the canvas stayed the old size, cropped
+	// rather than actually resized, until resize() was called. A
+	// ResizeObserver, not a $effect keyed on mobileLocalSheetReserve: this
+	// also catches --mobile-external-sheet-reserve changing (pure CSS, a
+	// $effect can't see that at all) and plain window/orientation resizes
+	// alongside it, one mechanism for every cause instead of enumerating
+	// each one.
+	$effect(() => {
+		if (!map || !container) return;
+		const activeMap = map;
+		const observer = new ResizeObserver(() => activeMap.resize());
+		observer.observe(container);
+		return () => observer.disconnect();
+	});
+
+	// Keep a selected ward centered for as long as it stays selected, not
+	// just on the moment it's picked - a ward in flight keeps moving, and
+	// an operator watching one specific ward wants the camera to follow
+	// it, not just glance at where it was when selected. lastFocusedWardId
+	// still distinguishes "just selected" (gets the zoom-in/tilt-in flight,
+	// and only ever zooms in, never back out, past whatever the operator's
+	// own zoom already was) from "already selected, this is just the next
+	// telemetry tick" (center only - an operator who's deliberately zoomed/
+	// panned/pitched further while following shouldn't have that fought on
+	// every tick, only the center itself needs to keep tracking). Reading
+	// state.position here (not untracked) is what makes both cases work: a
+	// deep link can select a ward before its telemetry has arrived (first
+	// read fires once position shows up), and a flying ward's own position
+	// changing is the whole reason this effect needs to keep re-firing.
+	// The pitch is what turns the altitude-lift marker rendering (see the
+	// position effect's own "lift the body" comment) from a dormant formula
+	// into an actually visible stem - confirmed live, at pitch 0 nothing
+	// above the ground anchor ever showed regardless of a ward's real
+	// altitude.
+	// focusingIn: true for the duration of the initial fly-in ease (zoom +
+	// pitch + center), false once it actually settles. Follow-ticks below
+	// are skipped entirely while this is true - confirmed live as a real
+	// bug otherwise: the sim ticks at 5Hz (TICK_HZ, fleet-sim.ts, ~200ms
+	// apart), well inside the fly-in's own 600ms duration, so a follow-tick
+	// almost always landed mid-animation and immediately re-eased with no
+	// zoom/pitch specified. MapLibre's easeTo takes "unspecified" to mean
+	// "keep whatever the camera's current value is right now", which
+	// mid-animation is some partial interpolated zoom/pitch, not the real
+	// target - that partial value then became the new "current", and the
+	// fly-in never actually reached SELECTED_ENTITY_ZOOM/PITCH_DEG at all.
+	// Letting the fly-in finish untouched, then handing off to follow-ticks
+	// once it's done, is what actually gets both: the animated zoom-in/
+	// tilt-in on selection, and a camera that keeps tracking afterward.
 	let lastFocusedWardId: string | undefined;
+	let focusingIn = false;
+	// True the moment the operator drags or pinch-zooms the map themselves
+	// while a ward is selected - set by the dragstart/zoomstart listeners
+	// below (near the map's own 'click' handler), reset only by a fresh
+	// selection (justSelected below). Follow-ticks skip themselves
+	// entirely while this is true. Without it, every follow-tick (every
+	// ~200ms, see that branch's own comment) forced the center straight
+	// back to the ward regardless of what the operator had just done to
+	// the camera - confirmed live as a real bug, panning away from a
+	// selected, moving ward felt "rubber-banded": the map snapped back
+	// within a couple hundred milliseconds no matter how hard or how far
+	// you dragged, never actually letting you look anywhere else. The
+	// zoom/pitch half of this same problem was already handled (see the
+	// follow-tick's own comment on why it never re-specifies zoom/pitch);
+	// this is the other half, for the center/pan itself, which that fix
+	// never actually covered.
+	let followSuspended = false;
 	$effect(() => {
 		const selectedId = fleet.selectedWardId;
 		const activeMap = map;
-		if (!selectedId || !activeMap) {
+		if (!selectedId) {
+			// Deselecting flattens the camera back out - an operator
+			// shouldn't be left staring at a tilted map once nothing is
+			// actually selected to justify the altitude view. Center/zoom
+			// are left alone; only the pitch this effect itself introduced
+			// needs undoing.
+			if (activeMap && lastFocusedWardId !== undefined) {
+				activeMap.easeTo({ pitch: 0, duration: 600 });
+			}
 			lastFocusedWardId = undefined;
+			focusingIn = false;
 			return;
 		}
-		if (lastFocusedWardId === selectedId) return;
+		if (!activeMap) return;
 		const position = fleet.wards[selectedId]?.state?.position;
 		if (!position) return;
+		const justSelected = lastFocusedWardId !== selectedId;
 		lastFocusedWardId = selectedId;
-		activeMap.easeTo({
-			center: [position.longitudeDeg, position.latitudeDeg],
-			duration: 600
-		});
+		if (justSelected) {
+			focusingIn = true;
+			followSuspended = false;
+			activeMap.easeTo({
+				center: [position.longitudeDeg, position.latitudeDeg],
+				zoom: Math.max(activeMap.getZoom(), SELECTED_ENTITY_ZOOM),
+				pitch: SELECTED_ENTITY_PITCH_DEG,
+				duration: 600
+			});
+			activeMap.once('moveend', () => {
+				focusingIn = false;
+			});
+			return;
+		}
+		if (focusingIn || followSuspended) return;
+		// Short duration, not the fly-in's 600ms: this re-fires on every
+		// sim tick (~200ms apart), so a duration close to that spacing keeps
+		// consecutive eases smoothly retargeting rather than visibly
+		// snapping - confirmed live, a longer duration here left the camera
+		// chronically lagging a moving ward instead of tracking it. No
+		// zoom/pitch here deliberately - an operator who's since zoomed,
+		// panned, or pitched further while following shouldn't have that
+		// fought on every tick, only the center itself needs to keep
+		// tracking.
+		// eventData (the 2nd argument) tags every event this transition
+		// fires, including the 'moveend' it ends in - the moveend handlers
+		// below read SELECTION_FOLLOW_TICK_EVENT_DATA back off that event to
+		// skip their own viewport-refresh work specifically for this
+		// recentering, not genuine navigation. Without this, a flying,
+		// selected ward's own re-centers (every ~200ms, following the sim's
+		// own tick rate) fired 'moveend' far too often for any of those
+		// debounced/gated fetches (weather, cities, aircraft, obstacles,
+		// airports, geozones, wildfires, earthquakes - every one of them
+		// hangs off the same moveend) to ever get the quiet gap they
+		// needed to actually fire - confirmed live as a real bug, weather
+		// (1.5s debounce) never completed a single fetch for the entire
+		// time a ward stayed selected, worst case (freshly restored
+		// selection on reload, follow starting immediately) never fetching
+		// at all.
+		activeMap.easeTo(
+			{
+				center: [position.longitudeDeg, position.latitudeDeg],
+				duration: 200
+			},
+			SELECTION_FOLLOW_TICK_EVENT_DATA
+		);
+	});
+
+	// Selected-aircraft equivalent of the ward follow effect directly
+	// above - same shape entirely (justSelected fly-in with zoom/pitch,
+	// then center-only follow-ticks once settled), requested directly:
+	// "all this selection and behavior on airplanes/aircraft as well".
+	// Deliberately a SEPARATE effect with its own lastFocused/focusingIn
+	// pair rather than merged into the one above: selectAircraft()/
+	// toggleSelect() already guarantee a ward and an aircraft are never
+	// both selected at once (see either one's own comment), so there's
+	// no risk of the two fighting each other, and keeping them apart
+	// avoids a riskier single-effect rewrite for what's otherwise a
+	// contained addition. followSuspended IS shared (declared above, set
+	// by the same dragstart/zoomstart listeners) - an operator taking
+	// control of the camera should pause auto-follow regardless of
+	// whether a ward or an aircraft is what's being followed.
+	let lastFocusedAircraftIcao24: string | undefined;
+	let aircraftFocusingIn = false;
+	$effect(() => {
+		const selectedIcao24 = selectedAircraftIcao24;
+		const activeMap = map;
+		if (!selectedIcao24) {
+			if (activeMap && lastFocusedAircraftIcao24 !== undefined) {
+				activeMap.easeTo({ pitch: 0, duration: 600 });
+			}
+			lastFocusedAircraftIcao24 = undefined;
+			aircraftFocusingIn = false;
+			return;
+		}
+		if (!activeMap) return;
+		const plane = aircraftStore.aircraft.find((candidate) => candidate.icao24 === selectedIcao24);
+		if (!plane) return;
+		const justSelected = lastFocusedAircraftIcao24 !== selectedIcao24;
+		lastFocusedAircraftIcao24 = selectedIcao24;
+		if (justSelected) {
+			aircraftFocusingIn = true;
+			followSuspended = false;
+			activeMap.easeTo({
+				center: [plane.longitudeDeg, plane.latitudeDeg],
+				zoom: Math.max(activeMap.getZoom(), SELECTED_ENTITY_ZOOM),
+				pitch: SELECTED_ENTITY_PITCH_DEG,
+				duration: 600
+			});
+			activeMap.once('moveend', () => {
+				aircraftFocusingIn = false;
+			});
+			return;
+		}
+		if (aircraftFocusingIn || followSuspended) return;
+		// Real feed updates land far less often than the ward sim's 5Hz
+		// tick, but this still needs the same SELECTION_FOLLOW_TICK_EVENT_DATA
+		// tag - an aircraft's own recenter is just as capable of firing
+		// moveend often enough to starve weather/cities/etc. of the quiet
+		// gap they need (see the ward follow-tick's own comment on the bug
+		// this prevents), regardless of the exact cadence.
+		activeMap.easeTo(
+			{
+				center: [plane.longitudeDeg, plane.latitudeDeg],
+				duration: 600
+			},
+			SELECTION_FOLLOW_TICK_EVENT_DATA
+		);
 	});
 
 	// crosshair cursor while goto targeting, set-home targeting, fleet
@@ -2413,6 +2835,62 @@
 		};
 	});
 
+	// Same convention for the attribution button below.
+	$effect(() => {
+		if (!attributionMenuOpen) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (attributionMenuEl && !attributionMenuEl.contains(event.target as Node)) {
+				attributionMenuOpen = false;
+			}
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') attributionMenuOpen = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
+	});
+
+	// Same outside-click/Escape convention as the layers menu above, for
+	// the mobile weather/legend buttons' own expanded card.
+	$effect(() => {
+		if (!weatherExpandedMobile) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (weatherMobileEl && !weatherMobileEl.contains(event.target as Node)) {
+				weatherExpandedMobile = false;
+			}
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') weatherExpandedMobile = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
+	});
+	$effect(() => {
+		if (!legendExpandedMobile) return;
+		const handlePointerDown = (event: PointerEvent) => {
+			if (legendMobileEl && !legendMobileEl.contains(event.target as Node)) {
+				legendExpandedMobile = false;
+			}
+		};
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') legendExpandedMobile = false;
+		};
+		window.addEventListener('pointerdown', handlePointerDown);
+		window.addEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('pointerdown', handlePointerDown);
+			window.removeEventListener('keydown', handleKeydown);
+		};
+	});
+
 	// push loaded airspace zones into their source whenever the store updates
 	$effect(() => {
 		const activeMap = map;
@@ -2580,6 +3058,13 @@
 							AIRCRAFT_FULL_LIGHTNESS_PCT,
 							altitudeFraction
 						);
+			// Same selected-blue/thicker-stroke treatment ward markers use
+			// (see the ward marker sync effect's own arrowPath styling) -
+			// the only visual cue a tapped aircraft is actually selected,
+			// since unlike a ward there's no name badge appearing below it.
+			const aircraftSelected = selectedAircraftIcao24 === plane.icao24;
+			handle.icon.setAttribute('stroke', aircraftSelected ? '#3b9eff' : '#0a0e12');
+			handle.icon.setAttribute('stroke-width', aircraftSelected ? '2' : '1');
 			// lift the body above the ground anchor by the projected altitude,
 			// same formula as ward markers (see markerElement's own comment) -
 			// but fed a compressed "visual equivalent" altitude, not aircraft's
@@ -3136,7 +3621,43 @@
 	});
 </script>
 
-<div class="relative h-full w-full">
+<!-- height, not padding-bottom: padding is still inside the content box
+     clientHeight measures, so a padded-in map container would just keep
+     rendering its canvas into the padded-away area - confirmed live, it
+     has to actually shrink. On THIS wrapper, not just the map canvas
+     below: every overlay in this file (the button column, weather,
+     legend, toast) is positioned relative to or inside this same div,
+     not the canvas - shrinking only the canvas left them anchored to
+     this div's own (unchanged) full height, so they stayed in their
+     original spots floating over the sheet instead of moving with the
+     map, confirmed live as a real bug. mobileLocalSheetReserve covers
+     this file's own layers/attribution sheets below;
+     --mobile-external-sheet-reserve is set by a consuming app's own
+     bottom sheets (right-panel.svelte's ward detail, left-rail.svelte's
+     own) via +page.svelte - see that file's own comment. top/height both
+     also subtract --mobile-ward-card-height: that card is `position:
+     fixed`, so it was never reducing this div's own box at all -
+     unlike a bottom sheet, it just overlaid the top of the map without
+     this div ever being told to get out of its way, confirmed live as
+     a real bug (the 50% floor below was computed against the full
+     height, then the card ate into the result from the other edge
+     unaccounted for, leaving noticeably less than 50% actually
+     visible). max(50%, ...): the map never shrinks past half the
+     available height no matter how tall a sheet's own content gets -
+     confirmed as the wanted floor directly, not a guess. A sheet whose
+     own content exceeds the remaining space past that floor scrolls
+     internally rather than pushing the map smaller still (every sheet's
+     own --mobile-sheet-max-height cap, +page.svelte, is set to the same
+     50% so the two never disagree; overflow-y-auto takes over past it).
+     transition: smooths the push instead of snapping instantly.
+     The ResizeObserver below (on the map canvas, which inherits this
+     div's new size via its own plain h-full) is what actually makes
+     MapLibre redraw at the new size - a container that merely changes
+     size doesn't trigger that on its own. -->
+<div
+	class="relative w-full transition-[height,top] duration-200 ease-out"
+	style="top: var(--mobile-ward-card-height, 0px); height: max(50%, calc(100% - var(--mobile-ward-card-height, 0px) - {mobileLocalSheetReserve}px - var(--mobile-external-sheet-reserve, 0px)));"
+>
 	<!--
 		MapLibre takes ownership of this div's contents (canvas, its own
 		control divs) and paints over anything already inside it, so overlays
@@ -3151,138 +3672,191 @@
 			Map unavailable: {mapError}
 		</p>
 	{/if}
-	<!-- One banner, not one per service: confirmed live that stacking a
-	     separate "Loading airspace data" and "Loading aircraft data" box
-	     read as visual clutter even though both were true simultaneously
-	     often enough (OpenAIP and adsb.lol are genuinely independent
-	     services with their own keys/rate limits, so either can be loading
-	     or erroring without the other). The message itself says which,
-	     rather than always showing a generic "Loading map data" that would
-	     lose that distinction. -->
-	<!-- max-sm: moved off top-center into the empty top-right corner - the
-	     weather widget already owns top-left, and this box's own max-width
-	     otherwise reaches into the screen's horizontal center on a phone,
-	     overlapping it (confirmed live). Desktop (top-center) is unchanged. -->
+	<!-- Shared top-left group: weather first (anchored to the corner),
+	     the loading toast beside it - both live here together rather than
+	     at opposite corners, confirmed as the wanted layout directly.
+	     items-start: top-aligns them regardless of which is taller at any
+	     given moment (the weather card grows with its own content; the
+	     toast is a single line or a small spinner badge). max-md:top-
+	     [...var(--mobile-ward-card-height)]: a consuming app's own fixed
+	     ward-detail card (shown once a ward is selected - see
+	     karshipta-cloud/console's own +page.svelte/right-panel.svelte)
+	     can cover this corner otherwise; 0px whenever no such card exists
+	     or none is currently showing. -->
+	<!-- max-md:z-[46]: same reasoning as the button column's own comment
+	     above - without it, a consuming app's own expanded EdgeSheet
+	     catcher silently ate every tap meant for the weather/toast
+	     buttons here too. -->
 	<div
-		class="absolute top-3 left-1/2 w-fit max-w-md -translate-x-1/2 max-sm:right-3 max-sm:left-auto max-sm:max-w-[45vw] max-sm:translate-x-0"
+		class="absolute bottom-[10px] left-3 flex items-end gap-2 max-md:bottom-[var(--mobile-chrome-bottom,10px)] max-md:z-[46]"
 	>
-		{#if (geozoneStore.active && geozoneStore.loadError) || (showObstacles && obstacleStore.loadError) || (showAirports && airportStore.loadError) || (showAircraft && (aircraftStore.loading || aircraftStore.loadError))}
-			{@const airspaceLoading =
-				(geozoneStore.active && geozoneStore.loadError) ||
-				(showObstacles && obstacleStore.loadError) ||
-				(showAirports && airportStore.loadError)}
-			{@const aircraftLoading = showAircraft && (aircraftStore.loading || aircraftStore.loadError)}
-			<!-- Reassuring, not alarming: airspace errors are almost always
-			     OpenAIP's own shared rate limit (see openaip/request-gate.ts),
-			     which clears on its own - not a real, ongoing failure the
-			     operator needs to act on. aircraftStore.loading (not just its
-			     loadError) is covered too, unlike the airspace side: a wide
-			     zoomed-out view can take several genuine seconds (a multi-tile
-			     batch, ~1.2s apart per tile to respect adsb.lol's rate
-			     limit), and that wait had no visible feedback at all before
-			     loading existed. Every store's own raw error still goes to
-			     console.error and sits in the title attribute for anyone who
-			     wants it. -->
+		{#if showWeather && weatherStore.conditions}
+			{@const conditions = weatherStore.conditions}
+			<!-- Not a point/popup layer like Aircraft/Earthquakes/etc.:
+			     weather is a continuous field, not discrete features, so
+			     it's a small always-visible readout for the current map
+			     center rather than something you hover a marker for. Same
+			     dimmed-until-hovered treatment as the legend panel - a
+			     passive readout, not something that needs to compete with
+			     the map at full strength until the operator actually looks
+			     at it. Below max-md, this card starts collapsed into a
+			     button (same h-8 w-8/border/bg-panel treatment as the
+			     bottom-right control column) rather than the full card
+			     permanently eating this corner - gated by the CSS
+			     breakpoint itself plus a plain boolean, not a JS isMobile
+			     check: this shared component has no such singleton
+			     available (see weatherExpandedMobile's own comment).
+			     Desktop is untouched either way - max-md:hidden never
+			     applies there, so the card always shows regardless of the
+			     boolean. -->
+			{#if !weatherExpandedMobile}
+				<button
+					type="button"
+					onclick={() => (weatherExpandedMobile = true)}
+					aria-label="Show weather"
+					aria-expanded="false"
+					class="hidden h-8 w-8 shrink-0 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg max-md:flex"
+				>
+					<WeatherIcon
+						shape={weatherIconShape(conditions.weatherCode, conditions.isDay)}
+						size={17}
+					/>
+				</button>
+			{/if}
+			<div
+				bind:this={weatherMobileEl}
+				role="group"
+				class="flex w-48 shrink-0 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-md:w-42 {weatherExpandedMobile
+					? 'max-md:opacity-100'
+					: 'max-md:hidden'}"
+				aria-label="Current weather at map center"
+			>
+				{#if weatherLocationLabel}
+					<span class="text-[10px] font-medium text-fg-muted uppercase">
+						{weatherLocationLabel}
+					</span>
+				{/if}
+				<div class="flex items-center gap-1.5">
+					<span class="text-fg">
+						<WeatherIcon
+							shape={weatherIconShape(conditions.weatherCode, conditions.isDay)}
+							size={22}
+						/>
+					</span>
+					<span class="font-mono text-sm font-semibold text-fg">
+						{formatTemperature(conditions.temperatureC, unitsStore.current)}
+					</span>
+					<span class="truncate">{weatherConditionLabel(conditions.weatherCode)}</span>
+				</div>
+				{#if conditions.feelsLikeC !== undefined && Math.abs(conditions.feelsLikeC - conditions.temperatureC) >= 1}
+					<span>Feels like {formatTemperature(conditions.feelsLikeC, unitsStore.current)}</span>
+				{/if}
+				<div class="grid grid-cols-2 gap-x-2 gap-y-0.5">
+					<span>
+						{conditions.windDirectionDeg.toFixed(0)}&deg; {formatVehicleSpeed(
+							conditions.windSpeedMS,
+							unitsStore.current
+						)}
+					</span>
+					{#if conditions.windGustMS !== undefined && conditions.windGustMS > conditions.windSpeedMS}
+						<span>Gusts {formatVehicleSpeed(conditions.windGustMS, unitsStore.current)}</span>
+					{/if}
+					{#if conditions.cloudCoverPct !== undefined}
+						<span>Cloud {conditions.cloudCoverPct.toFixed(0)}%</span>
+					{/if}
+					{#if conditions.humidityPct !== undefined}
+						<span>Humidity {conditions.humidityPct.toFixed(0)}%</span>
+					{/if}
+					{#if conditions.rainMm}
+						<span>Rain {formatPrecipitation(conditions.rainMm, unitsStore.current)}</span>
+					{/if}
+					{#if conditions.showersMm}
+						<span>Showers {formatPrecipitation(conditions.showersMm, unitsStore.current)}</span>
+					{/if}
+					{#if conditions.snowfallMm}
+						<span>Snow {formatPrecipitation(conditions.snowfallMm, unitsStore.current)}</span>
+					{/if}
+					{#if !conditions.rainMm && !conditions.showersMm && !conditions.snowfallMm}
+						<span>
+							Precip {formatPrecipitation(conditions.precipitationMm, unitsStore.current)}
+						</span>
+					{/if}
+					{#if conditions.visibilityM !== undefined}
+						<span>Vis {formatDistanceUnits(conditions.visibilityM, unitsStore.current)}</span>
+					{/if}
+					{#if conditions.pressureHpa !== undefined}
+						<span>{formatPressure(conditions.pressureHpa, unitsStore.current)}</span>
+					{/if}
+				</div>
+			</div>
+		{/if}
+		<!-- One banner, not one per service: confirmed live that stacking a
+		     separate "Loading airspace data" and "Loading aircraft data" box
+		     read as visual clutter even though both were true simultaneously
+		     often enough (OpenAIP and adsb.lol are genuinely independent
+		     services with their own keys/rate limits, so either can be loading
+		     or erroring without the other). The message itself says which,
+		     rather than always showing a generic "Loading map data" that would
+		     lose that distinction. max-w-[130px] on mobile: this div sits in
+		     the map's own container, which is narrower than the full
+		     viewport by both icon rails' width - confirmed live, a vw-based
+		     cap measured against the whole screen instead still ran too
+		     wide for it. 130px holds against the worst case (both rails
+		     visible, nothing expanded - the map's container width never
+		     gets narrower than that on this viewport, since EdgeSheet
+		     overlays rather than resizing it). -->
+		{#if !hideLoadingToast && loadingServices.length > 0}
+			<!-- Shown only while a fetch is genuinely in flight
+			     (loadingServices, derived above from every layer's own
+			     `loading` field), not while something has merely errored
+			     and is waiting on its own cooldown to retry - requested directly, after a static
+			     "warning" icon stood in for that second case: an operator
+			     can't do anything about a background retry they're not
+			     told the specifics of, so the honest options are an
+			     animation while real work is happening, or nothing at all
+			     otherwise, not a third "something might be wrong" state
+			     with no action attached to it. Airspace errors are almost
+			     always OpenAIP's own shared rate limit (see
+			     openaip/request-gate.ts), which clears on its own - every
+			     store's own raw error still goes to console.error for
+			     anyone who wants it, just not to a persistent visible
+			     badge the operator has no use for. -->
+			<!-- max-[999.98px]: below this, the full sentence doesn't fit
+			     anywhere worth putting it (this corner is already capped to
+			     130px wide below the md breakpoint - see this div's own
+			     comment), so the toast itself collapses to a plain spinner
+			     badge, same h-8 w-8 footprint as the control column's own
+			     buttons. role="status" (a live region) and the text itself
+			     both stay in the DOM regardless - sr-only, not removed -
+			     so a screen reader still announces what's loading; only
+			     the visual presentation changes. 999.98px, not 1000:
+			     mirrors is-mobile.svelte.ts's own 767.98 convention for
+			     an exact max-width breakpoint (max-width is CSS-inclusive,
+			     so a plain 1000 would also catch width === 1000 itself). -->
 			<p
 				role="status"
-				title={[
-					geozoneStore.loadError,
-					obstacleStore.loadError,
-					airportStore.loadError,
-					aircraftStore.loadError
-				]
-					.filter(Boolean)
-					.join(' / ') || undefined}
-				class="rounded border border-accent bg-panel px-3 py-1.5 text-center text-xs text-fg"
+				class="flex w-fit max-w-md shrink-0 items-center justify-center gap-1.5 rounded border border-edge bg-panel/90 px-3 py-1.5 text-center text-xs text-fg-muted max-[999.98px]:h-8 max-[999.98px]:w-8 max-[999.98px]:p-0"
 			>
-				Loading {airspaceLoading && aircraftLoading
-					? 'airspace and aircraft data'
-					: airspaceLoading
-						? 'airspace data'
-						: 'aircraft data'} - this can take a few seconds.
+				<svg
+					width="15"
+					height="15"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.75"
+					stroke-linecap="round"
+					class="hidden shrink-0 animate-spin max-[999.98px]:block"
+					aria-hidden="true"
+				>
+					<path d="M12 2a10 10 0 0 1 10 10" />
+				</svg>
+				<span class="max-[999.98px]:sr-only"
+					>Loading {loadingServices.length === 1 ? loadingServices[0] : 'map'} data - this can take a
+					few seconds.</span
+				>
 			</p>
 		{/if}
 	</div>
-
-	{#if showWeather && weatherStore.conditions}
-		{@const conditions = weatherStore.conditions}
-		<!-- Top-left: the one corner with nothing else in it (legend/scale
-		     live bottom-left, controls bottom-right, error banners top-center).
-		     Not a point/popup layer like Aircraft/Earthquakes/etc.: weather is
-		     a continuous field, not discrete features, so it's a small
-		     always-visible readout for the current map center rather than
-		     something you hover a marker for. Same dimmed-until-hovered
-		     treatment as the legend panel - a passive readout, not something
-		     that needs to compete with the map at full strength until the
-		     operator actually looks at it. -->
-		<!-- max-sm: narrower so this can't reach the screen's horizontal
-		     center, which is exactly where the loading toast above now sits
-		     on mobile (it moved from top-center to top-right for the same
-		     reason). Desktop width unchanged. -->
-		<div
-			role="group"
-			class="absolute top-3 left-3 flex w-48 flex-col gap-1 rounded border border-edge bg-panel/90 px-2.5 py-1.5 text-[10px] text-fg-muted opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-sm:w-36"
-			aria-label="Current weather at map center"
-		>
-			{#if weatherLocationLabel}
-				<span class="text-[10px] font-medium text-fg-muted uppercase">
-					{weatherLocationLabel}
-				</span>
-			{/if}
-			<div class="flex items-center gap-1.5">
-				<span class="text-fg">
-					<WeatherIcon
-						shape={weatherIconShape(conditions.weatherCode, conditions.isDay)}
-						size={22}
-					/>
-				</span>
-				<span class="font-mono text-sm font-semibold text-fg">
-					{formatTemperature(conditions.temperatureC, unitsStore.current)}
-				</span>
-				<span class="truncate">{weatherConditionLabel(conditions.weatherCode)}</span>
-			</div>
-			{#if conditions.feelsLikeC !== undefined && Math.abs(conditions.feelsLikeC - conditions.temperatureC) >= 1}
-				<span>Feels like {formatTemperature(conditions.feelsLikeC, unitsStore.current)}</span>
-			{/if}
-			<div class="grid grid-cols-2 gap-x-2 gap-y-0.5">
-				<span>
-					{conditions.windDirectionDeg.toFixed(0)}&deg; {formatVehicleSpeed(
-						conditions.windSpeedMS,
-						unitsStore.current
-					)}
-				</span>
-				{#if conditions.windGustMS !== undefined && conditions.windGustMS > conditions.windSpeedMS}
-					<span>Gusts {formatVehicleSpeed(conditions.windGustMS, unitsStore.current)}</span>
-				{/if}
-				{#if conditions.cloudCoverPct !== undefined}
-					<span>Cloud {conditions.cloudCoverPct.toFixed(0)}%</span>
-				{/if}
-				{#if conditions.humidityPct !== undefined}
-					<span>Humidity {conditions.humidityPct.toFixed(0)}%</span>
-				{/if}
-				{#if conditions.rainMm}
-					<span>Rain {formatPrecipitation(conditions.rainMm, unitsStore.current)}</span>
-				{/if}
-				{#if conditions.showersMm}
-					<span>Showers {formatPrecipitation(conditions.showersMm, unitsStore.current)}</span>
-				{/if}
-				{#if conditions.snowfallMm}
-					<span>Snow {formatPrecipitation(conditions.snowfallMm, unitsStore.current)}</span>
-				{/if}
-				{#if !conditions.rainMm && !conditions.showersMm && !conditions.snowfallMm}
-					<span>
-						Precip {formatPrecipitation(conditions.precipitationMm, unitsStore.current)}
-					</span>
-				{/if}
-				{#if conditions.visibilityM !== undefined}
-					<span>Vis {formatDistanceUnits(conditions.visibilityM, unitsStore.current)}</span>
-				{/if}
-				{#if conditions.pressureHpa !== undefined}
-					<span>{formatPressure(conditions.pressureHpa, unitsStore.current)}</span>
-				{/if}
-			</div>
-		</div>
-	{/if}
 
 	<!--
 		Bottom-right, stacked directly above MapLibre's own NavigationControl
@@ -3292,7 +3866,27 @@
 		scattering them across corners. Locate me and Measure stack above map
 		style, in the same column, for the same reason.
 	-->
-	<div class="absolute right-[10px] bottom-[155px] flex flex-col items-end gap-2.5">
+	<!-- max-md:z-[46]: a consuming app's own EdgeSheet-based sheet
+	     (ward detail, fleet) puts a full-viewport `fixed` outside-tap
+	     catcher at z-[45] while expanded - without this, that catcher
+	     painted above these buttons (a `position: fixed` element with
+	     any z-index always wins over plain in-flow/auto-z content
+	     regardless of DOM order) and silently ate every tap meant for
+	     them, confirmed live as a real bug: trying to open the layers
+	     menu while the ward-detail sheet was expanded did nothing at
+	     all. Same reasoning the rails in a consuming app's own
+	     left-rail.svelte/right-panel.svelte already needed this for. -->
+	<!-- bottom-[159px], not 155px: the native zoom/compass group right
+	     below this column grew 3px taller per button (29px -> 32px, see
+	     that group's own CSS comment on why) once it was resized to match
+	     these buttons, which shrank the gap between them from 10px (the
+	     gap used everywhere else in this column) down to 6px - confirmed
+	     live. +4px here restores a measured, exact 10px gap above the
+	     native group without touching its own position (which already
+	     measured a correct ~10px gap to the attribution button below it -
+	     moving the native group itself would have fixed one gap at the
+	     other's expense). -->
+	<div class="absolute right-[10px] bottom-[159px] flex flex-col items-end gap-2.5 max-md:z-[46]">
 		<button
 			type="button"
 			onclick={locateMe}
@@ -3341,7 +3935,7 @@
 		<div bind:this={layersMenuEl} class="relative">
 			<button
 				type="button"
-				onclick={() => (layersMenuOpen = !layersMenuOpen)}
+				onclick={toggleLayersMenu}
 				aria-expanded={layersMenuOpen}
 				aria-label="Map layers"
 				class="flex h-8 w-8 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg"
@@ -3361,19 +3955,237 @@
 				</svg>
 			</button>
 			{#if layersMenuOpen}
-				<!-- Anchored above and right-aligned to the trigger, same
-				     opening direction as ThemeToggle/UnitsToggle in the right
-				     rail - and, unlike the old top-1/2/-translate-y-1/2
-				     centering this replaced, its height is capped with its own
-				     scrollbar instead of being free to grow past the map's
-				     top/bottom edges (that used to clip both the map style list
-				     and the Zones row at the bottom silently). -->
+				<!-- Desktop: opens to the LEFT of the trigger (right-full,
+				     not right-0/bottom-full) at the same bottom edge
+				     (bottom-0) - requested directly, matching the
+				     attribution button's own popup right below. Its height
+				     is capped with its own scrollbar instead of being free
+				     to grow past the map's top/bottom edges (that used to
+				     clip both the map style list and the Zones row at the
+				     bottom silently). max-md:hidden: below that, a
+				     corner-anchored popup this tall/wide ran out of room
+				     and clipped against the viewport edges, confirmed live
+				     - the bottom sheet below replaces it there instead. -->
 				<div
-					class="absolute right-0 bottom-full z-30 mb-1 flex max-h-[min(90vh,44rem)] w-72 flex-col gap-3 overflow-y-auto rounded border border-edge bg-panel/95 p-2.5"
+					class="absolute right-full bottom-0 z-30 mr-1 flex max-h-[min(90vh,44rem)] w-72 flex-col gap-3 overflow-y-auto rounded border border-edge bg-panel/95 p-2.5 max-md:hidden"
 				>
-					<div>
-						<p class="mb-1.5 text-[9px] font-medium tracking-widest text-fg-muted">MAP STYLE</p>
-						<!-- A choice, not an on/off switch - the selected card gets an
+					{@render layersMenuContent()}
+				</div>
+				<!-- Mobile: a bottom sheet instead, same non-dimming/
+				     rounded-top/safe-area treatment as the app shell's own
+				     ward-detail sheet (EdgeSheet isn't reused directly - this
+				     is the shared library component fleet-map.svelte itself,
+				     which has no JS isMobile check available to gate it with;
+				     see weatherExpandedMobile's own comment on why every
+				     mobile-only toggle here is CSS-breakpoint-gated instead).
+				     Outside-tap-to-close already works for this exactly like
+				     the desktop popup does, via the same layersMenuEl-scoped
+				     effect above - no separate catcher needed. -->
+				<div
+					bind:clientHeight={layersMenuMobileHeight}
+					class="fixed bottom-0 z-[45] hidden flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel max-md:flex"
+					style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); max-height: var(--mobile-sheet-max-height, 80vh)"
+				>
+					<SheetHeader title="Map style & layers" onclose={() => (layersMenuOpen = false)} />
+					<div class="flex flex-col gap-3 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
+						{@render layersMenuContent()}
+					</div>
+				</div>
+			{/if}
+		</div>
+	</div>
+
+	<!-- Replaces MapLibre's own native compact AttributionControl - see
+	     attributionControl: false's own comment on why, and the
+	     :global(.maplibregl-ctrl-bottom-right) rule below for why this
+	     needs its own margin now. Back in its original corner position,
+	     not grouped with locate/measure/layers: that read as a real
+	     button-order change (confirmed directly - the attribution button
+	     used to sit below NavigationControl, closest to the true corner,
+	     from MapLibre's own native bottom-right stacking order, not above
+	     it alongside this file's own custom controls). Reuses the exact
+	     same "i" glyph left-rail.svelte's own About button uses, for a
+	     consistent meaning across the app (that icon already reads as
+	     "more info" there). -->
+	<!-- max-md:z-[46]: same reasoning as the button column's own comment
+	     above - without it, a consuming app's own expanded EdgeSheet
+	     catcher silently ate every tap meant for this button too. -->
+	<div bind:this={attributionMenuEl} class="absolute right-[10px] bottom-[10px] max-md:z-[46]">
+		<button
+			type="button"
+			onclick={toggleAttributionMenu}
+			aria-expanded={attributionMenuOpen}
+			aria-label="Map data and license"
+			class="flex h-8 w-8 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg"
+		>
+			<svg
+				width="15"
+				height="15"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<circle cx="12" cy="12" r="9" />
+				<line x1="12" y1="11" x2="12" y2="16.5" />
+				<circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none" />
+			</svg>
+		</button>
+		{#if attributionMenuOpen}
+			<!-- Desktop: opens to the LEFT of the button (right-full, not
+			     right-0/bottom-full) - requested directly, sitting beside
+			     the button at the same bottom edge (bottom-0) rather than
+			     stacked above it. w-fit with no max-w: each line is
+			     whitespace-nowrap (see BASEMAP_ATTRIBUTION_LINES's own
+			     comment on why - a fixed, predictable height instead of
+			     wrapped prose), so the box sizes itself to the one
+			     genuinely longest credit rather than clipping/wrapping it
+			     under an arbitrary max-w-xs cap - confirmed live, that cap
+			     was exactly what forced the longest lines to wrap in the
+			     first place. -->
+			<div
+				class="absolute right-full bottom-0 z-30 mr-1 w-fit rounded border border-edge bg-panel/95 p-2.5 text-[10px] text-fg-muted max-md:hidden"
+			>
+				{#each BASEMAP_ATTRIBUTION_LINES as line (line)}
+					<p class="whitespace-nowrap">{line}</p>
+				{/each}
+			</div>
+			<!-- Mobile: bottom sheet, same shape as the layers menu's own -
+			     see that one's comment on why this isn't EdgeSheet directly. -->
+			<div
+				bind:clientHeight={attributionMenuMobileHeight}
+				class="fixed bottom-0 z-[45] hidden flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel max-md:flex"
+				style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); max-height: var(--mobile-sheet-max-height, 80vh)"
+			>
+				<SheetHeader title="Map data & license" onclose={() => (attributionMenuOpen = false)} />
+				<div
+					class="flex flex-col gap-0.5 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] text-[11px] text-fg-muted"
+				>
+					{#each BASEMAP_ATTRIBUTION_LINES as line (line)}
+						<p>{line}</p>
+					{/each}
+				</div>
+			</div>
+		{/if}
+	</div>
+
+	{#if selectedAircraftIcao24}
+		{@const selectedAircraft = aircraftStore.aircraft.find(
+			(candidate) => candidate.icao24 === selectedAircraftIcao24
+		)}
+		{#if selectedAircraft}
+			<!-- Mobile only (max-md:flex): tap-to-select's own info sheet (see
+			     selectAircraft's own comment on why this exists) - same
+			     hand-rolled shape as the layers/attribution sheets above, not
+			     EdgeSheet directly, for the same reason neither of those is
+			     either (no JS isMobile check available in this shared
+			     component). Desktop keeps its existing hover popup unchanged;
+			     this never renders there. Deliberately lighter than the
+			     desktop popup: the synchronous fields only, not the adsbdb
+			     enrichment fetch (route/manufacturer/country) that popup also
+			     shows - that returns a pre-built HTML string, awkward to
+			     reuse as real Svelte markup, and good enough as a smaller v1
+			     rather than holding this up for it. -->
+			<div
+				bind:clientHeight={aircraftSheetMobileHeight}
+				class="fixed bottom-0 z-[45] hidden flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel max-md:flex"
+				style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); max-height: var(--mobile-sheet-max-height, 80vh)"
+			>
+				<SheetHeader
+					title={selectedAircraft.callsign ?? 'Aircraft'}
+					onclose={() => (selectedAircraftIcao24 = undefined)}
+				>
+					{#snippet extra()}
+						{#if isAircraftEmergency(selectedAircraft)}
+							<span
+								class="rounded bg-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-critical"
+							>
+								EMERGENCY
+							</span>
+						{/if}
+						{#if selectedAircraft.isMilitary}
+							<span class="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-fg-muted">
+								MILITARY
+							</span>
+						{/if}
+					{/snippet}
+				</SheetHeader>
+				<dl
+					class="flex flex-col gap-1.5 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] text-[11px] text-fg-muted"
+				>
+					{#if isAircraftEmergency(selectedAircraft) && selectedAircraft.emergency}
+						<div class="flex justify-between gap-2">
+							<dt>Emergency</dt>
+							<dd class="text-critical">
+								{AIRCRAFT_EMERGENCY_LABELS[selectedAircraft.emergency] ??
+									selectedAircraft.emergency}
+							</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.typeDescription}
+						<div class="flex justify-between gap-2">
+							<dt>Type</dt>
+							<dd>{selectedAircraft.typeDescription}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.operator}
+						<div class="flex justify-between gap-2">
+							<dt>Operator</dt>
+							<dd>{selectedAircraft.operator}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.registration}
+						<div class="flex justify-between gap-2">
+							<dt>Registration</dt>
+							<dd>{selectedAircraft.registration}</dd>
+						</div>
+					{/if}
+					<div class="flex justify-between gap-2">
+						<dt>ICAO24</dt>
+						<dd>{selectedAircraft.icao24}</dd>
+					</div>
+					{#if selectedAircraft.yearBuilt !== undefined}
+						<div class="flex justify-between gap-2">
+							<dt>Built</dt>
+							<dd>{selectedAircraft.yearBuilt}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.altitudeM !== undefined}
+						<div class="flex justify-between gap-2">
+							<dt>Altitude</dt>
+							<dd>{formatAltitude(selectedAircraft.altitudeM, unitsStore.current)}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.velocityMS !== undefined}
+						<div class="flex justify-between gap-2">
+							<dt>Speed</dt>
+							<dd>{formatVehicleSpeed(selectedAircraft.velocityMS, unitsStore.current)}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.verticalRateMS !== undefined && Math.abs(selectedAircraft.verticalRateMS) >= 1.5}
+						<div class="flex justify-between gap-2">
+							<dt>{selectedAircraft.verticalRateMS > 0 ? 'Climbing' : 'Descending'}</dt>
+							<dd>{formatSpeed(Math.abs(selectedAircraft.verticalRateMS), unitsStore.current)}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraft.onGround}
+						<div class="flex justify-between gap-2">
+							<dt>Status</dt>
+							<dd>On ground</dd>
+						</div>
+					{/if}
+				</dl>
+			</div>
+		{/if}
+	{/if}
+
+	{#snippet layersMenuContent()}
+		<div>
+			<p class="mb-1.5 text-[9px] font-medium tracking-widest text-fg-muted">MAP STYLE</p>
+			<!-- A choice, not an on/off switch - the selected card gets an
 					     accent border and a check badge, not a checkbox, since
 					     exactly one is always active. Plain light/dark isn't offered
 					     here as its own pair: "Map" follows the app-wide theme
@@ -3384,61 +4196,60 @@
 					     (see src/lib/assets/map-style-previews/), not swatches -
 					     bundled at build time, same asset-import pattern as
 					     logo-mark.svg. -->
-						<div class="grid grid-cols-2 gap-1.5">
-							{#each MAP_STYLE_OPTIONS as option (option.id)}
-								{#if option.id !== 'roadmap' || themeStore.current === 'light'}
-									<button
-										type="button"
-										onclick={() => setMapStyle(option.id)}
-										aria-pressed={mapStyle === option.id}
-										class="relative aspect-[8/5] overflow-hidden rounded border {mapStyle ===
-										option.id
-											? 'border-accent ring-1 ring-accent'
-											: 'border-edge hover:border-fg-muted'}"
+			<div class="grid grid-cols-2 gap-1.5">
+				{#each MAP_STYLE_OPTIONS as option (option.id)}
+					{#if option.id !== 'roadmap' || themeStore.current === 'light'}
+						<button
+							type="button"
+							onclick={() => setMapStyle(option.id)}
+							aria-pressed={mapStyle === option.id}
+							class="relative aspect-[8/5] overflow-hidden rounded border {mapStyle === option.id
+								? 'border-accent ring-1 ring-accent'
+								: 'border-edge hover:border-fg-muted'}"
+						>
+							<img
+								src={stylePreviewFor(option)}
+								alt=""
+								class="h-full w-full object-cover"
+								loading="lazy"
+							/>
+							<span
+								class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 text-left text-[10px] font-medium text-white"
+							>
+								{option.label}
+							</span>
+							{#if mapStyle === option.id}
+								<span
+									class="absolute top-1 right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-white"
+									aria-hidden="true"
+								>
+									<svg
+										width="8"
+										height="8"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="3"
+										stroke-linecap="round"
+										stroke-linejoin="round"
 									>
-										<img
-											src={stylePreviewFor(option)}
-											alt=""
-											class="h-full w-full object-cover"
-											loading="lazy"
-										/>
-										<span
-											class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 text-left text-[10px] font-medium text-white"
-										>
-											{option.label}
-										</span>
-										{#if mapStyle === option.id}
-											<span
-												class="absolute top-1 right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-white"
-												aria-hidden="true"
-											>
-												<svg
-													width="8"
-													height="8"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="3"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-												>
-													<path d="M20 6 9 17l-5-5" />
-												</svg>
-											</span>
-										{/if}
-									</button>
-								{/if}
-							{/each}
-						</div>
-					</div>
-					<div class="border-t border-edge pt-2">
-						<!-- Split into two light categories instead of one flat
+										<path d="M20 6 9 17l-5-5" />
+									</svg>
+								</span>
+							{/if}
+						</button>
+					{/if}
+				{/each}
+			</div>
+		</div>
+		<div class="border-t border-edge pt-2">
+			<!-- Split into two light categories instead of one flat
 					     8-item list - purely a layout grouping (each item's own
 					     .active/no-gate rules are unchanged), but it reads as
 					     organized rather than a wall of checkboxes, and the
 					     2-column grid halves the vertical space either group
 					     needs. -->
-						<!-- Always rendered, unlike No-fly zones below: Aircraft/Obstacles/
+			<!-- Always rendered, unlike No-fly zones below: Aircraft/Obstacles/
 						     Airports are all proxied through a consuming app's own backend
 						     now (see obstacle-store.svelte.ts's own comment), so none of
 						     them need an OpenAIP key client-side any more - only geozones
@@ -3446,99 +4257,138 @@
 						     layers below - they're live traffic and structures occupying
 						     the airspace, not generic geographic reference data the way
 						     Cities/Weather/Earthquakes/Wildfires are. -->
-						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
-						<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
-								Airports
-							</label>
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
-								Aircraft
-							</label>
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
-								Obstacles
-							</label>
-							{#if geozoneStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
-									No-fly zones
-								</label>
-							{/if}
-						</div>
-						<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">DATA LAYERS</p>
-						<div class="grid grid-cols-2 gap-x-1 gap-y-0.5">
-							<!-- No .active gate: cities are a bundled dataset, not an
+			<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">AIRSPACE</p>
+			<div class="mb-2 grid grid-cols-2 gap-x-1 gap-y-0.5">
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showAirports} class="accent-accent" />
+					Airports
+				</label>
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showAircraft} class="accent-accent" />
+					Aircraft
+				</label>
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showObstacles} class="accent-accent" />
+					Obstacles
+				</label>
+				{#if geozoneStore.active}
+					<label
+						class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+					>
+						<input type="checkbox" bind:checked={showGeozones} class="accent-accent" />
+						No-fly zones
+					</label>
+				{/if}
+			</div>
+			<p class="mb-1 text-[9px] font-medium tracking-widest text-fg-muted">DATA LAYERS</p>
+			<div class="grid grid-cols-2 gap-x-1 gap-y-0.5">
+				<!-- No .active gate: cities are a bundled dataset, not an
 							     OpenAIP layer, so there's no key-configured state to
 							     wait on (see city-store.svelte.ts's own comment). -->
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showCities} class="accent-accent" />
-								Cities
-							</label>
-							<!-- No .active gate: Open-Meteo needs no key. Not a point
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showCities} class="accent-accent" />
+					Cities
+				</label>
+				<!-- No .active gate: Open-Meteo needs no key. Not a point
 							     layer like everything else here - see the weather
 							     widget itself, rendered separately below. -->
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showWeather} class="accent-accent" />
-								Weather
-							</label>
-							<!-- Same again: USGS's feed is fully open. -->
-							<label
-								class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-							>
-								<input type="checkbox" bind:checked={showEarthquakes} class="accent-accent" />
-								Earthquakes
-							</label>
-							{#if wildfireStore.active}
-								<label
-									class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-								>
-									<input type="checkbox" bind:checked={showWildfires} class="accent-accent" />
-									Wildfires
-								</label>
-							{/if}
-						</div>
-					</div>
-					<div class="border-t border-edge pt-2">
-						<label
-							class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
-						>
-							<input type="checkbox" bind:checked={showZones} class="accent-accent" />
-							Zones
-						</label>
-					</div>
-				</div>
-			{/if}
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showWeather} class="accent-accent" />
+					Weather
+				</label>
+				<!-- Same again: USGS's feed is fully open. -->
+				<label
+					class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+				>
+					<input type="checkbox" bind:checked={showEarthquakes} class="accent-accent" />
+					Earthquakes
+				</label>
+				{#if wildfireStore.active}
+					<label
+						class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+					>
+						<input type="checkbox" bind:checked={showWildfires} class="accent-accent" />
+						Wildfires
+					</label>
+				{/if}
+			</div>
 		</div>
-	</div>
+		<div class="border-t border-edge pt-2">
+			<label
+				class="flex cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-[11px] hover:bg-white/5"
+			>
+				<input type="checkbox" bind:checked={showZones} class="accent-accent" />
+				Zones
+			</label>
+		</div>
+	{/snippet}
 
 	<!-- One panel, always rendered (the scale bar - its last child, see
 	     scaleBarSlot - is meaningful on its own even with no layer rows).
 	     Dimmed until hovered as one unit: a static reference key doesn't
 	     need to compete with the map until the operator actually looks.
-	     max-sm: with up to 3 rows + the scale bar, this can grow tall
+	     max-md: with up to 3 rows + the scale bar, this can grow tall
 	     enough on a short/narrow viewport to run off-screen or reach
-	     content above it - capped with internal scroll; bottom offset
-	     reads --mobile-chrome-bottom so a consuming app's own mobile nav
-	     chrome (if any) and this panel can't drift out of sync with two
-	     independently hardcoded numbers (defaults to the desktop 10px
-	     when a consumer never sets that variable). -->
+	     content above it - capped with internal scroll. top-3, same on
+	     every breakpoint, no extra --mobile-ward-card-height offset: the
+	     map's own wrapper (the ancestor just above this one) already
+	     shifts itself down by that much via its own `top`, so this panel
+	     sticks to the wrapper's real top edge, right under the card, for
+	     free - adding the card height again here double-counted it and
+	     pushed the button noticeably below the card instead of right
+	     under it, confirmed live as a real bug. Below max-md, this panel
+	     starts collapsed into a button (same h-8 w-8/border/bg-panel
+	     treatment as the bottom-right control column, and the same
+	     CSS-breakpoint-gated collapse the weather widget above uses)
+	     rather than permanently eating this corner. -->
+	{#if !legendExpandedMobile}
+		<button
+			type="button"
+			onclick={() => (legendExpandedMobile = true)}
+			aria-label="Show map legend"
+			aria-expanded="false"
+			class="absolute top-3 left-[10px] hidden h-8 w-8 items-center justify-center rounded border border-edge bg-panel/90 text-fg-muted hover:border-fg-muted hover:text-fg max-md:z-[46] max-md:flex"
+		>
+			<svg
+				width="17"
+				height="17"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.75"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="M4 2.3 6.2 6 1.8 6Z" />
+				<line x1="10" y1="4.3" x2="21" y2="4.3" />
+				<rect x="2" y="10" width="4" height="4" rx="0.8" />
+				<line x1="10" y1="12" x2="21" y2="12" />
+				<circle cx="4" cy="20" r="2" />
+				<line x1="10" y1="20" x2="21" y2="20" />
+			</svg>
+		</button>
+	{/if}
 	<div
-		class="absolute bottom-[10px] left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5 opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-sm:bottom-[var(--mobile-chrome-bottom,10px)] max-sm:max-h-[40vh] max-sm:max-w-[70vw] max-sm:overflow-y-auto"
+		bind:this={legendMobileEl}
+		class="absolute top-3 left-[10px] flex flex-col gap-1.5 rounded border border-edge bg-panel/90 px-2 py-1.5 opacity-50 transition-opacity duration-300 ease-out hover:opacity-100 max-md:z-[46] max-md:max-h-[40vh] max-md:max-w-[80vw] max-md:overflow-y-auto {legendExpandedMobile
+			? 'max-md:opacity-100'
+			: 'max-md:hidden'}"
 	>
+		<!-- Leaf slot for the scale control's DOM node - see
+		     scaleBarSlot's own comment on why this can't just be the panel
+		     div above it. -->
+		<div use:scaleBarSlot={mapLoaded}></div>
 		{#if showZoneRow}
 			<ul class="flex gap-3" aria-label="Zone legend">
 				<li class="flex items-center gap-1 text-[10px]">
@@ -3568,45 +4418,6 @@
 					<span class="h-2 w-2 rounded-full" style="background-color: #3b9eff"></span>
 					Other airspace
 				</li>
-			</ul>
-		{/if}
-		{#if showCityRow || showAirportRow || showObstacleRow || showWildfireRow || showEarthquakeRow}
-			<ul
-				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
-					? 'border-t border-edge pt-1.5'
-					: ''}"
-				aria-label="Point layer legend"
-			>
-				{#if showCityRow}
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {CITY_COLOR}"></span>
-						Cities
-					</li>
-				{/if}
-				{#if showAirportRow}
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
-						Airports
-					</li>
-				{/if}
-				{#if showObstacleRow}
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
-						Obstacles
-					</li>
-				{/if}
-				{#if showWildfireRow}
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {WILDFIRE_COLOR}"></span>
-						Wildfires
-					</li>
-				{/if}
-				{#if showEarthquakeRow}
-					<li class="flex items-center gap-1 text-[10px]">
-						<span class="h-2 w-2 rounded-full" style="background-color: {EARTHQUAKE_COLOR}"></span>
-						Earthquakes
-					</li>
-				{/if}
 			</ul>
 		{/if}
 		{#if showWardsRow || showAircraftRow}
@@ -3652,10 +4463,45 @@
 				{/if}
 			</ul>
 		{/if}
-		<!-- Leaf slot for the scale control's DOM node - see
-		     scaleBarSlot's own comment on why this can't just be the panel
-		     div above it. -->
-		<div use:scaleBarSlot={mapLoaded}></div>
+		{#if showCityRow || showAirportRow || showObstacleRow || showWildfireRow || showEarthquakeRow}
+			<ul
+				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
+					? 'border-t border-edge pt-1.5'
+					: ''}"
+				aria-label="Point layer legend"
+			>
+				{#if showCityRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {CITY_COLOR}"></span>
+						Cities
+					</li>
+				{/if}
+				{#if showAirportRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {AIRPORT_COLOR}"></span>
+						Airports
+					</li>
+				{/if}
+				{#if showObstacleRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {OBSTACLE_COLOR}"></span>
+						Obstacles
+					</li>
+				{/if}
+				{#if showWildfireRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {WILDFIRE_COLOR}"></span>
+						Wildfires
+					</li>
+				{/if}
+				{#if showEarthquakeRow}
+					<li class="flex items-center gap-1 text-[10px]">
+						<span class="h-2 w-2 rounded-full" style="background-color: {EARTHQUAKE_COLOR}"></span>
+						Earthquakes
+					</li>
+				{/if}
+			</ul>
+		{/if}
 	</div>
 </div>
 
@@ -3684,11 +4530,31 @@
 	:global(.maplibregl-ctrl-group button + button) {
 		border-top: 1px solid var(--color-edge);
 	}
+	/* 32px, MapLibre's own default is 29px: this file's own custom buttons
+	   right above this group (locate/measure/layers) and the attribution
+	   button right below it are all h-8 (32px) - confirmed live as a real,
+	   visible size mismatch otherwise, this native group read as
+	   noticeably smaller than every button surrounding it. */
 	:global(.maplibregl-ctrl-group button) {
+		width: 32px !important;
+		height: 32px !important;
 		background: transparent;
 	}
 	:global(.maplibregl-ctrl-group button:hover) {
 		background: rgb(255 255 255 / 0.05);
+	}
+	/* Reserves the space the old native AttributionControl used to occupy
+	   at the true bottom-right corner (10px margin + its own ~32px
+	   height), now that attributionControl: false leaves only
+	   NavigationControl in this native stack - without this,
+	   NavigationControl dropped straight down to reclaim that space once
+	   the control above it in the stack was gone, confirmed live:
+	   NavigationControl ended up directly behind the custom button this
+	   file now positions in that exact spot (see attributionMenuEl's own
+	   comment). 42px = this file's own h-8 (32px) button + its usual
+	   10px gap from everything else in this corner. */
+	:global(.maplibregl-ctrl-bottom-right) {
+		margin-bottom: 42px !important;
 	}
 	:global(.maplibregl-ctrl-icon) {
 		filter: invert(1) opacity(0.7);
@@ -3852,14 +4718,15 @@
 	}
 	/* Lives inside the legend panel now (see scaleBarSlot), as a plain row
 	   matching the others there - not MapLibre's own default floating box
-	   (2px #333 border, white 75%-opacity fill). Top border is the same
-	   row divider every row above it gets, just unconditional since this
-	   one's always last. */
+	   (2px #333 border, white 75%-opacity fill). Bottom border, not the
+	   other rows' own border-top: this row is always last, so its divider
+	   closes off the panel's own bottom edge instead of separating from
+	   a row above it. */
 	:global(.maplibregl-ctrl-scale) {
 		background: transparent !important;
 		border: none !important;
-		border-top: 1px solid var(--color-edge) !important;
-		padding: 6px 0 0 !important;
+		border-bottom: 1px solid var(--color-edge) !important;
+		padding: 0 0 6px !important;
 		margin: 0 !important;
 		font-size: 10px !important;
 		line-height: 1 !important;
