@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { registerDialogOpen } from '$lib/dialog-open-count.svelte';
 
 	interface Props {
 		/** aria-label for the panel; also what a screen reader announces as the dialog's name */
@@ -29,6 +30,13 @@
 		if (!panelEl) return [];
 		return Array.from(panelEl.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
 	}
+
+	// Same "mounted fresh per open" fact the focus effect below relies on -
+	// registers this instance for the whole time it's mounted, so
+	// EdgeSheet's own Escape handling can check whether a Dialog (e.g. a
+	// disarm/land/RTL ConfirmDialog opened from inside an expanded sheet)
+	// is currently up and skip acting if so.
+	$effect(() => registerDialogOpen());
 
 	// Runs once the panel exists: moves focus onto [data-autofocus] (or the
 	// first focusable element, if a caller didn't mark one) and remembers

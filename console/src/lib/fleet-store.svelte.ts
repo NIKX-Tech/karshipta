@@ -137,6 +137,12 @@ const RELAY_DEVICE_TOKEN_STORAGE_KEY = 'karshipta.relayDeviceToken';
  * Amsterdam, refresh, ward is back in Zurich).
  */
 const DEMO_WARD_HOMES_STORAGE_KEY = 'karshipta.demoWardHomes';
+const SELECTED_WARD_STORAGE_KEY = 'karshipta.selectedWardId';
+
+function readStoredSelectedWardId(): string | undefined {
+	if (typeof localStorage === 'undefined') return undefined;
+	return localStorage.getItem(SELECTED_WARD_STORAGE_KEY) ?? undefined;
+}
 
 export function isTerminal(status: CommandStatus): boolean {
 	return (
@@ -315,6 +321,23 @@ class FleetStore {
 	/** the one active (or just-settled) calibration run per ward (karshipta#248), keyed by ward_id */
 	calibrationRuns = $state<Record<string, CalibrationRunState>>({});
 	selectedWardId = $state<string | undefined>(undefined);
+	/**
+	 * A ward ID restored from a previous session (requested directly, for a
+	 * smoother feel across a refresh) that hasn't actually reappeared in
+	 * `wards` yet - not selectedWardId itself, to avoid a brief or
+	 * permanent phantom-selected state (WardStatusStrip etc. rendering
+	 * against an ID with no corresponding ward data) if the stored ward
+	 * never comes back this session (e.g. a gateway/simulated ward whose
+	 * gateway isn't connected here). upsert() below is the one place a new
+	 * ward ID actually lands in `wards`, for either a demo respawn (near-
+	 * instant, at bindDemoEngine time) or a slower gateway sync - checking
+	 * there, not just once at construction, is what makes the restore work
+	 * for both. Cleared the moment anything calls select() explicitly (see
+	 * that method), so a user who's since picked something else never gets
+	 * silently knocked back to an old selection if the stored ward happens
+	 * to reappear later in the same session.
+	 */
+	private pendingSelectedWardId: string | undefined = readStoredSelectedWardId();
 	/** goto targeting: the panel arms it, the map's next click supplies the point */
 	gotoArming = $state(false);
 	pendingGoto = $state<{ latitudeDeg: number; longitudeDeg: number } | undefined>(undefined);
@@ -512,8 +535,15 @@ class FleetStore {
 
 	select(wardId: string | undefined): void {
 		this.selectedWardId = wardId;
+		this.pendingSelectedWardId = undefined;
 		this.cancelGoto();
 		this.cancelSetHome();
+		if (typeof localStorage === 'undefined') return;
+		if (wardId === undefined) {
+			localStorage.removeItem(SELECTED_WARD_STORAGE_KEY);
+		} else {
+			localStorage.setItem(SELECTED_WARD_STORAGE_KEY, wardId);
+		}
 	}
 
 	armGoto(): void {
@@ -1553,6 +1583,11 @@ class FleetStore {
 	private upsert(wardId: string, source: WardSource): Ward {
 		if (!(wardId in this.wards)) {
 			this.wards[wardId] = { info: undefined, state: undefined, source };
+			// Restoring a selection from a previous session (see
+			// pendingSelectedWardId's own comment) - this is the one place
+			// a ward ID actually starts existing, for a demo respawn or a
+			// gateway sync alike.
+			if (this.pendingSelectedWardId === wardId) this.select(wardId);
 		}
 		return this.wards[wardId];
 	}

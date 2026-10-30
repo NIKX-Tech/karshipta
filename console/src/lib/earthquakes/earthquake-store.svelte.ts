@@ -29,6 +29,10 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 class EarthquakeStore {
 	earthquakes = $state<Earthquake[]>([]);
 	loadError = $state<string | undefined>(undefined);
+	/** True only while a real network request is in flight, mirroring
+	 * obstacle-store.svelte.ts's/aircraft-store.svelte.ts's identical field -
+	 * fleet-map.svelte's loading toast reads this. */
+	loading = $state(false);
 
 	private source = new UsgsEarthquakeSource();
 	private visible = false;
@@ -77,6 +81,7 @@ class EarthquakeStore {
 		}
 
 		const requestId = ++this.lastRequestId;
+		this.loading = true;
 		try {
 			const earthquakes = await this.source.fetchViewport(bounds);
 			if (requestId !== this.lastRequestId) return;
@@ -92,6 +97,8 @@ class EarthquakeStore {
 			this.retryTimer = setTimeout(() => {
 				if (this.lastBounds) void this.fetchViewport(this.lastBounds);
 			}, FAILURE_COOLDOWN_MS);
+		} finally {
+			if (requestId === this.lastRequestId) this.loading = false;
 		}
 	}
 }

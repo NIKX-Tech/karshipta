@@ -64,6 +64,10 @@ function cacheKeyFor(bounds: ViewportBounds): string {
 class GeozoneStore {
 	zones = $state<Geozone[]>([]);
 	loadError = $state<string | undefined>(undefined);
+	/** True only while a real network request is in flight, mirroring
+	 * obstacle-store.svelte.ts's/aircraft-store.svelte.ts's identical field -
+	 * fleet-map.svelte's loading toast reads this. */
+	loading = $state(false);
 
 	// $state so the `active` getter (read from a template) reacts to configure()
 	private source = $state<GeozoneSource | undefined>(undefined);
@@ -169,6 +173,7 @@ class GeozoneStore {
 		const tiles = tileOpenAipBounds(bounds);
 		const tileResults: Geozone[][] = [];
 		let tileError: unknown;
+		this.loading = true;
 		await Promise.all(
 			tiles.map((tile, index) =>
 				openAipRequestGate.enqueue(async () => {
@@ -181,6 +186,7 @@ class GeozoneStore {
 			)
 		);
 		if (requestId !== this.lastRequestId) return; // superseded by a newer viewport
+		this.loading = false;
 		if (tileError !== undefined) {
 			this.loadError = tileError instanceof Error ? tileError.message : String(tileError);
 			openAipRequestGate.noteFailure();

@@ -4,6 +4,14 @@
 @import '@fontsource-variable/jetbrains-mono';
 @import '../lib/theme.css';
 
+/* iOS Safari paints the rubber-band overscroll area (and the strip behind
+   a hidden/animating toolbar) from the root element's own background, not
+   body's - leaving html unset here shows the browser's white canvas
+   default through any such gap instead of the dark theme. */
+html {
+	background-color: var(--color-ink);
+}
+
 body {
 	background-color: var(--color-ink);
 	color: var(--color-fg);
