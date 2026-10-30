@@ -37,6 +37,19 @@ rail itself.
   - **Zones tab**: draw, list, and edit keep-in/keep-out safety polygons. See "Zones" below.
 - **Events (overlay, bottom right of map)**: fleet-wide feed with severity dots and mono timestamps.
 
+## Mobile shell
+
+Below 768px, both side rails are replaced by `EdgeSheet`-based sheets (exported from console-core, see `console/README.md`) rather than attempting to squeeze two always-reserved rails next to the map - confirmed live that doing so collapses the map to near-zero width on a phone. `SheetHeader` gives every sheet (left drawer, ward sheet, layers/attribution/theme/units/about) the same title/close row.
+
+- **Left rail -> hamburger drawer**: a header hamburger toggles a left-anchored `EdgeSheet` holding the unchanged Gateway/Fleets/Events content. Hidden by default below 768px (two always-visible rail strips ate too much of a short viewport); its visibility and the active tab persist across a reload, the same "smoother on reconnect" reasoning as the selected ward below.
+- **Right panel -> bottom sheet**: selecting a ward opens a bottom `EdgeSheet` instead of the desktop side panel. Peek state shows the glanceable status strip (id, mode, armed, link, battery); expanded shows the active tab's full content behind a horizontally scrollable tab strip. Expanded height is capped per tab: Control/Mission/Zones (map-click-driven: placing a goto point, a waypoint, a zone vertex) stay capped low enough to keep the map genuinely tappable underneath; Telemetry/Configuration can expand tall. The selected ward id persists across a reload the same way the hamburger state does - a matching ward reappearing on reconnect re-selects it automatically rather than leaving the operator looking at an empty map.
+- **Aircraft get the same treatment as wards**: tap to select (desktop keeps hover), the same camera zoom/tilt/follow effect, and their own info sheet - mutually exclusive with a selected ward and with the layers/attribution sheets.
+- **Guards**: an open `ConfirmDialog` (disarm/land/RTL) owns Escape while it's up, even over an expanded sheet underneath it. Control/Mission/Zones suppress the sheet's outside-tap-to-collapse behavior entirely so a map tap reaches the map, not the sheet.
+
+### Narrow desktop (768-1057.98px)
+
+Wide enough that the shell stays two side rails rather than sheets, but still narrow enough that both expanded at once squeezes the map the same way two rails do on a phone - confirmed live. Expanding either rail in this range collapses the other; above ~1058px both may be open together as on a normal desktop viewport.
+
 ## Where the next features go
 
 | Milestone | Slot |
