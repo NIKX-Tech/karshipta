@@ -4465,7 +4465,10 @@
 		{/if}
 		{#if showCityRow || showAirportRow || showObstacleRow || showWildfireRow || showEarthquakeRow}
 			<ul
-				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
+				class="flex flex-wrap gap-3 {showZoneRow ||
+				showGeozoneRow ||
+				showWardsRow ||
+				showAircraftRow
 					? 'border-t border-edge pt-1.5'
 					: ''}"
 				aria-label="Point layer legend"
