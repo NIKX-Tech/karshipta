@@ -253,6 +253,28 @@
 	// selections while already zoomed in past this shouldn't zoom back out.
 	const SELECTED_ENTITY_ZOOM = 16;
 
+	// Aircraft get their own, shallower selected-zoom instead of reusing
+	// SELECTED_ENTITY_ZOOM - requested directly after two real, confirmed
+	// bugs at the ward value: (1) real traffic moves fast enough that one
+	// feed tick's worth of real-world travel covered a large fraction of
+	// the viewport at zoom 16, reading as a jarring jump rather than the
+	// smooth tracking wards get at their own (far slower) pace; (2) the
+	// altitude-lift marker rendering (see the aircraft marker sync
+	// effect's own liftPx) scales with on-screen pixels-per-meter, which
+	// zoom 16 made large enough that any real cruise-altitude aircraft's
+	// lift hit AIRCRAFT_MAX_LIFT_PX's hard cap - pushing the marker's
+	// actual visible body that far above its ground anchor put it
+	// off-screen above the selection camera's centered, un-lifted ground
+	// position for virtually every selection, not just an edge case. Both
+	// are fixed by the same lower zoom: less screen-space per real meter
+	// means a smaller per-tick jump AND a smaller (comfortably on-screen)
+	// lift for the same real altitude, without touching the lift formula
+	// or its cap at all. One level further out than the first attempt (13)
+	// - requested directly, on top of the follow effect's own camera
+	// compensation (see its comment) actually centering the lifted body
+	// now, not just keeping it somewhere on screen.
+	const AIRCRAFT_SELECTED_ZOOM = 12;
+
 	// Tilting the camera on selection is what actually makes the existing
 	// altitude-lift rendering (the marker's "stem" below, in the marker
 	// position effect) visible - at pitch 0 sin(pitch) is 0, so the stem
@@ -601,6 +623,32 @@
 		selectedAircraftIcao24 = icao24;
 	}
 
+	// The adsbdb.com lookup (operator/route/country/manufacturer -
+	// fetchAircraftEnrichment, below) that the desktop hover popup already
+	// fetches on hover - this is the same fetch, triggered by selection
+	// instead, so the mobile info sheet (selectedAircraftIcao24's own
+	// markup, below) shows the same detail desktop does for the exact
+	// same flight rather than a deliberately smaller subset. untrack
+	// around the aircraftStore read: this effect's only dependency should
+	// be which aircraft is selected, not that aircraft's own live
+	// position/telemetry, which changes every feed tick and would
+	// otherwise refire this fetch constantly.
+	let selectedAircraftEnrichment = $state<AircraftEnrichment | undefined>(undefined);
+	$effect(() => {
+		const icao24 = selectedAircraftIcao24;
+		selectedAircraftEnrichment = undefined;
+		if (!icao24) return;
+		const plane = untrack(() =>
+			aircraftStore.aircraft.find((candidate) => candidate.icao24 === icao24)
+		);
+		if (!plane) return;
+		const properties = aircraftPopupProperties(plane);
+		void fetchAircraftEnrichment(properties).then((enrichment) => {
+			if (selectedAircraftIcao24 !== icao24) return;
+			selectedAircraftEnrichment = enrichment;
+		});
+	});
+
 	// Mobile only, in spirit - gated by CSS breakpoint (max-md:), not a
 	// JS isMobile check: this component has no such singleton available
 	// (it's the shared library component; a consuming app's own
@@ -829,6 +877,27 @@
 	function aircraftAltitudeFraction(plane: Aircraft): number {
 		if (plane.onGround || plane.altitudeM === undefined) return 0;
 		return Math.min(1, Math.max(0, plane.altitudeM / AIRCRAFT_ALTITUDE_CEILING_M));
+	}
+
+	// Shared by the marker sync effect (sets the CSS lift that actually
+	// displaces a marker's visible body above its ground anchor) and the
+	// follow effect below (which needs the exact same number to know how
+	// far to compensate the camera so the visible body, not the ground
+	// anchor, is what ends up centered) - a single source of truth so the
+	// two can never drift apart the way two independent inline copies
+	// eventually would.
+	function aircraftLiftPx(plane: Aircraft, zoom: number, pitchDeg: number): number {
+		const altitudeFraction = aircraftAltitudeFraction(plane);
+		const pxPerMeter =
+			(WORLD_TILE_PX * Math.pow(2, zoom)) /
+			(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
+		return Math.min(
+			AIRCRAFT_MAX_LIFT_PX,
+			Math.sqrt(altitudeFraction) *
+				AIRCRAFT_LIFT_REF_M *
+				pxPerMeter *
+				Math.sin((pitchDeg * Math.PI) / 180)
+		);
 	}
 
 	function scaledAircraftColor(
@@ -1225,11 +1294,15 @@
 	//   underlying feed shape though - "ABY150", a real Air Arabia
 	//   flight registered in the UAE, had no operator at all from the
 	//   feed, but adsbdb correctly resolves "Air Arabia" from the
-	//   callsign's ICAO airline prefix alone). Only called when operator
-	//   is already missing - the feed's own field is preferred when
-	//   present. Also returns the flight's actual
-	//   origin/destination airports, real route data neither feed
-	//   otherwise provides. Confirmed live this only covers civil
+	//   callsign's ICAO airline prefix alone). Called whenever a callsign
+	//   exists, not gated on operator being missing - its own `operator`
+	//   result only ever fills a gap (the feed's own field, when present,
+	//   is what the sync Operator row already shows), but it's also the
+	//   only source of the flight's actual origin/destination airports,
+	//   real route data neither feed otherwise provides - gating the
+	//   whole call on a missing operator silently dropped Route for every
+	//   flight whose operator the feed already knew, confirmed live as a
+	//   real, reported gap. Confirmed live this only covers civil
 	//   registrations - a real military aircraft (a Royal Netherlands Air
 	//   Force Apache) returned "unknown callsign"/"unknown aircraft" from
 	//   both adsbdb endpoints, so this contributes nothing for military
@@ -1240,17 +1313,38 @@
 	//   returns photo URLs, but confirmed live those are dead links
 	//   (404 from airport-data.com on every real aircraft tried) - not
 	//   used for that reason, not because the fields don't exist.
-	async function fetchAircraftEnrichmentHtml(
+	// Structured, not pre-built HTML: the desktop hover popup renders it as
+	// a string (aircraftEnrichmentPopupHtml below), but the mobile info
+	// sheet (selectedAircraftEnrichment) needs the same fields as real
+	// Svelte markup - a shared shape both can build from, rather than the
+	// popup's own HTML string duplicated or awkwardly parsed back apart.
+	interface AircraftEnrichment {
+		operator?: string;
+		originMunicipality?: string;
+		destinationMunicipality?: string;
+		country?: string;
+		manufacturer?: string;
+	}
+
+	async function fetchAircraftEnrichment(
 		properties: Record<string, unknown>
-	): Promise<string | undefined> {
+	): Promise<AircraftEnrichment | undefined> {
 		const callsign = properties.callsign;
 		const registration = properties.registration;
-		const needsAirline = !properties.operator && typeof callsign === 'string' && callsign.trim();
+		// Gated on having a callsign at all, not on operator already being
+		// missing - the callsign lookup is also the only source of Route
+		// (origin/destination), which has nothing to do with whether the
+		// feed already knows the operator. Gating the whole fetch on a
+		// missing operator silently dropped Route for every flight whose
+		// operator the feed already reports, which in practice is most
+		// scheduled commercial traffic - confirmed as a real, reported gap,
+		// not just a theoretical one.
+		const hasCallsign = typeof callsign === 'string' && callsign.trim();
 		const hasRegistration = typeof registration === 'string' && registration.trim();
-		if (!needsAirline && !hasRegistration) return undefined;
+		if (!hasCallsign && !hasRegistration) return undefined;
 
 		const [flightrouteResult, aircraftResult] = await Promise.allSettled([
-			needsAirline
+			hasCallsign
 				? fetch(
 						`https://api.adsbdb.com/v0/callsign/${encodeURIComponent((callsign as string).trim())}`
 					).then((r) => (r.ok ? r.json() : undefined))
@@ -1262,7 +1356,7 @@
 				: Promise.resolve(undefined)
 		]);
 
-		const rows: string[] = [];
+		const enrichment: AircraftEnrichment = {};
 
 		const flightroute =
 			flightrouteResult.status === 'fulfilled' &&
@@ -1286,10 +1380,11 @@
 					? (data.destination as Record<string, unknown>).municipality
 					: undefined;
 			if (typeof airline === 'string' && airline) {
-				rows.push(popupRow('Operator', escapeHtml(airline)));
+				enrichment.operator = airline;
 			}
 			if (typeof origin === 'string' && typeof destination === 'string' && origin && destination) {
-				rows.push(popupRow('Route', `${escapeHtml(origin)} &rarr; ${escapeHtml(destination)}`));
+				enrichment.originMunicipality = origin;
+				enrichment.destinationMunicipality = destination;
 			}
 		}
 
@@ -1304,14 +1399,35 @@
 			const country = data.registered_owner_country_name;
 			const manufacturer = data.manufacturer;
 			if (typeof country === 'string' && country) {
-				rows.push(popupRow('Country', escapeHtml(country)));
+				enrichment.country = country;
 			}
 			if (typeof manufacturer === 'string' && manufacturer) {
-				rows.push(popupRow('Manufacturer', escapeHtml(manufacturer)));
+				enrichment.manufacturer = manufacturer;
 			}
 		}
 
-		if (rows.length === 0) return undefined;
+		return Object.keys(enrichment).length > 0 ? enrichment : undefined;
+	}
+
+	function aircraftEnrichmentPopupHtml(enrichment: AircraftEnrichment): string {
+		const rows: string[] = [];
+		if (enrichment.operator) {
+			rows.push(popupRow('Operator', escapeHtml(enrichment.operator)));
+		}
+		if (enrichment.originMunicipality && enrichment.destinationMunicipality) {
+			rows.push(
+				popupRow(
+					'Route',
+					`${escapeHtml(enrichment.originMunicipality)} &rarr; ${escapeHtml(enrichment.destinationMunicipality)}`
+				)
+			);
+		}
+		if (enrichment.country) {
+			rows.push(popupRow('Country', escapeHtml(enrichment.country)));
+		}
+		if (enrichment.manufacturer) {
+			rows.push(popupRow('Manufacturer', escapeHtml(enrichment.manufacturer)));
+		}
 		return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
 	}
 
@@ -1621,6 +1737,19 @@
 	// every marker on the map, not just wards. See the sync effect below
 	// for why the lift itself uses a compressed altitude rather than
 	// aircraft's literal (much larger) real-world altitude.
+	// True only for real mouse-primary devices. Touch browsers can still
+	// dispatch a synthetic mouseenter/mouseleave pair from a plain tap -
+	// confirmed live, tapping an aircraft opened this hover popup directly
+	// on top of (and immediately stale next to) the info sheet the same
+	// tap's click handler (selectAircraft, below) also opened. Gating on
+	// this instead of firing unconditionally is what keeps touch down to
+	// the one, intended interaction: tap to select, sheet only. Computed
+	// once - hover capability doesn't change mid-session the way viewport
+	// width might.
+	const supportsHoverPopups =
+		typeof window !== 'undefined' &&
+		window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
 	function aircraftMarkerElement(
 		targetMap: maplibregl.Map,
 		icao24: string,
@@ -1644,6 +1773,7 @@
 			throw new Error('fleet-map: aircraft marker template is missing its parts');
 		}
 		body.addEventListener('mouseenter', () => {
+			if (!supportsHoverPopups) return;
 			targetMap.getCanvas().style.cursor = 'pointer';
 			cancelPopupClose();
 			cancelAircraftTrailClear();
@@ -1671,12 +1801,13 @@
 				schedulePopupClose();
 				scheduleAircraftTrailClear();
 			});
-			void fetchAircraftEnrichmentHtml(properties).then((extraHtml) => {
-				if (openPopup !== popup || !extraHtml) return;
-				popup.setHTML(baseHtml + extraHtml);
+			void fetchAircraftEnrichment(properties).then((enrichment) => {
+				if (openPopup !== popup || !enrichment) return;
+				popup.setHTML(baseHtml + aircraftEnrichmentPopupHtml(enrichment));
 			});
 		});
 		body.addEventListener('mouseleave', () => {
+			if (!supportsHoverPopups) return;
 			targetMap.getCanvas().style.cursor = '';
 			schedulePopupClose();
 			scheduleAircraftTrailClear();
@@ -2535,10 +2666,56 @@
 		);
 	});
 
+	// Centers the camera on the aircraft's actual VISIBLE body (ground
+	// anchor lifted liftPx up the screen, see aircraftLiftPx), not its
+	// ground anchor - requested directly after confirming the ground-
+	// anchor-centered camera left the real, lifted marker consistently
+	// off-center (and at the old, tighter zoom, off-screen entirely).
+	// A pitched camera's projection isn't a uniform screen-space
+	// translation under a pure center change (perspective foreshortens
+	// differently near vs far), so this can't be a flat pixel-to-degree
+	// conversion - it has to go through MapLibre's own project/unproject.
+	// The derivation: project(currentCenter) always equals the exact
+	// viewport-center pixel, by definition of "center" - so
+	// unproject(targetScreen) tells us which ground point is CURRENTLY
+	// rendering at the pixel we want the real ground anchor to land on
+	// instead, and the (groundAnchor - thatPoint) error vector is exactly
+	// how far, in world space, the center needs to shift to close the
+	// gap. This is only exact for a pure horizontal pan (zoom/pitch/
+	// bearing unchanged between "current" and the corrected center) -
+	// true for every follow-tick (which never respecify zoom/pitch) and
+	// true for the fly-in's own second, short correction below (run only
+	// once the fly-in's zoom/pitch have actually settled), but NOT valid
+	// mid-fly-in while zoom/pitch are still animating, which is exactly
+	// why this is called after that animation's own moveend rather than
+	// folded into its easeTo.
+	function aircraftCompensatedCenter(
+		activeMap: maplibregl.Map,
+		plane: Aircraft
+	): { lng: number; lat: number } {
+		const liftPx = aircraftLiftPx(plane, activeMap.getZoom(), activeMap.getPitch());
+		const canvas = activeMap.getCanvas();
+		const targetScreen: [number, number] = [
+			canvas.clientWidth / 2,
+			canvas.clientHeight / 2 + liftPx
+		];
+		const errorPoint = activeMap.unproject(targetScreen);
+		const currentCenter = activeMap.getCenter();
+		return {
+			lng: currentCenter.lng + (plane.longitudeDeg - errorPoint.lng),
+			lat: currentCenter.lat + (plane.latitudeDeg - errorPoint.lat)
+		};
+	}
+
 	// Selected-aircraft equivalent of the ward follow effect directly
-	// above - same shape entirely (justSelected fly-in with zoom/pitch,
-	// then center-only follow-ticks once settled), requested directly:
+	// above - same shape (justSelected fly-in with zoom/pitch, then
+	// center-only follow-ticks once settled), requested directly:
 	// "all this selection and behavior on airplanes/aircraft as well".
+	// One real difference: AIRCRAFT_SELECTED_ZOOM, not SELECTED_ENTITY_ZOOM
+	// - see that constant's own comment for why aircraft need a shallower
+	// zoom than wards do, and every center this effect sets goes through
+	// aircraftCompensatedCenter above instead of the raw ground position,
+	// so the visible (lifted) marker is what actually lands in view.
 	// Deliberately a SEPARATE effect with its own lastFocused/focusingIn
 	// pair rather than merged into the one above: selectAircraft()/
 	// toggleSelect() already guarantee a ward and an aircraft are never
@@ -2572,12 +2749,37 @@
 			followSuspended = false;
 			activeMap.easeTo({
 				center: [plane.longitudeDeg, plane.latitudeDeg],
-				zoom: Math.max(activeMap.getZoom(), SELECTED_ENTITY_ZOOM),
+				zoom: Math.max(activeMap.getZoom(), AIRCRAFT_SELECTED_ZOOM),
 				pitch: SELECTED_ENTITY_PITCH_DEG,
 				duration: 600
 			});
 			activeMap.once('moveend', () => {
-				aircraftFocusingIn = false;
+				// Second, short correction once zoom/pitch have actually
+				// settled (see aircraftCompensatedCenter's own comment on why
+				// it can't be folded into the easeTo above). Re-reads the
+				// plane's live position rather than closing over the one
+				// captured when the fly-in started - it may well have moved
+				// during that 600ms. followSuspended/a stale selection both
+				// mean the operator or a fresh selection has since taken
+				// over; skip the correction rather than fighting either.
+				if (followSuspended || selectedAircraftIcao24 !== selectedIcao24) {
+					aircraftFocusingIn = false;
+					return;
+				}
+				const settledPlane = aircraftStore.aircraft.find(
+					(candidate) => candidate.icao24 === selectedIcao24
+				);
+				if (!settledPlane) {
+					aircraftFocusingIn = false;
+					return;
+				}
+				activeMap.easeTo({
+					center: aircraftCompensatedCenter(activeMap, settledPlane),
+					duration: 250
+				});
+				activeMap.once('moveend', () => {
+					aircraftFocusingIn = false;
+				});
 			});
 			return;
 		}
@@ -2590,7 +2792,7 @@
 		// this prevents), regardless of the exact cadence.
 		activeMap.easeTo(
 			{
-				center: [plane.longitudeDeg, plane.latitudeDeg],
+				center: aircraftCompensatedCenter(activeMap, plane),
 				duration: 600
 			},
 			SELECTION_FOLLOW_TICK_EVENT_DATA
@@ -3075,17 +3277,11 @@
 			// accurate height, just a consistent, readable "higher = lifted
 			// more" cue that stays clearly separated from ward altitude, capped
 			// at AIRCRAFT_MAX_LIFT_PX so an extreme zoom/pitch combination can't
-			// push it absurdly far off the visible map.
-			const pxPerMeter =
-				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
-				(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
-			const liftPx = Math.min(
-				AIRCRAFT_MAX_LIFT_PX,
-				Math.sqrt(altitudeFraction) *
-					AIRCRAFT_LIFT_REF_M *
-					pxPerMeter *
-					Math.sin((pitchDeg * Math.PI) / 180)
-			);
+			// push it absurdly far off the visible map. aircraftLiftPx is the
+			// same helper the selected-aircraft follow effect uses to keep the
+			// camera centered on this exact visual offset, not just the ground
+			// anchor - see that effect's own comment.
+			const liftPx = aircraftLiftPx(plane, zoomLevel, pitchDeg);
 			handle.body.style.top = `${-liftPx}px`;
 			handle.stem.style.top = `${-liftPx}px`;
 			handle.stem.style.height = `${Math.max(0, liftPx - aircraftIconSizePx(plane.category) / 2)}px`;
@@ -4083,12 +4279,10 @@
 			     EdgeSheet directly, for the same reason neither of those is
 			     either (no JS isMobile check available in this shared
 			     component). Desktop keeps its existing hover popup unchanged;
-			     this never renders there. Deliberately lighter than the
-			     desktop popup: the synchronous fields only, not the adsbdb
-			     enrichment fetch (route/manufacturer/country) that popup also
-			     shows - that returns a pre-built HTML string, awkward to
-			     reuse as real Svelte markup, and good enough as a smaller v1
-			     rather than holding this up for it. -->
+			     this never renders there. Same detail the desktop popup shows
+			     for the exact same flight, adsbdb enrichment included (see
+			     selectedAircraftEnrichment's own comment) - requested
+			     directly after the two were confirmed out of parity. -->
 			<div
 				bind:clientHeight={aircraftSheetMobileHeight}
 				class="fixed bottom-0 z-[45] hidden flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel max-md:flex"
@@ -4175,6 +4369,32 @@
 						<div class="flex justify-between gap-2">
 							<dt>Status</dt>
 							<dd>On ground</dd>
+						</div>
+					{/if}
+					{#if selectedAircraftEnrichment?.operator && !selectedAircraft.operator}
+						<div class="flex justify-between gap-2">
+							<dt>Operator</dt>
+							<dd>{selectedAircraftEnrichment.operator}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraftEnrichment?.originMunicipality && selectedAircraftEnrichment?.destinationMunicipality}
+						<div class="flex justify-between gap-2">
+							<dt>Route</dt>
+							<dd>
+								{selectedAircraftEnrichment.originMunicipality} &rarr; {selectedAircraftEnrichment.destinationMunicipality}
+							</dd>
+						</div>
+					{/if}
+					{#if selectedAircraftEnrichment?.country}
+						<div class="flex justify-between gap-2">
+							<dt>Country</dt>
+							<dd>{selectedAircraftEnrichment.country}</dd>
+						</div>
+					{/if}
+					{#if selectedAircraftEnrichment?.manufacturer}
+						<div class="flex justify-between gap-2">
+							<dt>Manufacturer</dt>
+							<dd>{selectedAircraftEnrichment.manufacturer}</dd>
 						</div>
 					{/if}
 				</dl>
@@ -4429,13 +4649,7 @@
 			     marker fill color (see the ward marker sync effect below),
 			     with nothing else on screen explaining what that color meant. -->
 			<ul
-				class="flex flex-wrap gap-3 {showZoneRow ||
-				showGeozoneRow ||
-				showCityRow ||
-				showAirportRow ||
-				showObstacleRow ||
-				showWildfireRow ||
-				showEarthquakeRow
+				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
 					? 'border-t border-edge pt-1.5'
 					: ''}"
 				aria-label="Ward and aircraft legend"
@@ -4465,7 +4679,10 @@
 		{/if}
 		{#if showCityRow || showAirportRow || showObstacleRow || showWildfireRow || showEarthquakeRow}
 			<ul
-				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
+				class="flex flex-wrap gap-3 {showZoneRow ||
+				showGeozoneRow ||
+				showWardsRow ||
+				showAircraftRow
 					? 'border-t border-edge pt-1.5'
 					: ''}"
 				aria-label="Point layer legend"
