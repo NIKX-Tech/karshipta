@@ -4429,13 +4429,7 @@
 			     marker fill color (see the ward marker sync effect below),
 			     with nothing else on screen explaining what that color meant. -->
 			<ul
-				class="flex flex-wrap gap-3 {showZoneRow ||
-				showGeozoneRow ||
-				showCityRow ||
-				showAirportRow ||
-				showObstacleRow ||
-				showWildfireRow ||
-				showEarthquakeRow
+				class="flex flex-wrap gap-3 {showZoneRow || showGeozoneRow
 					? 'border-t border-edge pt-1.5'
 					: ''}"
 				aria-label="Ward and aircraft legend"
