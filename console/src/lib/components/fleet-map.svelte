@@ -269,8 +269,11 @@
 	// are fixed by the same lower zoom: less screen-space per real meter
 	// means a smaller per-tick jump AND a smaller (comfortably on-screen)
 	// lift for the same real altitude, without touching the lift formula
-	// or its cap at all.
-	const AIRCRAFT_SELECTED_ZOOM = 13;
+	// or its cap at all. One level further out than the first attempt (13)
+	// - requested directly, on top of the follow effect's own camera
+	// compensation (see its comment) actually centering the lifted body
+	// now, not just keeping it somewhere on screen.
+	const AIRCRAFT_SELECTED_ZOOM = 12;
 
 	// Tilting the camera on selection is what actually makes the existing
 	// altitude-lift rendering (the marker's "stem" below, in the marker
@@ -876,6 +879,27 @@
 		return Math.min(1, Math.max(0, plane.altitudeM / AIRCRAFT_ALTITUDE_CEILING_M));
 	}
 
+	// Shared by the marker sync effect (sets the CSS lift that actually
+	// displaces a marker's visible body above its ground anchor) and the
+	// follow effect below (which needs the exact same number to know how
+	// far to compensate the camera so the visible body, not the ground
+	// anchor, is what ends up centered) - a single source of truth so the
+	// two can never drift apart the way two independent inline copies
+	// eventually would.
+	function aircraftLiftPx(plane: Aircraft, zoom: number, pitchDeg: number): number {
+		const altitudeFraction = aircraftAltitudeFraction(plane);
+		const pxPerMeter =
+			(WORLD_TILE_PX * Math.pow(2, zoom)) /
+			(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
+		return Math.min(
+			AIRCRAFT_MAX_LIFT_PX,
+			Math.sqrt(altitudeFraction) *
+				AIRCRAFT_LIFT_REF_M *
+				pxPerMeter *
+				Math.sin((pitchDeg * Math.PI) / 180)
+		);
+	}
+
 	function scaledAircraftColor(
 		hueDeg: number,
 		saturationPct: number,
@@ -1270,11 +1294,15 @@
 	//   underlying feed shape though - "ABY150", a real Air Arabia
 	//   flight registered in the UAE, had no operator at all from the
 	//   feed, but adsbdb correctly resolves "Air Arabia" from the
-	//   callsign's ICAO airline prefix alone). Only called when operator
-	//   is already missing - the feed's own field is preferred when
-	//   present. Also returns the flight's actual
-	//   origin/destination airports, real route data neither feed
-	//   otherwise provides. Confirmed live this only covers civil
+	//   callsign's ICAO airline prefix alone). Called whenever a callsign
+	//   exists, not gated on operator being missing - its own `operator`
+	//   result only ever fills a gap (the feed's own field, when present,
+	//   is what the sync Operator row already shows), but it's also the
+	//   only source of the flight's actual origin/destination airports,
+	//   real route data neither feed otherwise provides - gating the
+	//   whole call on a missing operator silently dropped Route for every
+	//   flight whose operator the feed already knew, confirmed live as a
+	//   real, reported gap. Confirmed live this only covers civil
 	//   registrations - a real military aircraft (a Royal Netherlands Air
 	//   Force Apache) returned "unknown callsign"/"unknown aircraft" from
 	//   both adsbdb endpoints, so this contributes nothing for military
@@ -1303,12 +1331,20 @@
 	): Promise<AircraftEnrichment | undefined> {
 		const callsign = properties.callsign;
 		const registration = properties.registration;
-		const needsAirline = !properties.operator && typeof callsign === 'string' && callsign.trim();
+		// Gated on having a callsign at all, not on operator already being
+		// missing - the callsign lookup is also the only source of Route
+		// (origin/destination), which has nothing to do with whether the
+		// feed already knows the operator. Gating the whole fetch on a
+		// missing operator silently dropped Route for every flight whose
+		// operator the feed already reports, which in practice is most
+		// scheduled commercial traffic - confirmed as a real, reported gap,
+		// not just a theoretical one.
+		const hasCallsign = typeof callsign === 'string' && callsign.trim();
 		const hasRegistration = typeof registration === 'string' && registration.trim();
-		if (!needsAirline && !hasRegistration) return undefined;
+		if (!hasCallsign && !hasRegistration) return undefined;
 
 		const [flightrouteResult, aircraftResult] = await Promise.allSettled([
-			needsAirline
+			hasCallsign
 				? fetch(
 						`https://api.adsbdb.com/v0/callsign/${encodeURIComponent((callsign as string).trim())}`
 					).then((r) => (r.ok ? r.json() : undefined))
@@ -2630,14 +2666,57 @@
 		);
 	});
 
+	// Centers the camera on the aircraft's actual VISIBLE body (ground
+	// anchor lifted liftPx up the screen, see aircraftLiftPx), not its
+	// ground anchor - requested directly after confirming the ground-
+	// anchor-centered camera left the real, lifted marker consistently
+	// off-center (and at the old, tighter zoom, off-screen entirely).
+	// A pitched camera's projection isn't a uniform screen-space
+	// translation under a pure center change (perspective foreshortens
+	// differently near vs far), so this can't be a flat pixel-to-degree
+	// conversion - it has to go through MapLibre's own project/unproject.
+	// The derivation: project(currentCenter) always equals the exact
+	// viewport-center pixel, by definition of "center" - so
+	// unproject(targetScreen) tells us which ground point is CURRENTLY
+	// rendering at the pixel we want the real ground anchor to land on
+	// instead, and the (groundAnchor - thatPoint) error vector is exactly
+	// how far, in world space, the center needs to shift to close the
+	// gap. This is only exact for a pure horizontal pan (zoom/pitch/
+	// bearing unchanged between "current" and the corrected center) -
+	// true for every follow-tick (which never respecify zoom/pitch) and
+	// true for the fly-in's own second, short correction below (run only
+	// once the fly-in's zoom/pitch have actually settled), but NOT valid
+	// mid-fly-in while zoom/pitch are still animating, which is exactly
+	// why this is called after that animation's own moveend rather than
+	// folded into its easeTo.
+	function aircraftCompensatedCenter(
+		activeMap: maplibregl.Map,
+		plane: Aircraft
+	): { lng: number; lat: number } {
+		const liftPx = aircraftLiftPx(plane, activeMap.getZoom(), activeMap.getPitch());
+		const canvas = activeMap.getCanvas();
+		const targetScreen: [number, number] = [
+			canvas.clientWidth / 2,
+			canvas.clientHeight / 2 + liftPx
+		];
+		const errorPoint = activeMap.unproject(targetScreen);
+		const currentCenter = activeMap.getCenter();
+		return {
+			lng: currentCenter.lng + (plane.longitudeDeg - errorPoint.lng),
+			lat: currentCenter.lat + (plane.latitudeDeg - errorPoint.lat)
+		};
+	}
+
 	// Selected-aircraft equivalent of the ward follow effect directly
 	// above - same shape (justSelected fly-in with zoom/pitch, then
 	// center-only follow-ticks once settled), requested directly:
 	// "all this selection and behavior on airplanes/aircraft as well".
 	// One real difference: AIRCRAFT_SELECTED_ZOOM, not SELECTED_ENTITY_ZOOM
 	// - see that constant's own comment for why aircraft need a shallower
-	// zoom than wards do. Deliberately a SEPARATE effect with its own
-	// lastFocused/focusingIn
+	// zoom than wards do, and every center this effect sets goes through
+	// aircraftCompensatedCenter above instead of the raw ground position,
+	// so the visible (lifted) marker is what actually lands in view.
+	// Deliberately a SEPARATE effect with its own lastFocused/focusingIn
 	// pair rather than merged into the one above: selectAircraft()/
 	// toggleSelect() already guarantee a ward and an aircraft are never
 	// both selected at once (see either one's own comment), so there's
@@ -2675,7 +2754,32 @@
 				duration: 600
 			});
 			activeMap.once('moveend', () => {
-				aircraftFocusingIn = false;
+				// Second, short correction once zoom/pitch have actually
+				// settled (see aircraftCompensatedCenter's own comment on why
+				// it can't be folded into the easeTo above). Re-reads the
+				// plane's live position rather than closing over the one
+				// captured when the fly-in started - it may well have moved
+				// during that 600ms. followSuspended/a stale selection both
+				// mean the operator or a fresh selection has since taken
+				// over; skip the correction rather than fighting either.
+				if (followSuspended || selectedAircraftIcao24 !== selectedIcao24) {
+					aircraftFocusingIn = false;
+					return;
+				}
+				const settledPlane = aircraftStore.aircraft.find(
+					(candidate) => candidate.icao24 === selectedIcao24
+				);
+				if (!settledPlane) {
+					aircraftFocusingIn = false;
+					return;
+				}
+				activeMap.easeTo({
+					center: aircraftCompensatedCenter(activeMap, settledPlane),
+					duration: 250
+				});
+				activeMap.once('moveend', () => {
+					aircraftFocusingIn = false;
+				});
 			});
 			return;
 		}
@@ -2688,7 +2792,7 @@
 		// this prevents), regardless of the exact cadence.
 		activeMap.easeTo(
 			{
-				center: [plane.longitudeDeg, plane.latitudeDeg],
+				center: aircraftCompensatedCenter(activeMap, plane),
 				duration: 600
 			},
 			SELECTION_FOLLOW_TICK_EVENT_DATA
@@ -3173,17 +3277,11 @@
 			// accurate height, just a consistent, readable "higher = lifted
 			// more" cue that stays clearly separated from ward altitude, capped
 			// at AIRCRAFT_MAX_LIFT_PX so an extreme zoom/pitch combination can't
-			// push it absurdly far off the visible map.
-			const pxPerMeter =
-				(WORLD_TILE_PX * Math.pow(2, zoomLevel)) /
-				(EARTH_CIRCUMFERENCE_M * Math.cos((plane.latitudeDeg * Math.PI) / 180));
-			const liftPx = Math.min(
-				AIRCRAFT_MAX_LIFT_PX,
-				Math.sqrt(altitudeFraction) *
-					AIRCRAFT_LIFT_REF_M *
-					pxPerMeter *
-					Math.sin((pitchDeg * Math.PI) / 180)
-			);
+			// push it absurdly far off the visible map. aircraftLiftPx is the
+			// same helper the selected-aircraft follow effect uses to keep the
+			// camera centered on this exact visual offset, not just the ground
+			// anchor - see that effect's own comment.
+			const liftPx = aircraftLiftPx(plane, zoomLevel, pitchDeg);
 			handle.body.style.top = `${-liftPx}px`;
 			handle.stem.style.top = `${-liftPx}px`;
 			handle.stem.style.height = `${Math.max(0, liftPx - aircraftIconSizePx(plane.category) / 2)}px`;
