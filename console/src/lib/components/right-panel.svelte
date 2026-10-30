@@ -67,13 +67,11 @@
 		const selected = fleet.selectedWardId;
 		if (selected !== undefined && previouslySelected === undefined) {
 			rightPanelUi.activeTab = 'telemetry';
-			// Desktop auto-expands the inline panel; mobile only shows the
-			// top ward-detail card (see panelHeader below) - selecting a
-			// ward shouldn't also shove the full tab content sheet over the
-			// map unasked, the way tapping a rail icon explicitly does via
-			// onRailTabChange above.
+			// Mirrors desktop's auto-expand: an operator who just selected a
+			// ward wants its telemetry, on mobile too, not just the
+			// glanceable top card.
 			if (isMobile.current) {
-				mobileSurfaceUi.close();
+				mobileSurfaceUi.openSheet();
 			} else {
 				rightPanelUi.setCollapsed(false);
 			}
@@ -253,12 +251,9 @@
 		     `!rightPanelUi.collapsed || mobileSurfaceUi.open === 'sheet'`
 		     (an OR, not an actual branch): a stale collapsed=false saved
 		     from a desktop session made the Telemetry tab highlight as
-		     selected the instant a ward was picked on mobile, even though
-		     the sheet itself correctly never opened (the selection effect
-		     above deliberately calls mobileSurfaceUi.close(), not
-		     setCollapsed(false), on mobile - see its own comment: picking a
-		     ward shows the top card and this rail, not a tab's full sheet
-		     unasked). A real ternary branch instead of an OR is what
+		     selected on mobile even mid-transition, before the selection
+		     effect above's own mobileSurfaceUi.openSheet() call actually
+		     opened the sheet. A real ternary branch instead of an OR is what
 		     actually fixes it - mobile's own highlight/mount state must
 		     come only from mobileSurfaceUi.open, never from collapsed at
 		     all. unlike left-rail.svelte's drawer, this sheet has a peek
