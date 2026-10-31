@@ -3,14 +3,22 @@ export type MobileSurface = 'drawer' | 'sheet' | 'theme' | 'units' | 'about' | n
 /**
  * Tracks which mobile-only overlay is open below the sm breakpoint, so
  * opening one closes the rest. Mirrors left-rail-ui.svelte.ts/
- * right-panel-ui.svelte.ts's singleton shape and, like them, is app-shell
- * state - not exported from this package's barrel (see index.ts's own
- * comment on EdgeSheet). A consuming app building its own mobile shell
- * with EdgeSheet gets its own copy of this exact pattern, the same way
- * karshipta-cloud already has its own rail-ui.svelte.ts rather than
- * importing this console's. Purely ephemeral (no localStorage): "what's
- * open right now" has no reason to survive a reload the way a collapsed
- * preference does.
+ * right-panel-ui.svelte.ts's singleton shape, but unlike those two, IS
+ * exported from this package's barrel (see index.ts's own comment) - this
+ * one instance is hard-wired inside ThemeToggle/UnitsToggle/AboutDialog
+ * themselves (ready-made, exported components, not raw EdgeSheet
+ * mechanics a consuming app composes itself), so a consuming app building
+ * its own mobile shell around its own ward/drawer sheets has no way to
+ * coordinate with theirs except by sharing this exact instance, not a
+ * separate copy of the pattern. Confirmed live as a real bug in
+ * karshipta-cloud before this was exported: its own left-rail.svelte/
+ * right-panel.svelte sheets were coordinated through ITS OWN separate
+ * mobile-surface-ui.svelte.ts, entirely unaware of this package's
+ * internal one - tapping Theme or Units there opened console-core's own
+ * sheet directly on top of whichever ward/drawer sheet the app's own
+ * singleton still thought was open, since the two never touched each
+ * other. Purely ephemeral (no localStorage): "what's open right now" has
+ * no reason to survive a reload the way a collapsed preference does.
  *
  * 'theme'/'units'/'about' (ThemeToggle's/UnitsToggle's/AboutDialog's own
  * mobile bottom sheets): same treatment as 'drawer'/'sheet' - they close
