@@ -293,10 +293,11 @@ export { default as Dialog } from './components/ui/dialog.svelte';
 // (unlike Dialog) never dims the map and can suppress its own
 // outside-tap-to-collapse so a map-click-driven tab (Control/Mission/
 // Zones) keeps every tap reaching the map. Pure mechanics, no app-shell
-// opinion - which tabs/labels/content it wraps, and the "only one mobile
-// surface open at once" coordination, stay per-app (see this console's
-// own left-rail-ui.svelte.ts/right-panel-ui.svelte.ts for that pattern,
-// deliberately not exported here either).
+// opinion - which tabs/labels/content it wraps stays per-app (see this
+// console's own left-rail-ui.svelte.ts/right-panel-ui.svelte.ts for that
+// pattern, deliberately not exported here either). The "only one mobile
+// surface open at once" coordination itself is NOT per-app, though - see
+// mobileSurfaceUi's own export below for why.
 export { default as EdgeSheet } from './components/ui/edge-sheet.svelte';
 // The title/close-button row every EdgeSheet consumer in this app uses -
 // not baked into EdgeSheet itself (not every consumer wants one, e.g. a
@@ -304,6 +305,14 @@ export { default as EdgeSheet } from './components/ui/edge-sheet.svelte';
 // sheet that does should render pixel-identically rather than each
 // consumer hand-rolling its own slightly-different padding/button size.
 export { default as SheetHeader } from './components/ui/sheet-header.svelte';
+// Exported (unlike left-rail-ui.svelte.ts/right-panel-ui.svelte.ts above)
+// because ThemeToggle/UnitsToggle above already hard-depend on this exact
+// instance internally (AboutDialog too, though it isn't itself exported -
+// no consuming app uses it yet) - a consuming app's own ward/drawer
+// sheets need to share it too, not a separate copy, or the two can never
+// coordinate with each other. See this module's own doc comment for the
+// real bug this fixes.
+export { mobileSurfaceUi, type MobileSurface } from './mobile-surface-ui.svelte';
 // ZonesTab and MissionTab (which composes FleetMissionWizard/List/Row) are
 // self-contained, store-driven content panels, the same category as
 // WardTelemetryTab/WardControlTab/CommandPanel above - not app-shell

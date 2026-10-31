@@ -50,43 +50,89 @@
 	// gap or overlap depending on the device.
 	let headerHeight = $state(0);
 
-	// Demo ward placement: geolocation as the default, a map click as the
-	// override, matching the pattern already proven in karshipta-cloud.
-	// Falls back to DEFAULT_MAP_CENTER, not FAKE_FLEET_CENTER: this is a
-	// user-facing "where do we put it if we don't know where you are"
-	// default, the same concern the map's own fallback above resolves, not
-	// the simulation engine's own Zurich-matching invariant.
+	// Demo ward placement: pan-to-center, not click-to-place. The spawn
+	// point is always wherever the map is currently centered, shown by a
+	// plain CSS crosshair fixed at the center of the visible map area (see
+	// the map wrapper's own markup below), never a real map marker pinned
+	// to a specific lng/lat. A marker pinned at click time had a real,
+	// confirmed bug: an operator who panned anywhere else afterward
+	// (including just looking around before placing) left it rendering
+	// off in some other, possibly off-screen, part of the map, with no
+	// visual tie to where the camera actually was any more. Centering it
+	// on the viewport instead makes that structurally impossible - it's
+	// always exactly where it looks like it is. The map is left wherever
+	// the operator already had it, not reset or geolocated out from under
+	// them, the moment they start placing - liveMapCenterLat/
+	// liveMapCenterLon (kept in sync via onMapMove below, whether placing
+	// or not) seed placeLat/placeLon at that moment and keep tracking it
+	// while placing continues. Falls back to DEFAULT_MAP_CENTER, not
+	// FAKE_FLEET_CENTER: this is a user-facing "where do we put it if we
+	// don't know where you are" default, the same concern the map's own
+	// fallback above resolves, not the simulation engine's own
+	// Zurich-matching invariant.
 	let placing = $state(false);
-	let placingLocating = $state(false);
+	let liveMapCenterLat = $state<number | undefined>(undefined);
+	let liveMapCenterLon = $state<number | undefined>(undefined);
 	let placeLat = $state(DEFAULT_MAP_CENTER.lat);
 	let placeLon = $state(DEFAULT_MAP_CENTER.lon);
+	// LocationPickerBar's own real rendered height, bound below - the
+	// placement crosshair subtracts this from the map area it centers
+	// itself in, so it lands in the middle of what's actually visible as
+	// map, not the middle of the full viewport including the space this
+	// bar covers. No separate fixed offset any more: LocationPickerBar is
+	// now a real EdgeSheet docked flush to the bottom edge (see its own
+	// comment on why), not a floating card with its own bottom-4 gap.
+	let placementBarHeight = $state(0);
 
 	function startPlacement() {
 		placing = true;
-		placeLat = DEFAULT_MAP_CENTER.lat;
-		placeLon = DEFAULT_MAP_CENTER.lon;
-		placingLocating = true;
-		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {
-			placingLocating = false;
-			placeLat = point.lat;
-			placeLon = point.lon;
-		});
+		placeLat = liveMapCenterLat ?? DEFAULT_MAP_CENTER.lat;
+		placeLon = liveMapCenterLon ?? DEFAULT_MAP_CENTER.lon;
+		// Mobile only, in effect: desktop never has a drawer/sheet open over
+		// the map in the first place. Without this, starting placement from
+		// inside the Fleets drawer (its own "+ Add Ward" is exactly how
+		// AddWardMenu's "Add demo ward" below gets here) left that drawer
+		// open on top of the map - confirmed live as a real bug, the
+		// crosshair and Deploy button were both there, both completely
+		// unreachable, covered by the still-open sheet underneath them.
+		mobileSurfaceUi.close();
 	}
 
 	function cancelPlacement() {
 		placing = false;
 	}
 
-	function confirmPlacement() {
-		fleet.addDemoWard({ lat: placeLat, lon: placeLon });
-		placing = false;
-	}
+	// LocationPickerBar's own EdgeSheet isn't tracked through
+	// mobileSurfaceUi at all (see mobileExternalSheetReserve's own
+	// comment on why) - started here, closed by Cancel/Deploy/this
+	// effect, never by that singleton. That means nothing stopped a
+	// second sheet (the Fleets drawer, Theme, Units, Add Ward) from
+	// opening right on top of it - confirmed live as a real bug, tapping
+	// the Fleet rail tab while placing opened the drawer behind/under the
+	// still-open placement sheet, two bottom sheets visible at once.
+	// mobileSurfaceUi.open flips non-null only when something else is
+	// deliberately opened (startPlacement's own mobileSurfaceUi.close()
+	// call above keeps it null for this flow's own start), so cancelling
+	// placement here only ever fires for a genuine competing sheet, not
+	// this one's own.
+	$effect(() => {
+		if (placing && mobileSurfaceUi.open !== null) cancelPlacement();
+	});
 
-	function onMapClick(latitudeDeg: number, longitudeDeg: number) {
-		if (!placing) return;
-		placingLocating = false;
-		placeLat = latitudeDeg;
-		placeLon = longitudeDeg;
+	function confirmPlacement() {
+		// Select it, not just add it - a demo ward orbits its spawn point
+		// at a random radius up to ~170m (see addDemoWard's own comment),
+		// easily wider than the viewport at the tight zoom this flow's own
+		// pan-to-center model encourages for precise placement. Selecting
+		// it hands tracking to the existing follow-camera effect, which
+		// keeps re-centering on its real live position every tick - the
+		// only thing that reliably keeps it in view regardless of zoom,
+		// requested directly after confirming "placed it, then lost track
+		// of it the moment it started moving" as a real point of
+		// confusion.
+		const wardId = fleet.addDemoWard({ lat: placeLat, lon: placeLon });
+		fleet.select(wardId);
+		placing = false;
 	}
 
 	// + env(safe-area-inset-bottom): this is the legend's actual offset
@@ -128,19 +174,34 @@
 	// viewport by the total - an open sheet should push the map (and
 	// everything positioned against it) up clear of itself, not just
 	// cover the bottom of it, confirmed live as a real bug before this.
+	// placing takes priority over mobileSurfaceUi.open, not another branch
+	// of it: LocationPickerBar's own EdgeSheet isn't coordinated through
+	// that singleton at all (it's not a left-rail trigger the way the
+	// others are), and startPlacement() already closes whatever else was
+	// open the moment placement starts, so the two never actually
+	// overlap - but reading it first here still avoids relying on that
+	// ordering to avoid a stale reserve from whatever was open a moment
+	// before. Confirmed live as a real bug without this: fleet-map.svelte's
+	// own weather toggle button, positioned against the map's own
+	// (un-shrunk) viewport bottom, rendered directly underneath/behind
+	// this sheet once it grew tall enough to reach that corner.
 	const mobileExternalSheetReserve = $derived(
 		isMobile.current
-			? mobileSurfaceUi.open === 'drawer'
-				? leftRailUi.bottomSheetHeight
-				: mobileSurfaceUi.open === 'sheet'
-					? rightPanelUi.bottomSheetHeight
-					: mobileSurfaceUi.open === 'theme'
-						? mobileSurfaceUi.themeHeight
-						: mobileSurfaceUi.open === 'units'
-							? mobileSurfaceUi.unitsHeight
-							: mobileSurfaceUi.open === 'about'
-								? mobileSurfaceUi.aboutHeight
-								: 0
+			? placing
+				? placementBarHeight
+				: mobileSurfaceUi.open === 'drawer'
+					? leftRailUi.bottomSheetHeight
+					: mobileSurfaceUi.open === 'sheet'
+						? rightPanelUi.bottomSheetHeight
+						: mobileSurfaceUi.open === 'theme'
+							? mobileSurfaceUi.themeHeight
+							: mobileSurfaceUi.open === 'units'
+								? mobileSurfaceUi.unitsHeight
+								: mobileSurfaceUi.open === 'about'
+									? mobileSurfaceUi.aboutHeight
+									: mobileSurfaceUi.open === 'add-ward'
+										? mobileSurfaceUi.addWardHeight
+										: 0
 			: 0
 	);
 
@@ -333,13 +394,45 @@
 			<FleetMap
 				centerLat={mapCenterLat}
 				centerLon={mapCenterLon}
-				{onMapClick}
+				onMapMove={(view) => {
+					liveMapCenterLat = view.lat;
+					liveMapCenterLon = view.lon;
+					if (placing) {
+						placeLat = view.lat;
+						placeLon = view.lon;
+					}
+				}}
 				crosshair={placing}
-				placementPoint={placing ? { latitudeDeg: placeLat, longitudeDeg: placeLon } : undefined}
 				hideLoadingToast={isMobile.current && mobileSurfaceUi.open === 'drawer'}
 				externalSheetOpen={isMobile.current && mobileSurfaceUi.open !== null}
 				onLocalSheetOpen={() => mobileSurfaceUi.close()}
 			/>
+			{#if placing}
+				<!-- The spawn point itself: always the exact center of the map
+				     area below, never a real map marker - see placeLat/
+				     placeLon's own comment above for why. bottom excludes
+				     LocationPickerBar's own real footprint (it's a real
+				     EdgeSheet docked flush to the bottom edge now, no extra
+				     gap to account for) so this centers in what's actually
+				     visible as map, not the viewport including the space
+				     that bar covers. pointer-events-none: this is a
+				     read-only indicator, dragging/panning underneath it
+				     must reach the map, not this overlay. -->
+				<div
+					class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-center"
+					style="bottom: {placementBarHeight}px"
+				>
+					<div
+						role="img"
+						aria-label="Selected spawn point"
+						class="flex h-6 w-6 items-center justify-center rounded-full border-2 border-accent bg-panel text-accent"
+					>
+						<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+							<circle cx="12" cy="12" r="10" />
+						</svg>
+					</div>
+				</div>
+			{/if}
 		{/if}
 		<!-- Zone drawing is the one map-click workflow that doesn't need an
 		     existing ward to start (an operator can plan safety areas before
@@ -357,8 +450,7 @@
 				<button
 					type="button"
 					onclick={confirmPlacement}
-					disabled={placingLocating}
-					class="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-50"
+					class="w-full rounded bg-accent px-4 py-3 text-sm font-semibold text-ink disabled:opacity-50"
 				>
 					Deploy here
 				</button>
@@ -366,8 +458,10 @@
 			<LocationPickerBar
 				lat={placeLat}
 				lon={placeLon}
-				locating={placingLocating}
+				locating={false}
+				label="Pan the map to move the spawn point"
 				oncancel={cancelPlacement}
+				bind:height={placementBarHeight}
 				{confirm}
 			/>
 		{/if}
