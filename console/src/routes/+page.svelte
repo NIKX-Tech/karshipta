@@ -102,6 +102,23 @@
 		placing = false;
 	}
 
+	// LocationPickerBar's own EdgeSheet isn't tracked through
+	// mobileSurfaceUi at all (see mobileExternalSheetReserve's own
+	// comment on why) - started here, closed by Cancel/Deploy/this
+	// effect, never by that singleton. That means nothing stopped a
+	// second sheet (the Fleets drawer, Theme, Units, Add Ward) from
+	// opening right on top of it - confirmed live as a real bug, tapping
+	// the Fleet rail tab while placing opened the drawer behind/under the
+	// still-open placement sheet, two bottom sheets visible at once.
+	// mobileSurfaceUi.open flips non-null only when something else is
+	// deliberately opened (startPlacement's own mobileSurfaceUi.close()
+	// call above keeps it null for this flow's own start), so cancelling
+	// placement here only ever fires for a genuine competing sheet, not
+	// this one's own.
+	$effect(() => {
+		if (placing && mobileSurfaceUi.open !== null) cancelPlacement();
+	});
+
 	function confirmPlacement() {
 		// Select it, not just add it - a demo ward orbits its spawn point
 		// at a random radius up to ~170m (see addDemoWard's own comment),
