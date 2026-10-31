@@ -450,7 +450,7 @@
 				<button
 					type="button"
 					onclick={confirmPlacement}
-					class="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-50"
+					class="w-full rounded bg-accent px-4 py-3 text-sm font-semibold text-ink disabled:opacity-50"
 				>
 					Deploy here
 				</button>

@@ -14,6 +14,15 @@
 		 * own instruction, which this component has no way to guess on its
 		 * own. Ignored while locating (that status always wins). */
 		label?: string;
+		/** A second, shorter line under the status line explaining what
+		 * happens next - requested directly after confirming "placed it,
+		 * then didn't understand why it immediately started moving" as a
+		 * real point of confusion (the same one auto-selecting the new
+		 * ward already addresses once it's deployed; this addresses it
+		 * before that, while the operator is still deciding where to put
+		 * it). Overridable the same way label is, for a caller whose demo
+		 * ward behaves differently. */
+		description?: string;
 		oncancel: () => void;
 		/** the app-specific confirm control (a plain button for a client-only
 		 * caller, a form submit for a caller with a server action) - this
@@ -26,7 +35,16 @@
 		height?: number;
 	}
 
-	let { lat, lon, locating, label, oncancel, confirm, height = $bindable(0) }: Props = $props();
+	let {
+		lat,
+		lon,
+		locating,
+		label,
+		description,
+		oncancel,
+		confirm,
+		height = $bindable(0)
+	}: Props = $props();
 </script>
 
 <!-- EdgeSheet, not a small floating centered card - confirmed live on a
@@ -57,18 +75,27 @@
 >
 	{#snippet content()}
 		<SheetHeader title="Place demo ward" onclose={oncancel} />
-		<div class="flex items-center justify-between gap-3 p-3">
-			<div class="min-w-0 text-xs">
+		<!-- flex-col, confirm on its own full-width row below the text, not
+		     squeezed beside it - requested directly, a bigger, easier
+		     target for a thumb that just finished panning the map with the
+		     same hand. pb-5 beyond EdgeSheet's own safe-area padding: extra
+		     breathing room above the home-indicator gesture area, so the
+		     button isn't sitting right at the edge either. -->
+		<div class="flex flex-col gap-3 p-4 pb-5">
+			<div class="text-xs">
 				<p class="font-medium text-fg">
 					{locating
 						? 'Finding your location...'
 						: (label ?? 'Click the map to move the spawn point')}
 				</p>
-				<p class="font-mono text-[10px] text-fg-muted tabular-nums">
+				<p class="mt-1 text-fg-muted">
+					{description ?? 'A simulated ward will spawn here and start flying automatically.'}
+				</p>
+				<p class="mt-1.5 font-mono text-[10px] text-fg-muted tabular-nums">
 					{lat.toFixed(5)}, {lon.toFixed(5)}
 				</p>
 			</div>
-			<div class="shrink-0">
+			<div class="w-full">
 				{@render confirm()}
 			</div>
 		</div>
