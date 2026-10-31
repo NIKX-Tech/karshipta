@@ -103,7 +103,18 @@
 	}
 
 	function confirmPlacement() {
-		fleet.addDemoWard({ lat: placeLat, lon: placeLon });
+		// Select it, not just add it - a demo ward orbits its spawn point
+		// at a random radius up to ~170m (see addDemoWard's own comment),
+		// easily wider than the viewport at the tight zoom this flow's own
+		// pan-to-center model encourages for precise placement. Selecting
+		// it hands tracking to the existing follow-camera effect, which
+		// keeps re-centering on its real live position every tick - the
+		// only thing that reliably keeps it in view regardless of zoom,
+		// requested directly after confirming "placed it, then lost track
+		// of it the moment it started moving" as a real point of
+		// confusion.
+		const wardId = fleet.addDemoWard({ lat: placeLat, lon: placeLon });
+		fleet.select(wardId);
 		placing = false;
 	}
 

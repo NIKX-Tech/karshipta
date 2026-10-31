@@ -125,6 +125,17 @@
 			aria-label="Add Ward"
 			aria-expanded={isMobile.current ? mobileSurfaceUi.open === 'add-ward' : compactMenuOpen}
 			onclick={() => {
+				// A selected ward's own follow effect keeps re-centering and
+				// tilting the camera toward it (fleet-map.svelte's own
+				// pitch/follow effect) - still true even once its own sheet
+				// closes, since that effect keys off fleet.selectedWardId,
+				// not which sheet happens to be visible. Left alone, that
+				// fought every pan an operator tried while placing a new
+				// ward right after. Clearing it here flattens the camera
+				// back out (the same effect's own deselect branch already
+				// does this) and frees the map to pan normally - requested
+				// directly.
+				fleet.select(undefined);
 				if (isMobile.current) {
 					mobileSurfaceUi.openAddWard('menu');
 				} else {

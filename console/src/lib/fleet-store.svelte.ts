@@ -1028,11 +1028,21 @@ class FleetStore {
 			.sort((a, b) => b.sentAtMs - a.sentAtMs);
 	}
 
-	/** spawns a new demo ward purely client-side; never touches a network */
-	addDemoWard(location?: LatLon): void {
+	/** spawns a new demo ward purely client-side; never touches a network.
+	 * Returns the new ward's id (undefined only if the demo engine itself
+	 * isn't running) so a caller can select it - a demo ward orbits its
+	 * spawn point at a random radius up to ~170m, easily wider than the
+	 * viewport at a tight zoom (confirmed live as a real bug: an operator
+	 * who zoomed in close to place one precisely then lost track of it
+	 * the moment it started moving). Selecting it hands that problem to
+	 * the existing follow-camera effect, which re-centers on its actual
+	 * live position every tick regardless of zoom, rather than guessing
+	 * at a zoom level that would reliably fit the orbit. */
+	addDemoWard(location?: LatLon): string | undefined {
 		const wardId = this.demoEngine?.spawnWard(location);
 		if (wardId) this.demoWardHomes[wardId] = location ?? FAKE_FLEET_CENTER;
 		this.persistDemoWardHomes();
+		return wardId;
 	}
 
 	removeDemoWard(wardId: string): void {
