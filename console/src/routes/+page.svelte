@@ -50,27 +50,51 @@
 	// gap or overlap depending on the device.
 	let headerHeight = $state(0);
 
-	// Demo ward placement: geolocation as the default, a map click as the
-	// override, matching the pattern already proven in karshipta-cloud.
-	// Falls back to DEFAULT_MAP_CENTER, not FAKE_FLEET_CENTER: this is a
-	// user-facing "where do we put it if we don't know where you are"
-	// default, the same concern the map's own fallback above resolves, not
-	// the simulation engine's own Zurich-matching invariant.
+	// Demo ward placement: pan-to-center, not click-to-place. The spawn
+	// point is always wherever the map is currently centered, shown by a
+	// plain CSS crosshair fixed at the center of the visible map area (see
+	// the map wrapper's own markup below), never a real map marker pinned
+	// to a specific lng/lat. A marker pinned at click time had a real,
+	// confirmed bug: an operator who panned anywhere else afterward
+	// (including just looking around before placing) left it rendering
+	// off in some other, possibly off-screen, part of the map, with no
+	// visual tie to where the camera actually was any more. Centering it
+	// on the viewport instead makes that structurally impossible - it's
+	// always exactly where it looks like it is. The map is left wherever
+	// the operator already had it, not reset or geolocated out from under
+	// them, the moment they start placing - liveMapCenterLat/
+	// liveMapCenterLon (kept in sync via onMapMove below, whether placing
+	// or not) seed placeLat/placeLon at that moment and keep tracking it
+	// while placing continues. Falls back to DEFAULT_MAP_CENTER, not
+	// FAKE_FLEET_CENTER: this is a user-facing "where do we put it if we
+	// don't know where you are" default, the same concern the map's own
+	// fallback above resolves, not the simulation engine's own
+	// Zurich-matching invariant.
 	let placing = $state(false);
-	let placingLocating = $state(false);
+	let liveMapCenterLat = $state<number | undefined>(undefined);
+	let liveMapCenterLon = $state<number | undefined>(undefined);
 	let placeLat = $state(DEFAULT_MAP_CENTER.lat);
 	let placeLon = $state(DEFAULT_MAP_CENTER.lon);
+	// LocationPickerBar's own real rendered height, bound below - the
+	// placement crosshair subtracts this (plus the bar's fixed bottom-4
+	// offset) from the map area it centers itself in, so it lands in the
+	// middle of what's actually visible as map, not the middle of the
+	// full viewport including the space this bar covers.
+	let placementBarHeight = $state(0);
+	const PLACEMENT_BAR_BOTTOM_OFFSET_PX = 16; // bottom-4, LocationPickerBar's own fixed offset
 
 	function startPlacement() {
 		placing = true;
-		placeLat = DEFAULT_MAP_CENTER.lat;
-		placeLon = DEFAULT_MAP_CENTER.lon;
-		placingLocating = true;
-		void locateOrFallback(DEFAULT_MAP_CENTER).then((point) => {
-			placingLocating = false;
-			placeLat = point.lat;
-			placeLon = point.lon;
-		});
+		placeLat = liveMapCenterLat ?? DEFAULT_MAP_CENTER.lat;
+		placeLon = liveMapCenterLon ?? DEFAULT_MAP_CENTER.lon;
+		// Mobile only, in effect: desktop never has a drawer/sheet open over
+		// the map in the first place. Without this, starting placement from
+		// inside the Fleets drawer (its own "+ Add Ward" is exactly how
+		// AddWardMenu's "Add demo ward" below gets here) left that drawer
+		// open on top of the map - confirmed live as a real bug, the
+		// crosshair and Deploy button were both there, both completely
+		// unreachable, covered by the still-open sheet underneath them.
+		mobileSurfaceUi.close();
 	}
 
 	function cancelPlacement() {
@@ -80,13 +104,6 @@
 	function confirmPlacement() {
 		fleet.addDemoWard({ lat: placeLat, lon: placeLon });
 		placing = false;
-	}
-
-	function onMapClick(latitudeDeg: number, longitudeDeg: number) {
-		if (!placing) return;
-		placingLocating = false;
-		placeLat = latitudeDeg;
-		placeLon = longitudeDeg;
 	}
 
 	// + env(safe-area-inset-bottom): this is the legend's actual offset
@@ -140,7 +157,9 @@
 							? mobileSurfaceUi.unitsHeight
 							: mobileSurfaceUi.open === 'about'
 								? mobileSurfaceUi.aboutHeight
-								: 0
+								: mobileSurfaceUi.open === 'add-ward'
+									? mobileSurfaceUi.addWardHeight
+									: 0
 			: 0
 	);
 
@@ -333,13 +352,44 @@
 			<FleetMap
 				centerLat={mapCenterLat}
 				centerLon={mapCenterLon}
-				{onMapClick}
+				onMapMove={(view) => {
+					liveMapCenterLat = view.lat;
+					liveMapCenterLon = view.lon;
+					if (placing) {
+						placeLat = view.lat;
+						placeLon = view.lon;
+					}
+				}}
 				crosshair={placing}
-				placementPoint={placing ? { latitudeDeg: placeLat, longitudeDeg: placeLon } : undefined}
 				hideLoadingToast={isMobile.current && mobileSurfaceUi.open === 'drawer'}
 				externalSheetOpen={isMobile.current && mobileSurfaceUi.open !== null}
 				onLocalSheetOpen={() => mobileSurfaceUi.close()}
 			/>
+			{#if placing}
+				<!-- The spawn point itself: always the exact center of the map
+				     area below, never a real map marker - see placeLat/
+				     placeLon's own comment above for why. bottom excludes
+				     LocationPickerBar's own footprint (its real height plus its
+				     fixed bottom-4 offset) so this centers in what's actually
+				     visible as map, not the viewport including the space that
+				     bar covers. pointer-events-none: this is a read-only
+				     indicator, dragging/panning underneath it must reach the
+				     map, not this overlay. -->
+				<div
+					class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-center"
+					style="bottom: {placementBarHeight + PLACEMENT_BAR_BOTTOM_OFFSET_PX}px"
+				>
+					<div
+						role="img"
+						aria-label="Selected spawn point"
+						class="flex h-6 w-6 items-center justify-center rounded-full border-2 border-accent bg-panel text-accent"
+					>
+						<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+							<circle cx="12" cy="12" r="10" />
+						</svg>
+					</div>
+				</div>
+			{/if}
 		{/if}
 		<!-- Zone drawing is the one map-click workflow that doesn't need an
 		     existing ward to start (an operator can plan safety areas before
@@ -357,7 +407,6 @@
 				<button
 					type="button"
 					onclick={confirmPlacement}
-					disabled={placingLocating}
 					class="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-ink disabled:opacity-50"
 				>
 					Deploy here
@@ -366,8 +415,10 @@
 			<LocationPickerBar
 				lat={placeLat}
 				lon={placeLon}
-				locating={placingLocating}
+				locating={false}
+				label="Pan the map to move the spawn point"
 				oncancel={cancelPlacement}
+				bind:height={placementBarHeight}
 				{confirm}
 			/>
 		{/if}
