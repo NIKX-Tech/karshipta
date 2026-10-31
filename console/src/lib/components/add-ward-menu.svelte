@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { fleet } from '$lib/fleet-store.svelte';
+	import { isMobile } from '$lib/is-mobile.svelte';
+	import { mobileSurfaceUi } from '$lib/mobile-surface-ui.svelte';
 	import AddWardDialog from '$lib/components/add-ward-dialog.svelte';
 	import Dialog from '$lib/components/ui/dialog.svelte';
 
@@ -38,10 +40,18 @@
 		};
 	});
 
+	// onopenconnection (leftRailUi.openGatewayTab) only sets which tab is
+	// active; on mobile the drawer's own visibility is a separate
+	// mobileSurfaceUi.open check it never touches, so pairing it with
+	// nothing else left the operator looking at a bare map with the
+	// Gateway tab's content never actually shown - confirmed live as a
+	// real bug, not just here (see add-ward-mobile-sheet.svelte's own
+	// identical fix).
 	function openSimulated() {
 		compactMenuOpen = false;
 		if (!fleet.gatewayConnected) {
 			onopenconnection();
+			if (isMobile.current) mobileSurfaceUi.openDrawer();
 			return;
 		}
 		if (fleet.simulatedWardAddCount >= SIMULATED_WARNING_THRESHOLD) {
@@ -54,16 +64,25 @@
 	function startSimulated() {
 		simConfirmOpen = false;
 		fleet.noteSimulatedWardRequested();
-		dialogMode = 'simulated';
+		if (isMobile.current) {
+			mobileSurfaceUi.openAddWard('simulated');
+		} else {
+			dialogMode = 'simulated';
+		}
 	}
 
 	function openReal() {
 		compactMenuOpen = false;
 		if (!fleet.gatewayConnected) {
 			onopenconnection();
+			if (isMobile.current) mobileSurfaceUi.openDrawer();
 			return;
 		}
-		dialogMode = 'real';
+		if (isMobile.current) {
+			mobileSurfaceUi.openAddWard('real');
+		} else {
+			dialogMode = 'real';
+		}
 	}
 
 	function addDemo() {
@@ -104,12 +123,23 @@
 		<button
 			class="rounded border border-accent/60 bg-accent/15 px-2 py-1 font-mono text-xs font-medium text-accent hover:bg-accent/25"
 			aria-label="Add Ward"
-			aria-expanded={compactMenuOpen}
-			onclick={() => (compactMenuOpen = !compactMenuOpen)}
+			aria-expanded={isMobile.current ? mobileSurfaceUi.open === 'add-ward' : compactMenuOpen}
+			onclick={() => {
+				if (isMobile.current) {
+					mobileSurfaceUi.openAddWard('menu');
+				} else {
+					compactMenuOpen = !compactMenuOpen;
+				}
+			}}
 		>
 			+ Add Ward
 		</button>
-		{#if compactMenuOpen}
+		<!-- Desktop only - mobile's own trigger above opens the dedicated
+		     sheet rendered once in left-rail.svelte (add-ward-mobile-sheet.svelte)
+		     instead, which stays mounted when this component (nested inside
+		     the Fleets drawer's own closable content) does not - see that
+		     file's own comment for the real bug this avoids. -->
+		{#if compactMenuOpen && !isMobile.current}
 			<div
 				role="menu"
 				class="absolute top-full left-0 z-30 mt-1 w-56 rounded border border-edge bg-panel p-1.5"

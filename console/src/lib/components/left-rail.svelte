@@ -5,6 +5,7 @@
 	import { isMobile } from '$lib/is-mobile.svelte';
 	import { mobileSurfaceUi } from '$lib/mobile-surface-ui.svelte';
 	import AddWardMenu from '$lib/components/add-ward-menu.svelte';
+	import AddWardMobileSheet from '$lib/components/add-ward-mobile-sheet.svelte';
 	import WardCard from '$lib/components/ward-card.svelte';
 	import FleetRow from '$lib/components/fleet-row.svelte';
 	import EventsFeed from '$lib/components/events-feed.svelte';
@@ -247,6 +248,13 @@
 			<div class="max-md:order-1"><ThemeToggle /></div>
 			<div class="max-md:order-1"><AboutDialog /></div>
 		</div>
+
+		{#if isMobile.current}
+			<AddWardMobileSheet
+				onopenconnection={() => leftRailUi.openGatewayTab()}
+				{onstartdemoplacement}
+			/>
+		{/if}
 
 		{#if !leftRailUi.collapsed && !isMobile.current}
 			<aside id="left-rail-content" class="flex w-80 flex-col" aria-label={activeLabel}>
