@@ -165,10 +165,21 @@
 			     above the breakpoint, so DOM order (this group first)
 			     keeps rendering exactly as before. -->
 			<div class="max-md:relative max-md:z-[46] max-md:order-3">
+				<!-- showSelection: a real branch, not `!leftRailUi.collapsed ||
+				     mobileSurfaceUi.open === 'drawer'` - confirmed live as a
+				     real bug, that OR left the Fleet tab showing highlighted
+				     on mobile even with the drawer fully closed (collapsed
+				     is a desktop-only concept, see its own field comment,
+				     and defaults false - so `!collapsed` alone is true on
+				     mobile from the moment the page loads, regardless of
+				     mobileSurfaceUi.open). Mirrors right-panel.svelte's own
+				     identical fix for the exact same OR-vs-branch bug. -->
 				<Tabs
 					tabs={TABS}
 					activeId={leftRailUi.activeTab}
-					showSelection={!leftRailUi.collapsed || mobileSurfaceUi.open === 'drawer'}
+					showSelection={isMobile.current
+						? mobileSurfaceUi.open === 'drawer'
+						: !leftRailUi.collapsed}
 					onchange={onRailTabChange}
 					orientation="vertical"
 				>

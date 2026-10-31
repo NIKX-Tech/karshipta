@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import EdgeSheet from './ui/edge-sheet.svelte';
+	import SheetHeader from './ui/sheet-header.svelte';
 
 	interface Props {
 		lat: number;
@@ -20,37 +22,55 @@
 		/** This bar's own real rendered height in px - bindable so a caller
 		 * can keep an on-screen crosshair (or anything else reasoning about
 		 * "the visible map area") centered above it rather than centered on
-		 * the full viewport including the space this bar covers. Same
-		 * bind:panelHeight shape EdgeSheet already exposes for the same
-		 * reason. */
+		 * the full viewport including the space this bar covers. */
 		height?: number;
 	}
 
 	let { lat, lon, locating, label, oncancel, confirm, height = $bindable(0) }: Props = $props();
 </script>
 
-<!-- bottom-[calc(1rem+env(...))]: fixed-to-bottom-4, so without this it
-     sits inside the home-indicator curve's own territory on a phone -
-     same class of bug as fleet-map.svelte's legend panel. -->
-<div
-	role="status"
-	bind:clientHeight={height}
-	class="fixed bottom-[calc(1rem+env(safe-area-inset-bottom,0px))] left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded border border-edge bg-panel px-4 py-2.5 shadow-lg"
+<!-- EdgeSheet, not a small floating centered card - confirmed live on a
+     real device as a real bug, the old centered card sat half behind the
+     map's own right-side zoom/measure controls and generally read as
+     cramped. suppressOutsideDismiss: the whole point of this flow is
+     panning the map underneath to choose a spot - EdgeSheet's own
+     outside-tap catcher would otherwise sit on top of the map and both
+     dismiss the sheet AND eat the drag gesture a pan needs, confirmed
+     live as the real "map doesn't move any more" bug this fixes.
+     expanded (always true, no peek): this has no lesser "glanceable
+     summary" state the way a ward detail sheet's peek does - it's either
+     up, doing its one job, or not shown at all. requireExplicitClose
+     deliberately left off: unlike the other left-rail sheets (skimmed
+     content, a stray dismiss would lose nothing), this is an active task
+     - Escape canceling it (same as the header's own X) is expected, not
+     a footgun. No separate Cancel button next to confirm any more
+     (requested directly): the header X already is Cancel, a second one
+     right below it was redundant. -->
+<EdgeSheet
+	edge="bottom"
+	open={true}
+	expanded
+	suppressOutsideDismiss
+	label="Place demo ward"
+	onclose={oncancel}
+	bind:panelHeight={height}
 >
-	<div class="text-xs">
-		<p class="font-medium text-fg">
-			{locating ? 'Finding your location...' : (label ?? 'Click the map to move the spawn point')}
-		</p>
-		<p class="font-mono text-[10px] text-fg-muted tabular-nums">
-			{lat.toFixed(5)}, {lon.toFixed(5)}
-		</p>
-	</div>
-	{@render confirm()}
-	<button
-		type="button"
-		onclick={oncancel}
-		class="rounded border border-edge px-3 py-1.5 text-xs text-fg-muted hover:text-fg"
-	>
-		Cancel
-	</button>
-</div>
+	{#snippet content()}
+		<SheetHeader title="Place demo ward" onclose={oncancel} />
+		<div class="flex items-center justify-between gap-3 p-3">
+			<div class="min-w-0 text-xs">
+				<p class="font-medium text-fg">
+					{locating
+						? 'Finding your location...'
+						: (label ?? 'Click the map to move the spawn point')}
+				</p>
+				<p class="font-mono text-[10px] text-fg-muted tabular-nums">
+					{lat.toFixed(5)}, {lon.toFixed(5)}
+				</p>
+			</div>
+			<div class="shrink-0">
+				{@render confirm()}
+			</div>
+		</div>
+	{/snippet}
+</EdgeSheet>

@@ -76,12 +76,13 @@
 	let placeLat = $state(DEFAULT_MAP_CENTER.lat);
 	let placeLon = $state(DEFAULT_MAP_CENTER.lon);
 	// LocationPickerBar's own real rendered height, bound below - the
-	// placement crosshair subtracts this (plus the bar's fixed bottom-4
-	// offset) from the map area it centers itself in, so it lands in the
-	// middle of what's actually visible as map, not the middle of the
-	// full viewport including the space this bar covers.
+	// placement crosshair subtracts this from the map area it centers
+	// itself in, so it lands in the middle of what's actually visible as
+	// map, not the middle of the full viewport including the space this
+	// bar covers. No separate fixed offset any more: LocationPickerBar is
+	// now a real EdgeSheet docked flush to the bottom edge (see its own
+	// comment on why), not a floating card with its own bottom-4 gap.
 	let placementBarHeight = $state(0);
-	const PLACEMENT_BAR_BOTTOM_OFFSET_PX = 16; // bottom-4, LocationPickerBar's own fixed offset
 
 	function startPlacement() {
 		placing = true;
@@ -145,21 +146,34 @@
 	// viewport by the total - an open sheet should push the map (and
 	// everything positioned against it) up clear of itself, not just
 	// cover the bottom of it, confirmed live as a real bug before this.
+	// placing takes priority over mobileSurfaceUi.open, not another branch
+	// of it: LocationPickerBar's own EdgeSheet isn't coordinated through
+	// that singleton at all (it's not a left-rail trigger the way the
+	// others are), and startPlacement() already closes whatever else was
+	// open the moment placement starts, so the two never actually
+	// overlap - but reading it first here still avoids relying on that
+	// ordering to avoid a stale reserve from whatever was open a moment
+	// before. Confirmed live as a real bug without this: fleet-map.svelte's
+	// own weather toggle button, positioned against the map's own
+	// (un-shrunk) viewport bottom, rendered directly underneath/behind
+	// this sheet once it grew tall enough to reach that corner.
 	const mobileExternalSheetReserve = $derived(
 		isMobile.current
-			? mobileSurfaceUi.open === 'drawer'
-				? leftRailUi.bottomSheetHeight
-				: mobileSurfaceUi.open === 'sheet'
-					? rightPanelUi.bottomSheetHeight
-					: mobileSurfaceUi.open === 'theme'
-						? mobileSurfaceUi.themeHeight
-						: mobileSurfaceUi.open === 'units'
-							? mobileSurfaceUi.unitsHeight
-							: mobileSurfaceUi.open === 'about'
-								? mobileSurfaceUi.aboutHeight
-								: mobileSurfaceUi.open === 'add-ward'
-									? mobileSurfaceUi.addWardHeight
-									: 0
+			? placing
+				? placementBarHeight
+				: mobileSurfaceUi.open === 'drawer'
+					? leftRailUi.bottomSheetHeight
+					: mobileSurfaceUi.open === 'sheet'
+						? rightPanelUi.bottomSheetHeight
+						: mobileSurfaceUi.open === 'theme'
+							? mobileSurfaceUi.themeHeight
+							: mobileSurfaceUi.open === 'units'
+								? mobileSurfaceUi.unitsHeight
+								: mobileSurfaceUi.open === 'about'
+									? mobileSurfaceUi.aboutHeight
+									: mobileSurfaceUi.open === 'add-ward'
+										? mobileSurfaceUi.addWardHeight
+										: 0
 			: 0
 	);
 
@@ -369,15 +383,16 @@
 				<!-- The spawn point itself: always the exact center of the map
 				     area below, never a real map marker - see placeLat/
 				     placeLon's own comment above for why. bottom excludes
-				     LocationPickerBar's own footprint (its real height plus its
-				     fixed bottom-4 offset) so this centers in what's actually
-				     visible as map, not the viewport including the space that
-				     bar covers. pointer-events-none: this is a read-only
-				     indicator, dragging/panning underneath it must reach the
-				     map, not this overlay. -->
+				     LocationPickerBar's own real footprint (it's a real
+				     EdgeSheet docked flush to the bottom edge now, no extra
+				     gap to account for) so this centers in what's actually
+				     visible as map, not the viewport including the space
+				     that bar covers. pointer-events-none: this is a
+				     read-only indicator, dragging/panning underneath it
+				     must reach the map, not this overlay. -->
 				<div
 					class="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-center"
-					style="bottom: {placementBarHeight + PLACEMENT_BAR_BOTTOM_OFFSET_PX}px"
+					style="bottom: {placementBarHeight}px"
 				>
 					<div
 						role="img"
