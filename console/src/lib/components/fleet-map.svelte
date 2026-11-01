@@ -551,6 +551,30 @@
 	// (right-panel.svelte's whole tab system depends on that one).
 	let selectedAircraftIcao24 = $state<string | undefined>(undefined);
 
+	// Tap-to-select for Obstacles/Airports/Cities/Wildfires/Earthquakes -
+	// mobile's own equivalent of their shared desktop hover popup, the
+	// same reasoning selectAircraft's own comment gives (touch has no
+	// hover gesture at all). One shared state for all five rather than
+	// one per layer: they're mutually exclusive with each other the same
+	// way they're mutually exclusive with the aircraft/ward sheets below,
+	// so there's never more than one "selected map thing" regardless of
+	// which kind it is. Keyed by layerId + the feature's own ground
+	// coordinates (not every point layer's GeoJSON properties carry a
+	// stable id field under the same name) - "tapping the same feature
+	// again deselects" only needs to recognize the same point, not a
+	// universally unique id. Declared up here (ahead of
+	// mobileLocalSheetReserve below, which reads it) rather than next to
+	// selectPointFeature() itself, since Svelte 5's $state still has a
+	// real TDZ a $derived can't be declared ahead of.
+	interface SelectedPointFeature {
+		layerId: string;
+		lngLat: [number, number];
+		data: PointFeatureData;
+		properties: Record<string, unknown>;
+		fetchExtra?: (properties: Record<string, unknown>) => Promise<PointFeatureField[] | undefined>;
+	}
+	let selectedPointFeature = $state<SelectedPointFeature | undefined>(undefined);
+
 	// Mobile bottom sheet heights, real measured values (content varies -
 	// the layers menu is much taller than the attribution credits line),
 	// fed into the map container's own height below so an open sheet
@@ -566,6 +590,7 @@
 	let layersMenuMobileHeight = $state(0);
 	let attributionMenuMobileHeight = $state(0);
 	let aircraftSheetMobileHeight = $state(0);
+	let pointFeatureSheetMobileHeight = $state(0);
 	const mobileLocalSheetReserve = $derived(
 		layersMenuOpen
 			? layersMenuMobileHeight
@@ -573,7 +598,9 @@
 				? attributionMenuMobileHeight
 				: selectedAircraftIcao24 !== undefined
 					? aircraftSheetMobileHeight
-					: 0
+					: selectedPointFeature !== undefined
+						? pointFeatureSheetMobileHeight
+						: 0
 	);
 
 	// externalSheetOpen flipping true (a consuming app's own ward-detail/
@@ -587,6 +614,7 @@
 			layersMenuOpen = false;
 			attributionMenuOpen = false;
 			selectedAircraftIcao24 = undefined;
+			selectedPointFeature = undefined;
 		}
 	});
 
@@ -594,6 +622,7 @@
 		if (!layersMenuOpen) {
 			attributionMenuOpen = false;
 			selectedAircraftIcao24 = undefined;
+			selectedPointFeature = undefined;
 			onLocalSheetOpen?.();
 		}
 		layersMenuOpen = !layersMenuOpen;
@@ -602,6 +631,7 @@
 		if (!attributionMenuOpen) {
 			layersMenuOpen = false;
 			selectedAircraftIcao24 = undefined;
+			selectedPointFeature = undefined;
 			onLocalSheetOpen?.();
 		}
 		attributionMenuOpen = !attributionMenuOpen;
@@ -618,10 +648,65 @@
 		}
 		layersMenuOpen = false;
 		attributionMenuOpen = false;
+		selectedPointFeature = undefined;
 		fleet.select(undefined);
 		onLocalSheetOpen?.();
 		selectedAircraftIcao24 = icao24;
 	}
+
+	// geojson-vt (MapLibre's own internal tiling for a plain GeoJSON source,
+	// which every one of these five layers is) reconstructs a feature's
+	// coordinates from tile-local integer precision on each query, so two
+	// queryRenderedFeatures calls at the exact same screen pixel and camera
+	// position can return lngLat values that differ by a tiny float epsilon
+	// - confirmed live as a real bug otherwise: exact === comparison here
+	// meant tapping the same dot a second time never matched its own first
+	// selection, so it never toggled off no matter how many times it was
+	// tapped. A hundred-thousandth of a degree is sub-meter at any latitude
+	// this app operates at, well under "the same point" for toggle purposes.
+	const SAME_POINT_FEATURE_EPSILON_DEG = 1e-5;
+	function selectPointFeature(
+		layerId: string,
+		lngLat: [number, number],
+		data: PointFeatureData,
+		properties: Record<string, unknown>,
+		fetchExtra?: (properties: Record<string, unknown>) => Promise<PointFeatureField[] | undefined>
+	) {
+		if (
+			selectedPointFeature?.layerId === layerId &&
+			Math.abs(selectedPointFeature.lngLat[0] - lngLat[0]) < SAME_POINT_FEATURE_EPSILON_DEG &&
+			Math.abs(selectedPointFeature.lngLat[1] - lngLat[1]) < SAME_POINT_FEATURE_EPSILON_DEG
+		) {
+			selectedPointFeature = undefined;
+			return;
+		}
+		layersMenuOpen = false;
+		attributionMenuOpen = false;
+		selectedAircraftIcao24 = undefined;
+		fleet.select(undefined);
+		onLocalSheetOpen?.();
+		selectedPointFeature = { layerId, lngLat, data, properties, fetchExtra };
+	}
+
+	// Same reasoning fetchAircraftEnrichment's own effect gives: the only
+	// dependency should be which feature is selected, not anything that
+	// changes on its own afterward (there's nothing live here the way an
+	// aircraft's own position is, but the pattern is still the same
+	// "fetch once per selection" shape). Separate from
+	// selectedPointFeature.fetchExtra itself since a layer with no extra
+	// fetch at all (Obstacles/Cities/Wildfires/Earthquakes) should never
+	// need to touch this.
+	let selectedPointFeatureExtraFields = $state<PointFeatureField[] | undefined>(undefined);
+	$effect(() => {
+		const selected = selectedPointFeature;
+		selectedPointFeatureExtraFields = undefined;
+		if (!selected?.fetchExtra) return;
+		const fetchExtra = selected.fetchExtra;
+		void fetchExtra(selected.properties).then((fields) => {
+			if (selectedPointFeature !== selected) return;
+			selectedPointFeatureExtraFields = fields;
+		});
+	});
 
 	// The adsbdb.com lookup (operator/route/country/manufacturer -
 	// fetchAircraftEnrichment, below) that the desktop hover popup already
@@ -1049,41 +1134,108 @@
 		return `<div class="flex justify-between gap-3"><span class="text-fg-muted">${label}</span><span>${value}</span></div>`;
 	}
 
-	function buildObstaclePopupHtml(properties: Record<string, unknown>): string {
-		const name = typeof properties.name === 'string' ? properties.name : 'Obstacle';
-		const rows: string[] = [];
-		if (typeof properties.heightM === 'number') {
-			rows.push(popupRow('Height', formatAltitude(properties.heightM, unitsStore.current)));
-		}
-		if (typeof properties.elevationM === 'number') {
-			rows.push(
-				popupRow('Elevation', `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`)
-			);
-		}
-		if (typeof properties.countryCode === 'string') {
-			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
-		}
-		let wikiLink = '';
-		if (typeof properties.wikipediaUrl === 'string') {
-			const href = escapeHtml(properties.wikipediaUrl);
-			wikiLink = `<a href="${href}" target="_blank" rel="noreferrer" class="text-accent hover:underline">Wikipedia &#8599;</a>`;
-		}
-		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}${wikiLink}</div>`;
+	// Structured point-layer feature data - not pre-built HTML. The desktop
+	// hover popup (an HTML string; MapLibre's Popup API has no other way to
+	// take content) and the mobile tap-to-select sheet (real Svelte <dl>
+	// rows, matching every other mobile sheet in this app - ward,
+	// aircraft, Add Ward) both render from this same shape, the same
+	// split AircraftEnrichment above already uses for the identical
+	// desktop-popup-vs-mobile-sheet reason. One shared shape for every
+	// point layer (Obstacles/Airports/Cities/Wildfires/Earthquakes), not
+	// five near-identical ones - requested directly after confirming only
+	// Aircraft had gotten the mobile tap-to-select treatment, these five
+	// hadn't.
+	interface PointFeatureField {
+		label: string;
+		value: string;
+		/** A real USGS/NOAA-provided classification color (e.g. an
+		 * earthquake's own PAGER alert level) - kept as the literal CSS
+		 * color they report, not mapped through a semantic token, since
+		 * it's their classification, not this app inventing a severity
+		 * scale. */
+		color?: string;
+	}
+	interface PointFeatureBadge {
+		label: string;
+		tone: 'critical' | 'muted';
+	}
+	interface PointFeatureLink {
+		label: string;
+		href: string;
+	}
+	interface PointFeatureData {
+		title: string;
+		badges?: PointFeatureBadge[];
+		fields: PointFeatureField[];
+		link?: PointFeatureLink;
 	}
 
-	function buildAirportPopupHtml(properties: Record<string, unknown>): string {
-		const name = typeof properties.name === 'string' ? properties.name : 'Airport';
-		const rows: string[] = [];
-		if (typeof properties.icaoCode === 'string') {
-			rows.push(popupRow('ICAO', escapeHtml(properties.icaoCode)));
+	function renderPointFeatureHtml(data: PointFeatureData): string {
+		const badgeHtml =
+			data.badges && data.badges.length > 0
+				? `<div class="flex gap-1">${data.badges
+						.map(
+							(badge) =>
+								`<span class="rounded ${badge.tone === 'critical' ? 'bg-critical/15 text-critical' : 'bg-white/10 text-fg-muted'} px-1.5 py-0.5 text-[10px] font-medium">${escapeHtml(badge.label)}</span>`
+						)
+						.join('')}</div>`
+				: '';
+		const rowsHtml = data.fields
+			.map((field) =>
+				popupRow(
+					escapeHtml(field.label),
+					field.color
+						? `<span style="color: ${escapeHtml(field.color)}">${escapeHtml(field.value)}</span>`
+						: escapeHtml(field.value)
+				)
+			)
+			.join('');
+		const linkHtml = data.link
+			? `<a href="${escapeHtml(data.link.href)}" target="_blank" rel="noreferrer" class="text-accent hover:underline">${escapeHtml(data.link.label)} &#8599;</a>`
+			: '';
+		return `<div class="flex flex-col gap-1 text-xs"><div class="flex items-center justify-between gap-2"><p class="font-medium text-fg">${escapeHtml(data.title)}</p>${badgeHtml}</div>${rowsHtml}${linkHtml}</div>`;
+	}
+
+	function obstacleFeatureData(properties: Record<string, unknown>): PointFeatureData {
+		const fields: PointFeatureField[] = [];
+		if (typeof properties.heightM === 'number') {
+			fields.push({
+				label: 'Height',
+				value: formatAltitude(properties.heightM, unitsStore.current)
+			});
 		}
 		if (typeof properties.elevationM === 'number') {
-			rows.push(
-				popupRow('Elevation', `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`)
-			);
+			fields.push({
+				label: 'Elevation',
+				value: `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`
+			});
 		}
 		if (typeof properties.countryCode === 'string') {
-			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
+			fields.push({ label: 'Country', value: properties.countryCode });
+		}
+		return {
+			title: typeof properties.name === 'string' ? properties.name : 'Obstacle',
+			fields,
+			link:
+				typeof properties.wikipediaUrl === 'string'
+					? { label: 'Wikipedia', href: properties.wikipediaUrl }
+					: undefined
+		};
+	}
+
+	function airportFeatureData(properties: Record<string, unknown>): PointFeatureData {
+		const fields: PointFeatureField[] = [];
+		if (typeof properties.icaoCode === 'string') {
+			fields.push({ label: 'ICAO', value: properties.icaoCode });
+		}
+		if (typeof properties.elevationM === 'number') {
+			fields.push({
+				label: 'Elevation',
+				value: `${formatAltitude(properties.elevationM, unitsStore.current)} AMSL`
+			});
+		}
+		if (typeof properties.countryCode === 'string') {
+			fields.push({ label: 'Country', value: properties.countryCode });
 		}
 		// Only rendered when true - most airports are neither, and a blank
 		// "Access: none" row for the common case would just be noise.
@@ -1091,9 +1243,9 @@
 		if (properties.isPrivate === true) accessNotes.push('Private');
 		if (properties.requiresPpr === true) accessNotes.push('PPR required');
 		if (accessNotes.length > 0) {
-			rows.push(popupRow('Access', escapeHtml(accessNotes.join(', '))));
+			fields.push({ label: 'Access', value: accessNotes.join(', ') });
 		}
-		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}</div>`;
+		return { title: typeof properties.name === 'string' ? properties.name : 'Airport', fields };
 	}
 
 	const KNOTS_TO_MS = 0.514444;
@@ -1118,7 +1270,13 @@
 	// point per airport to hang it off of. wspd/wdir/temp/visib/altim/fltCat
 	// field names and units (wspd in knots, temp/altim in Celsius/hPa)
 	// confirmed against a real Schiphol report.
-	async function fetchMetarHtml(properties: Record<string, unknown>): Promise<string | undefined> {
+	// Structured, not pre-built HTML (same AircraftEnrichment-style split
+	// as everything else in this file now) - both the desktop popup's own
+	// appended fragment and the mobile sheet's extra rows render from
+	// these same fields.
+	async function fetchMetarFields(
+		properties: Record<string, unknown>
+	): Promise<PointFeatureField[] | undefined> {
 		const icaoCode = properties.icaoCode;
 		if (typeof icaoCode !== 'string') return undefined;
 		try {
@@ -1130,39 +1288,34 @@
 			const report = Array.isArray(body) ? body[0] : undefined;
 			if (typeof report !== 'object' || report === null) return undefined;
 			const data = report as Record<string, unknown>;
-			const rows: string[] = [];
+			const fields: PointFeatureField[] = [];
 			// Flight category first - the single field a pilot-facing METAR
 			// display leads with, since it's the one-glance answer to "is it
 			// safe-looking VMC or not", derived by NOAA itself from the same
 			// visibility/ceiling data reported below rather than this app
 			// guessing at a threshold.
 			if (typeof data.fltCat === 'string' && data.fltCat) {
-				rows.push(
-					popupRow(
-						'Flight category',
-						FLIGHT_CATEGORY_LABELS[data.fltCat] ?? escapeHtml(data.fltCat)
-					)
-				);
+				fields.push({
+					label: 'Flight category',
+					value: FLIGHT_CATEGORY_LABELS[data.fltCat] ?? data.fltCat
+				});
 			}
 			if (typeof data.wdir === 'number' && typeof data.wspd === 'number') {
-				rows.push(
-					popupRow(
-						'Wind',
-						`${data.wdir}&deg; ${formatVehicleSpeed(data.wspd * KNOTS_TO_MS, unitsStore.current)}`
-					)
-				);
+				fields.push({
+					label: 'Wind',
+					value: `${data.wdir}° ${formatVehicleSpeed(data.wspd * KNOTS_TO_MS, unitsStore.current)}`
+				});
 			}
 			if (typeof data.temp === 'number') {
-				rows.push(popupRow('Temp', `${data.temp}&deg;C`));
+				fields.push({ label: 'Temp', value: `${data.temp}°C` });
 			}
 			if (typeof data.visib === 'string' || typeof data.visib === 'number') {
-				rows.push(popupRow('Visibility', `${escapeHtml(String(data.visib))} mi`));
+				fields.push({ label: 'Visibility', value: `${String(data.visib)} mi` });
 			}
 			if (typeof data.altim === 'number') {
-				rows.push(popupRow('Pressure', formatPressure(data.altim, unitsStore.current)));
+				fields.push({ label: 'Pressure', value: formatPressure(data.altim, unitsStore.current) });
 			}
-			if (rows.length === 0) return undefined;
-			return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
+			return fields.length > 0 ? fields : undefined;
 		} catch {
 			// Same "reassuring, not alarming" philosophy as the viewport
 			// layers' own loadError handling - a failed weather enrichment
@@ -1172,16 +1325,34 @@
 		}
 	}
 
-	function buildCityPopupHtml(properties: Record<string, unknown>): string {
-		const name = typeof properties.name === 'string' ? properties.name : 'City';
-		const rows: string[] = [];
+	// Appended fragment shape (not a full renderPointFeatureHtml card) -
+	// the desktop popup's own fetchExtra contract is "HTML to append to
+	// what's already showing", mirrored here exactly for Airport's own
+	// METAR enrichment the same way fetchAircraftEnrichment's own
+	// aircraftEnrichmentPopupHtml does for the aircraft popup.
+	function renderPointFeatureExtraHtml(fields: PointFeatureField[]): string {
+		const rowsHtml = fields
+			.map((field) =>
+				popupRow(
+					escapeHtml(field.label),
+					field.color
+						? `<span style="color: ${escapeHtml(field.color)}">${escapeHtml(field.value)}</span>`
+						: escapeHtml(field.value)
+				)
+			)
+			.join('');
+		return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rowsHtml}</div>`;
+	}
+
+	function cityFeatureData(properties: Record<string, unknown>): PointFeatureData {
+		const fields: PointFeatureField[] = [];
 		if (typeof properties.countryCode === 'string') {
-			rows.push(popupRow('Country', escapeHtml(properties.countryCode)));
+			fields.push({ label: 'Country', value: properties.countryCode });
 		}
 		if (typeof properties.population === 'number') {
-			rows.push(popupRow('Population', properties.population.toLocaleString('en-US')));
+			fields.push({ label: 'Population', value: properties.population.toLocaleString('en-US') });
 		}
-		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">${escapeHtml(name)}</p>${rows.join('')}</div>`;
+		return { title: typeof properties.name === 'string' ? properties.name : 'City', fields };
 	}
 
 	// Raw ADS-B emergency status strings (DO-260B) -> readable labels.
@@ -1431,23 +1602,16 @@
 		return `<div class="mt-2 flex flex-col gap-1 border-t border-edge pt-2 text-xs">${rows.join('')}</div>`;
 	}
 
-	function buildEarthquakePopupHtml(properties: Record<string, unknown>): string {
-		const place = typeof properties.place === 'string' ? properties.place : 'Earthquake';
-		const badges: string[] = [];
-		if (properties.tsunamiWarning === true) {
-			badges.push(
-				'<span class="rounded bg-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-critical">TSUNAMI</span>'
-			);
-		}
-		const rows: string[] = [];
+	function earthquakeFeatureData(properties: Record<string, unknown>): PointFeatureData {
+		const fields: PointFeatureField[] = [];
 		if (typeof properties.magnitude === 'number') {
-			rows.push(popupRow('Magnitude', properties.magnitude.toFixed(1)));
+			fields.push({ label: 'Magnitude', value: properties.magnitude.toFixed(1) });
 		}
 		if (typeof properties.depthKm === 'number') {
-			rows.push(popupRow('Depth', `${properties.depthKm.toFixed(0)} km`));
+			fields.push({ label: 'Depth', value: `${properties.depthKm.toFixed(0)} km` });
 		}
 		if (typeof properties.timeMs === 'number') {
-			rows.push(popupRow('When', new Date(properties.timeMs).toLocaleString()));
+			fields.push({ label: 'When', value: new Date(properties.timeMs).toLocaleString() });
 		}
 		// USGS's own PAGER estimated-impact color ('green'/'yellow'/'orange'/
 		// 'red') is already a valid CSS color keyword - used directly rather
@@ -1456,44 +1620,45 @@
 		// inventing. Most events never get one at all (PAGER only runs when
 		// real human impact is likely), so this only shows when present.
 		if (typeof properties.alertLevel === 'string' && properties.alertLevel) {
-			const level = properties.alertLevel;
-			rows.push(
-				popupRow(
-					'PAGER alert',
-					`<span style="color: ${escapeHtml(level)}">${escapeHtml(level)}</span>`
-				)
-			);
+			fields.push({
+				label: 'PAGER alert',
+				value: properties.alertLevel,
+				color: properties.alertLevel
+			});
 		}
-		const badgeHtml = badges.length > 0 ? `<div class="flex gap-1">${badges.join('')}</div>` : '';
-		let detailsLink = '';
-		if (typeof properties.detailsUrl === 'string') {
-			const href = escapeHtml(properties.detailsUrl);
-			detailsLink = `<a href="${href}" target="_blank" rel="noreferrer" class="text-accent hover:underline">USGS details &#8599;</a>`;
-		}
-		return `<div class="flex flex-col gap-1 text-xs"><div class="flex items-center justify-between gap-2"><p class="font-medium text-fg">${escapeHtml(place)}</p>${badgeHtml}</div>${rows.join('')}${detailsLink}</div>`;
+		return {
+			title: typeof properties.place === 'string' ? properties.place : 'Earthquake',
+			badges:
+				properties.tsunamiWarning === true ? [{ label: 'TSUNAMI', tone: 'critical' }] : undefined,
+			fields,
+			link:
+				typeof properties.detailsUrl === 'string'
+					? { label: 'USGS details', href: properties.detailsUrl }
+					: undefined
+		};
 	}
 
-	function buildWildfirePopupHtml(properties: Record<string, unknown>): string {
-		const rows: string[] = [];
+	function wildfireFeatureData(properties: Record<string, unknown>): PointFeatureData {
+		const fields: PointFeatureField[] = [];
 		if (typeof properties.brightnessK === 'number') {
-			rows.push(popupRow('Brightness', `${properties.brightnessK.toFixed(0)} K`));
+			fields.push({ label: 'Brightness', value: `${properties.brightnessK.toFixed(0)} K` });
 		}
 		if (typeof properties.frpMw === 'number') {
-			rows.push(popupRow('Radiative power', `${properties.frpMw.toFixed(1)} MW`));
+			fields.push({ label: 'Radiative power', value: `${properties.frpMw.toFixed(1)} MW` });
 		}
 		if (typeof properties.confidence === 'string') {
-			rows.push(popupRow('Confidence', escapeHtml(properties.confidence)));
+			fields.push({ label: 'Confidence', value: properties.confidence });
 		}
 		if (typeof properties.acquiredAtIso === 'string') {
-			rows.push(popupRow('Detected', escapeHtml(properties.acquiredAtIso)));
+			fields.push({ label: 'Detected', value: properties.acquiredAtIso });
 		}
 		// A daytime detection carries a real caveat VIIRS itself documents
 		// (solar reflection can inflate the thermal signal vs. a nighttime
 		// read) - worth surfacing, not just trivia.
 		if (typeof properties.isNightDetection === 'boolean') {
-			rows.push(popupRow('Detected at', properties.isNightDetection ? 'Night' : 'Day'));
+			fields.push({ label: 'Detected at', value: properties.isNightDetection ? 'Night' : 'Day' });
 		}
-		return `<div class="flex flex-col gap-1 text-xs"><p class="font-medium text-fg">Fire hotspot</p>${rows.join('')}</div>`;
+		return { title: 'Fire hotspot', fields };
 	}
 
 	// Shared hover-popup wiring for a point layer: shows whatever
@@ -1553,26 +1718,36 @@
 	function wirePointLayerPopup(
 		targetMap: maplibregl.Map,
 		layerId: string,
-		buildHtml: (properties: Record<string, unknown>) => string,
+		getData: (properties: Record<string, unknown>) => PointFeatureData,
 		// Optional: for a layer whose popup can show more than what's already
 		// in its GeoJSON properties (only the airport layer uses this, for
 		// live METAR weather) - runs after the popup is already showing
-		// buildHtml()'s own synchronous content, and appends whatever this
+		// getData()'s own synchronous content, and appends whatever this
 		// resolves to once it does. Checked against the popup instance that
 		// was open when the fetch started, not just "is a popup open right
 		// now": the operator may have moved to a different point (or closed
 		// it) before a slow request resolves, and a stale fetch should never
 		// overwrite whatever's showing by the time it lands.
-		fetchExtra?: (properties: Record<string, unknown>) => Promise<string | undefined>
+		fetchExtra?: (properties: Record<string, unknown>) => Promise<PointFeatureField[] | undefined>
 	): void {
+		// Desktop's own hover popup only - see supportsHoverPopups's own
+		// comment (aircraftMarkerElement) for why touch needs this gated
+		// off instead of firing unconditionally. Tap-to-select below
+		// (selectedPointFeature) is this layer's mobile equivalent,
+		// wired unconditionally the same reasoning as aircraft's own
+		// click handler: harmless on desktop (hover already showed this),
+		// and no isMobile check is available in this shared component
+		// anyway.
 		targetMap.on('mouseenter', layerId, (event) => {
+			if (!supportsHoverPopups) return;
 			targetMap.getCanvas().style.cursor = 'pointer';
 			cancelPopupClose();
 			const feature = event.features?.[0];
 			if (!feature || feature.geometry.type !== 'Point') return;
 			const [lon, lat] = feature.geometry.coordinates as [number, number];
 			const properties = feature.properties ?? {};
-			const baseHtml = buildHtml(properties);
+			const data = getData(properties);
+			const baseHtml = renderPointFeatureHtml(data);
 			openPopup?.remove();
 			const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 })
 				.setLngLat([lon, lat])
@@ -1583,13 +1758,35 @@
 			popupEl.addEventListener('mouseenter', cancelPopupClose);
 			popupEl.addEventListener('mouseleave', schedulePopupClose);
 			if (fetchExtra) {
-				void fetchExtra(properties).then((extraHtml) => {
-					if (openPopup !== popup || !extraHtml) return;
-					popup.setHTML(baseHtml + extraHtml);
+				void fetchExtra(properties).then((extraFields) => {
+					if (openPopup !== popup || !extraFields) return;
+					popup.setHTML(baseHtml + renderPointFeatureExtraHtml(extraFields));
 				});
 			}
 		});
+		targetMap.on('click', layerId, (event) => {
+			const feature = event.features?.[0];
+			if (!feature || feature.geometry.type !== 'Point') return;
+			const [lon, lat] = feature.geometry.coordinates as [number, number];
+			const properties = feature.properties ?? {};
+			// Close any open hover popup before selecting - confirmed live
+			// as a real bug otherwise: selecting a feature here also
+			// deselects any selected ward (selectPointFeature below), which
+			// can collapse a consuming app's own ward-detail panel and
+			// reflow this map's own container, shifting a still-open hover
+			// popup (the mouse was still resting on the dot, so it was
+			// never getting a mouseleave to close it on its own) to a new
+			// screen position that can end up sitting directly over the
+			// clicked point, silently absorbing every click after the
+			// first. The selection sheet below replaces the popup's own
+			// content anyway, so there's nothing lost by closing it here.
+			cancelPopupClose();
+			openPopup?.remove();
+			openPopup = undefined;
+			selectPointFeature(layerId, [lon, lat], getData(properties), properties, fetchExtra);
+		});
 		targetMap.on('mouseleave', layerId, () => {
+			if (!supportsHoverPopups) return;
 			targetMap.getCanvas().style.cursor = '';
 			schedulePopupClose();
 		});
@@ -2391,11 +2588,11 @@
 				},
 				ROUTE_SOURCE
 			);
-			wirePointLayerPopup(created, OBSTACLE_LAYER, buildObstaclePopupHtml);
-			wirePointLayerPopup(created, AIRPORT_LAYER, buildAirportPopupHtml, fetchMetarHtml);
-			wirePointLayerPopup(created, CITY_LAYER, buildCityPopupHtml);
-			wirePointLayerPopup(created, EARTHQUAKE_LAYER, buildEarthquakePopupHtml);
-			wirePointLayerPopup(created, WILDFIRE_LAYER, buildWildfirePopupHtml);
+			wirePointLayerPopup(created, OBSTACLE_LAYER, obstacleFeatureData);
+			wirePointLayerPopup(created, AIRPORT_LAYER, airportFeatureData, fetchMetarFields);
+			wirePointLayerPopup(created, CITY_LAYER, cityFeatureData);
+			wirePointLayerPopup(created, EARTHQUAKE_LAYER, earthquakeFeatureData);
+			wirePointLayerPopup(created, WILDFIRE_LAYER, wildfireFeatureData);
 			// flown-path trails: above geozones (so a zone fill doesn't visually
 			// bury them), below the mission-route line (a planned route stays
 			// the most prominent line on the map) - a real Marker exists on top
@@ -4400,6 +4597,63 @@
 				</dl>
 			</div>
 		{/if}
+	{/if}
+
+	{#if selectedPointFeature}
+		{@const selected = selectedPointFeature}
+		<!-- Mobile only (max-md:flex): tap-to-select's own info sheet for
+		     Obstacles/Airports/Cities/Earthquakes/Wildfires, same shape as
+		     the aircraft sheet above (and for the same reason: no isMobile
+		     check available in this shared component). Desktop keeps its
+		     existing hover popup unchanged; this never renders there. -->
+		<div
+			bind:clientHeight={pointFeatureSheetMobileHeight}
+			class="fixed bottom-0 z-[45] hidden flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel max-md:flex"
+			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); max-height: var(--mobile-sheet-max-height, 80vh)"
+		>
+			<SheetHeader title={selected.data.title} onclose={() => (selectedPointFeature = undefined)}>
+				{#snippet extra()}
+					{#each selected.data.badges ?? [] as badge (badge.label)}
+						<span
+							class="rounded px-1.5 py-0.5 text-[10px] font-medium {badge.tone === 'critical'
+								? 'bg-critical/15 text-critical'
+								: 'bg-white/10 text-fg-muted'}"
+						>
+							{badge.label}
+						</span>
+					{/each}
+				{/snippet}
+			</SheetHeader>
+			<dl
+				class="flex flex-col gap-1.5 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] text-[11px] text-fg-muted"
+			>
+				{#each selected.data.fields as field (field.label)}
+					<div class="flex justify-between gap-2">
+						<dt>{field.label}</dt>
+						<dd style={field.color ? `color: ${field.color}` : undefined}>{field.value}</dd>
+					</div>
+				{/each}
+				{#each selectedPointFeatureExtraFields ?? [] as field (field.label)}
+					<div class="flex justify-between gap-2">
+						<dt>{field.label}</dt>
+						<dd style={field.color ? `color: ${field.color}` : undefined}>{field.value}</dd>
+					</div>
+				{/each}
+				{#if selected.data.link}
+					<!-- selected.data.link.href is always a hardcoded, fully-qualified external https:// URL (Wikipedia/USGS), never an internal route - resolve() is for this app's own route ids. -->
+					<!-- eslint-disable svelte/no-navigation-without-resolve -->
+					<a
+						href={selected.data.link.href}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="mt-1 text-accent hover:underline"
+					>
+						{selected.data.link.label}
+					</a>
+					<!-- eslint-enable svelte/no-navigation-without-resolve -->
+				{/if}
+			</dl>
+		</div>
 	{/if}
 
 	{#snippet layersMenuContent()}
