@@ -129,12 +129,49 @@
 	// filters out the smaller viewport deltas a browser chrome bar
 	// showing/hiding can also cause, which aren't the keyboard.
 	let keyboardInset = $state(0);
+
+	function isTextInput(
+		el: EventTarget | Element | null
+	): el is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+		return (
+			el instanceof HTMLInputElement ||
+			el instanceof HTMLTextAreaElement ||
+			el instanceof HTMLSelectElement
+		);
+	}
+
+	// Scrolls whatever's currently focused back into this panel's own
+	// scrollable area - belt-and-braces alongside keyboardInset: that
+	// shifts the whole panel clear of the keyboard, but a panel taller
+	// than the space left above it still needs its own scroll position
+	// adjusted to bring the specific focused field into view, the same way
+	// any other overflow-y-auto container would. Called from two places
+	// (see below), not just once on focus - confirmed live as a real bug
+	// otherwise: an `autofocus` field (e.g. zones-tab.svelte's "Zone name",
+	// focused the instant its form mounts, before the user has tapped
+	// anything) fires this before the keyboard has actually opened, so
+	// scrollIntoView ran against the still-full-height viewport, decided
+	// the field was already visible, and did nothing - then the keyboard
+	// animated up afterward and covered it anyway, with nothing left to
+	// re-trigger a second scroll. Re-running this on every
+	// visualViewport resize (below) closes that race: it doesn't matter
+	// whether the keyboard opened before or after the field was focused,
+	// each actual size change re-checks whatever's focused right now.
+	function scrollFocusedIntoView() {
+		const active = document.activeElement;
+		if (!isTextInput(active) || !panelEl?.contains(active)) return;
+		requestAnimationFrame(() => {
+			active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		});
+	}
+
 	$effect(() => {
 		if (!open || typeof window === 'undefined' || !window.visualViewport) return;
 		const viewport = window.visualViewport;
 		function update() {
 			const delta = window.innerHeight - viewport.height;
 			keyboardInset = delta > 100 ? delta : 0;
+			scrollFocusedIntoView();
 		}
 		update();
 		viewport.addEventListener('resize', update);
@@ -144,26 +181,14 @@
 		};
 	});
 
-	// Scrolls the just-focused field back into this panel's own scrollable
-	// area - belt-and-braces alongside keyboardInset above: that shifts the
-	// whole panel clear of the keyboard, but a panel taller than the space
-	// left above it still needs its own scroll position adjusted to bring
-	// the specific focused field into view, the same way any other
-	// overflow-y-auto container would. rAF, not immediate: keyboardInset's
-	// own resize-driven update (and the keyboard's open animation) hasn't
-	// necessarily landed yet on the same tick as the focus event.
+	// Covers the other case: the keyboard is already open (visualViewport
+	// already settled, so no further resize event is coming) and focus
+	// just moved to a different field in the same panel - this one still
+	// needs its own scroll, which the resize-driven call above has no
+	// reason to fire again for.
 	function onfocusin(event: FocusEvent) {
-		const target = event.target;
-		if (
-			!(target instanceof HTMLInputElement) &&
-			!(target instanceof HTMLTextAreaElement) &&
-			!(target instanceof HTMLSelectElement)
-		) {
-			return;
-		}
-		requestAnimationFrame(() => {
-			target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-		});
+		if (!isTextInput(event.target)) return;
+		scrollFocusedIntoView();
 	}
 
 	// panelEl becomes undefined again whenever the panel unmounts (open
