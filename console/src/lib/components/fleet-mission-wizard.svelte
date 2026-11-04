@@ -23,7 +23,17 @@
 
 	let targetFleetId = $state<string | undefined>(undefined);
 	let targetWardIds = $state<string[]>([]);
-	let missionName = $state(`mission-${new Date().toISOString().slice(11, 19)}`);
+	// Edit must start from the mission's own existing name, not a fresh
+	// auto-generated one - confirmed live as a real bug otherwise: Save
+	// silently renamed the mission to a brand-new "mission-HH:MM:SS" every
+	// time, since this read once on mount (same non-reactive reasoning as
+	// `step` above) before this fix ever looked at the draft at all.
+	let missionName = $state(
+		fleetGroups.missionAssignmentDraft?.editingFleetMissionId
+			? (fleetGroups.fleetMissions[fleetGroups.missionAssignmentDraft.editingFleetMissionId]
+					?.missionName ?? `mission-${new Date().toISOString().slice(11, 19)}`)
+			: `mission-${new Date().toISOString().slice(11, 19)}`
+	);
 	let assignConfirmOpen = $state(false);
 
 	const draft = $derived(fleetGroups.missionAssignmentDraft);
