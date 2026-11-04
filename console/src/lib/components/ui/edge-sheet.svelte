@@ -115,6 +115,57 @@
 		if (!open) panelHeight = 0;
 	});
 
+	// How far the on-screen keyboard currently eats into the viewport from
+	// the bottom - confirmed live as a real bug otherwise: a text input
+	// inside this panel (e.g. connect-panel.svelte's "Site name") focused
+	// fine, but the keyboard opening over a plain `bottom: 0` fixed panel
+	// covered the input with no scroll/resize response at all, so the user
+	// couldn't see what they were typing. window.innerHeight stays fixed
+	// for the keyboard on every browser that matters here (iOS Safari
+	// always; Android Chrome too, unless interactive-widget=resizes-content
+	// is set, which this app's viewport meta doesn't - see app.html's own
+	// comment), so visualViewport.height is the only reliable cross-browser
+	// signal: it shrinks by the keyboard's own height. The >100px floor
+	// filters out the smaller viewport deltas a browser chrome bar
+	// showing/hiding can also cause, which aren't the keyboard.
+	let keyboardInset = $state(0);
+	$effect(() => {
+		if (!open || typeof window === 'undefined' || !window.visualViewport) return;
+		const viewport = window.visualViewport;
+		function update() {
+			const delta = window.innerHeight - viewport.height;
+			keyboardInset = delta > 100 ? delta : 0;
+		}
+		update();
+		viewport.addEventListener('resize', update);
+		return () => {
+			viewport.removeEventListener('resize', update);
+			keyboardInset = 0;
+		};
+	});
+
+	// Scrolls the just-focused field back into this panel's own scrollable
+	// area - belt-and-braces alongside keyboardInset above: that shifts the
+	// whole panel clear of the keyboard, but a panel taller than the space
+	// left above it still needs its own scroll position adjusted to bring
+	// the specific focused field into view, the same way any other
+	// overflow-y-auto container would. rAF, not immediate: keyboardInset's
+	// own resize-driven update (and the keyboard's open animation) hasn't
+	// necessarily landed yet on the same tick as the focus event.
+	function onfocusin(event: FocusEvent) {
+		const target = event.target;
+		if (
+			!(target instanceof HTMLInputElement) &&
+			!(target instanceof HTMLTextAreaElement) &&
+			!(target instanceof HTMLSelectElement)
+		) {
+			return;
+		}
+		requestAnimationFrame(() => {
+			target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		});
+	}
+
 	// panelEl becomes undefined again whenever the panel unmounts (open
 	// turns false, or peek<->expanded swaps content away from a trapping
 	// state), which reruns this effect's cleanup the same way Dialog's own
@@ -213,8 +264,9 @@
 			role="dialog"
 			aria-modal="true"
 			aria-label={label}
-			class="fixed inset-y-0 z-[45] flex w-80 max-w-[85vw] flex-col border-r border-edge bg-panel pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
-			style="left: var(--mobile-left-rail-inset, 0px)"
+			{onfocusin}
+			class="fixed top-0 z-[45] flex w-80 max-w-[85vw] flex-col border-r border-edge bg-panel pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+			style="left: var(--mobile-left-rail-inset, 0px); bottom: {keyboardInset}px"
 		>
 			{@render content()}
 		</div>
@@ -255,8 +307,9 @@
 			role={expanded ? 'dialog' : 'region'}
 			aria-modal={expanded ? 'true' : undefined}
 			aria-label={label}
-			class="fixed inset-x-0 bottom-0 z-[45] flex flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel pb-[env(safe-area-inset-bottom,0px)]"
-			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); max-height: var(--mobile-sheet-max-height, 80vh)"
+			{onfocusin}
+			class="fixed inset-x-0 z-[45] flex flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel pb-[env(safe-area-inset-bottom,0px)]"
+			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); bottom: {keyboardInset}px; max-height: var(--mobile-sheet-max-height, 80vh)"
 		>
 			{#if !expanded && peek}
 				{@render peek()}

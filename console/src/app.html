@@ -22,8 +22,17 @@
 		     resolve to real values at all (iOS returns 0 for every
 		     safe-area-inset-* without it) - EdgeSheet and its callers'
 		     icon rails already pad against these, so this needs to be set
-		     wherever this console runs full-bleed on a notched phone. -->
-		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		     wherever this console runs full-bleed on a notched phone.
+		     interactive-widget=resizes-content: Android Chrome only (iOS
+		     Safari ignores it and needs EdgeSheet's own visualViewport
+		     handling regardless, see that component's own comment) - makes
+		     the layout viewport itself shrink for the on-screen keyboard,
+		     so 100dvh-based layout already reacts correctly there without
+		     needing the same JS workaround. -->
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+		/>
 		<meta name="text-scale" content="scale" />
 		%sveltekit.head%
 	</head>
