@@ -197,7 +197,7 @@
 				min="0"
 				max="100"
 				bind:value={draft.repeatCount}
-				class="w-12 rounded border border-edge bg-ink px-1 py-0.5 font-mono text-xs tabular-nums"
+				class="w-16 rounded border border-edge bg-ink px-1 py-0.5 font-mono text-xs tabular-nums"
 			/>
 			extra passes
 		</label>
