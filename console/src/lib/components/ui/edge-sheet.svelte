@@ -130,6 +130,25 @@
 	// showing/hiding can also cause, which aren't the keyboard.
 	let keyboardInset = $state(0);
 
+	// --mobile-sheet-max-height caps a 'bottom' sheet at ~50% of the
+	// viewport (+page.svelte's own comment: "the real cap on how tall any
+	// position: fixed bottom sheet is allowed to render", deliberately
+	// leaving the other half for the map). That's the right default - but
+	// confirmed live as a real bug while the keyboard is open: the
+	// operator is actively typing into this sheet, not looking at the
+	// map, yet the cap still only gave it half the already-keyboard-
+	// shrunk screen, squeezing a short form (a name field, two radios, Save/
+	// Cancel) down to a sliver between the fixed ward-card header and the
+	// keyboard. Overriding the cap to the keyboard-open viewport's full
+	// height (ignoring the map-reservation entirely, not just making it
+	// smaller) is correct here specifically because the ward-card header
+	// above this sheet is z-[46], this sheet is z-[45] - it stays visually
+	// on top regardless of how tall this sheet's own box extends behind
+	// it, so there's nothing to protect by holding back.
+	const sheetMaxHeight = $derived(
+		keyboardInset > 0 ? `calc(100dvh - ${keyboardInset}px)` : 'var(--mobile-sheet-max-height, 80vh)'
+	);
+
 	function isTextInput(
 		el: EventTarget | Element | null
 	): el is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
@@ -334,7 +353,7 @@
 			aria-label={label}
 			{onfocusin}
 			class="fixed inset-x-0 z-[45] flex flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel pb-[env(safe-area-inset-bottom,0px)]"
-			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); bottom: {keyboardInset}px; max-height: var(--mobile-sheet-max-height, 80vh)"
+			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); bottom: {keyboardInset}px; max-height: {sheetMaxHeight}"
 		>
 			{#if !expanded && peek}
 				{@render peek()}
