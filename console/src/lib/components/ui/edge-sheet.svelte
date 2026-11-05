@@ -309,7 +309,7 @@
 			aria-modal="true"
 			aria-label={label}
 			{onfocusin}
-			class="fixed top-0 z-[45] flex w-80 max-w-[85vw] flex-col border-r border-edge bg-panel pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+			class="edge-sheet-panel fixed top-0 z-[45] flex w-80 max-w-[85vw] flex-col border-r border-edge bg-panel pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
 			style="left: var(--mobile-left-rail-inset, 0px); bottom: {keyboardInset}px"
 		>
 			{@render content()}
@@ -352,7 +352,7 @@
 			aria-modal={expanded ? 'true' : undefined}
 			aria-label={label}
 			{onfocusin}
-			class="fixed inset-x-0 z-[45] flex flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel pb-[env(safe-area-inset-bottom,0px)]"
+			class="edge-sheet-panel fixed inset-x-0 z-[45] flex flex-col overflow-y-auto rounded-t-lg border-t border-edge bg-panel pb-[env(safe-area-inset-bottom,0px)]"
 			style="left: var(--mobile-left-rail-inset, 0px); right: var(--mobile-right-rail-inset, 0px); bottom: {keyboardInset}px; max-height: {sheetMaxHeight}"
 		>
 			{#if !expanded && peek}
@@ -363,3 +363,30 @@
 		</div>
 	{/if}
 {/if}
+
+<style>
+	/* iOS Safari (and some Android browsers) auto-zoom the whole page on
+	   focus when the focused field's own font-size is under 16px - every
+	   consumer of this component picks its own (desktop-oriented) text
+	   size per field (zones-tab.svelte's text-xs, param-field-row.svelte's
+	   text-xs, etc.), all well under that. Confirmed live as a real bug,
+	   and a much worse one than the keyboard simply covering a field:
+	   the browser's own pinch-zoom state changes, the icon rails end up
+	   misaligned/cut off by the new zoom level, and the user is left
+	   pinch-zoomed in with the page's own layout fighting that zoom - not
+	   recoverable by anything this component does, since it's the
+	   browser's native response to focus, not a layout bug to fix with
+	   positioning. EdgeSheet is mobile-only everywhere it's used (every
+	   consumer gates it behind isMobile.current), so forcing every field
+	   inside it to the 16px floor unconditionally, overriding whatever
+	   smaller size each consumer's own markup set, is safe with no media
+	   query needed - nothing here ever renders on desktop. :global()
+	   reaches into the input/select/textarea each consumer's own content
+	   snippet renders, which live outside this component's own scoped
+	   markup. */
+	.edge-sheet-panel :global(input),
+	.edge-sheet-panel :global(select),
+	.edge-sheet-panel :global(textarea) {
+		font-size: 16px;
+	}
+</style>
